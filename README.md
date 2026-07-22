@@ -103,6 +103,35 @@ embeddings, rankings, summaries, and model-specific features are derived and
 replaceable. Raw events, scope, provenance, corrections, retrieval receipts,
 source handles, and closeouts remain durable.
 
+### Optional sparse wiki compiler
+
+`scripts/kimi-wiki-curator.py` can compile reviewed, high-signal evidence into
+concise `wiki_fact` beliefs and a human-readable wiki. It never selects raw
+transcript evidence, sends only bounded already-redacted evidence, rejects any
+claim whose supporting quote cannot be found verbatim in its named evidence,
+and makes no hosted call without explicit `--apply`. Confidential/prohibited
+evidence is never eligible; sending bounded internal local-only evidence also
+requires `--allow-hosted-egress`.
+
+```bash
+# Keep background harvesting in the evidence ledger, not current truth.
+ocbrain --db /absolute/core.sqlite import-history /history/root \
+  --project my-project --privacy-scope workspace --evidence-only
+
+# Preview locally, then explicitly authorize one Moonshot/Kimi compilation.
+.venv/bin/python scripts/kimi-wiki-curator.py \
+  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
+  --allow-hosted-egress
+.venv/bin/python scripts/kimi-wiki-curator.py \
+  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
+  --allow-hosted-egress --apply
+```
+
+The generated `wiki/index.md`, `wiki/pages/`, and append-only `wiki/log.md`
+follow the raw-sources-plus-derived-wiki pattern. SQLite remains authoritative;
+the Markdown wiki is a disposable current-truth materialization. Keep
+`automatic_activation` disabled when using this sparse mode.
+
 ## The runtime loop
 
 ```text

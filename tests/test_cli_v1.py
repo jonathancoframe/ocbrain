@@ -434,6 +434,88 @@ def test_v1_history_import_persists_stat_fingerprint_gate(tmp_path, capsys) -> N
     _strict_v1(db).close()
 
 
+def test_v1_history_evidence_only_keeps_transcript_out_of_serving_beliefs(tmp_path, capsys) -> None:
+    db = tmp_path / "core.sqlite"
+    history = tmp_path / ".codex" / "sessions" / "rollout.jsonl"
+    history.parent.mkdir(parents=True)
+    history.write_text(
+        json.dumps({"role": "assistant", "content": "ledger only sentinel"}) + "\n",
+        encoding="utf-8",
+    )
+
+    first = _run(
+        capsys,
+        db,
+        [
+            "import-history",
+            str(history),
+            "--project",
+            "ocbrain",
+            "--privacy-scope",
+            "workspace",
+            "--evidence-only",
+        ],
+    )
+    assert (first["imported"], first["existing"]) == (1, 0)
+    assert first["sample_files"][0]["evidence_event_id"]
+    assert first["sample_files"][0]["proposal_event_id"] is None
+    assert first["sample_files"][0]["decision_event_id"] is None
+
+    conn = _strict_v1(db)
+    assert conn.execute("SELECT count(*) FROM evidence_objects").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM current_beliefs").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM search_documents").fetchone()[0] == 0
+    conn.close()
+
+    repeated = _run(
+        capsys,
+        db,
+        [
+            "import-history",
+            str(history),
+            "--project",
+            "ocbrain",
+            "--privacy-scope",
+            "workspace",
+            "--evidence-only",
+        ],
+    )
+    assert (repeated["imported"], repeated["existing"]) == (0, 1)
+
+
+def test_v1_memory_evidence_only_keeps_source_document_out_of_serving_beliefs(
+    tmp_path, capsys
+) -> None:
+    db = tmp_path / "core.sqlite"
+    memory = tmp_path / "MEMORY.md"
+    memory.write_text(
+        "# Current truth\n\nThe service is supervised by launchd.\n", encoding="utf-8"
+    )
+
+    imported = _run(
+        capsys,
+        db,
+        [
+            "import-memory",
+            str(memory),
+            "--project",
+            "ocbrain",
+            "--privacy-scope",
+            "workspace",
+            "--evidence-only",
+        ],
+    )
+    assert imported["imported"] == 1
+    assert imported["files"][0]["evidence_event_id"]
+    assert imported["files"][0]["proposal_event_id"] is None
+    assert imported["files"][0]["decision_event_id"] is None
+
+    conn = _strict_v1(db)
+    assert conn.execute("SELECT count(*) FROM evidence_objects").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM current_beliefs").fetchone()[0] == 0
+    conn.close()
+
+
 def test_v1_history_import_commits_per_file(tmp_path, capsys, monkeypatch):
     """The writer lock must be released between files: one implicit
     transaction spanning many slow redactions blocks every concurrent MCP
@@ -624,6 +706,31 @@ def test_history_window_streams_and_redacts_multiline_private_keys(tmp_path, mon
     assert "[REDACTED_PRIVATE_KEY]" in window
     assert "tail-visible" in window
     assert "bytes omitted from middle" in window
+
+
+def test_history_window_bounds_redaction_work_for_large_active_transcripts(
+    tmp_path, monkeypatch
+) -> None:
+    history = tmp_path / "large-active-history.jsonl"
+    history.write_bytes(
+        b'{"message":"head-visible"}\n'
+        + (b'{"message":"middle"}\n' * 60_000)
+        + b"-----BEGIN PRIVATE KEY-----\n"
+        + (b"private-material-that-must-not-survive\n" * 3_000)
+        + b"-----END PRIVATE KEY-----\n"
+        + b'{"message":"tail-visible"}\n'
+    )
+
+    def refuse_full_redaction(_path):
+        raise AssertionError("large history window must not regex-scan the complete transcript")
+
+    monkeypatch.setattr(cli_module, "iter_redacted_history", refuse_full_redaction)
+    window = cli_module.history_text_window(history, max_bytes=1_024)
+
+    assert "head-visible" in window
+    assert "tail-visible" in window
+    assert "private-material" not in window
+    assert "source bytes omitted from middle" in window
 
 
 def test_history_dry_run_streams_without_opening_the_database(

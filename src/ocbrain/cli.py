@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import re
 import sys
 from importlib.metadata import entry_points
@@ -375,6 +376,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scan, redact, and report planned imports without opening the database",
     )
+    import_memory_parser.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append memory-file evidence without promoting the whole file into a serving belief",
+    )
     import_memory_parser.set_defaults(func=cmd_import_memory)
 
     import_history_parser = subparsers.add_parser(
@@ -403,6 +409,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         type=int,
         default=500,
         help="Commit after this many imported files",
+    )
+    import_history_parser.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append transcript evidence without promoting whole transcripts into serving beliefs",
     )
     import_history_parser.add_argument(
         "--dry-run",
@@ -985,6 +996,11 @@ def build_parser() -> argparse.ArgumentParser:
     import_memory.add_argument("--limit", type=int)
     import_memory.add_argument("--max-bytes", type=int, default=50_000)
     import_memory.add_argument("--dry-run", action="store_true")
+    import_memory.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append memory-file evidence without promoting the whole file into a serving belief",
+    )
     import_memory.set_defaults(func=cmd_import_memory)
 
     import_history = commands.add_parser(
@@ -1002,6 +1018,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=500,
         help="Deprecated: history imports commit per file to bound SQLite writer-lock windows",
+    )
+    import_history.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append transcript evidence without promoting whole transcripts into serving beliefs",
     )
     import_history.add_argument("--dry-run", action="store_true")
     import_history.set_defaults(func=cmd_import_history)
@@ -2282,6 +2303,7 @@ def cmd_import_memory(args: argparse.Namespace) -> int:
                     project=args.project,
                     privacy_scope=args.privacy_scope,
                     max_bytes=args.max_bytes,
+                    activate=not args.evidence_only,
                 )
             else:
                 result = import_memory_file(
@@ -2363,6 +2385,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
                     project=args.project,
                     privacy_scope=args.privacy_scope,
                     max_bytes=args.max_bytes,
+                    activate=not args.evidence_only,
                 )
             else:
                 result = import_history_file(
@@ -2626,6 +2649,7 @@ def import_memory_file_v1(
     project: str | None,
     privacy_scope: str,
     max_bytes: int,
+    activate: bool = True,
 ) -> dict[str, object] | None:
     raw = path.read_text(encoding="utf-8", errors="replace")
     if not raw.strip():
@@ -2645,6 +2669,7 @@ def import_memory_file_v1(
         project=project,
         privacy_scope=privacy_scope,
         confidence=0.7,
+        activate=activate,
     )
 
 
@@ -2655,6 +2680,7 @@ def import_history_file_v1(
     project: str | None,
     privacy_scope: str,
     max_bytes: int,
+    activate: bool = True,
 ) -> dict[str, object] | None:
     if path.stat().st_size == 0:
         return None
@@ -2670,6 +2696,7 @@ def import_history_file_v1(
         project=project,
         privacy_scope=privacy_scope,
         confidence=0.55,
+        activate=activate,
     )
 
 
@@ -2684,6 +2711,7 @@ def import_source_v1(
     project: str | None,
     privacy_scope: str,
     confidence: float,
+    activate: bool = True,
 ) -> dict[str, object]:
     source_uri = str(path.resolve())
     scope = scope_for_privacy(project, privacy_scope)
@@ -2712,7 +2740,7 @@ def import_source_v1(
     )
     proposal_id = None
     decision_id = None
-    if not unchanged:
+    if activate and not unchanged:
         proposal_id = append_core_event(
             conn,
             "compilation_proposed",
@@ -2747,7 +2775,7 @@ def import_source_v1(
         "evidence_event_id": evidence_event_id,
         "proposal_event_id": proposal_id,
         "decision_event_id": decision_id,
-        "changed": bool(evidence_event_id or not unchanged),
+        "changed": bool(evidence_event_id or (activate and not unchanged)),
     }
 
 
@@ -2968,32 +2996,65 @@ def current_history_fingerprints(conn) -> dict[tuple[str, str], str]:
     }
 
 
+def _iter_redacted_lines(lines, *, in_private_key: bool = False):
+    for raw_line in lines:
+        remaining = raw_line
+        while remaining:
+            if in_private_key:
+                end = _PRIVATE_KEY_END_RE.search(remaining)
+                if end is None:
+                    break
+                remaining = remaining[end.end() :]
+                in_private_key = False
+                continue
+
+            begin = _PRIVATE_KEY_BEGIN_RE.search(remaining)
+            if begin is None:
+                yield redact_secrets(remaining)
+                break
+
+            prefix = remaining[: begin.start()]
+            if prefix:
+                yield redact_secrets(prefix)
+            yield "[REDACTED_PRIVATE_KEY]"
+            remaining = remaining[begin.end() :]
+            in_private_key = True
+
+
 def iter_redacted_history(path: Path):
     """Yield redacted history text without loading the whole file at once."""
-    in_private_key = False
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        for raw_line in handle:
-            remaining = raw_line
-            while remaining:
-                if in_private_key:
-                    end = _PRIVATE_KEY_END_RE.search(remaining)
-                    if end is None:
-                        break
-                    remaining = remaining[end.end() :]
-                    in_private_key = False
-                    continue
+        yield from _iter_redacted_lines(handle)
 
-                begin = _PRIVATE_KEY_BEGIN_RE.search(remaining)
-                if begin is None:
-                    yield redact_secrets(remaining)
-                    break
 
-                prefix = remaining[: begin.start()]
-                if prefix:
-                    yield redact_secrets(prefix)
-                yield "[REDACTED_PRIVATE_KEY]"
-                remaining = remaining[begin.end() :]
-                in_private_key = True
+def _private_key_state_at(handle, offset: int) -> bool:
+    """Return whether ``offset`` lies inside a PEM private-key block."""
+    if offset <= 0:
+        return False
+    with mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ) as mapped:
+        state = False
+        cursor = 0
+        needle = b"PRIVATE KEY-----"
+        while True:
+            found = mapped.find(needle, cursor, offset)
+            if found < 0:
+                return state
+            prefix = mapped[max(0, found - 80) : found]
+            begin = prefix.rfind(b"-----BEGIN ")
+            end = prefix.rfind(b"-----END ")
+            if begin >= 0 and begin > end:
+                state = True
+            elif end >= 0:
+                state = False
+            cursor = found + len(needle)
+
+
+def _redact_history_fragment(raw: bytes, *, in_private_key: bool = False) -> bytes:
+    text = raw.decode("utf-8", errors="replace")
+    redacted = "".join(
+        _iter_redacted_lines(text.splitlines(keepends=True), in_private_key=in_private_key)
+    )
+    return redacted.encode("utf-8", errors="replace")
 
 
 def history_text_window(path: Path, *, max_bytes: int) -> str:
@@ -3001,40 +3062,38 @@ def history_text_window(path: Path, *, max_bytes: int) -> str:
         return ""
     head_len = max_bytes // 2
     tail_len = max_bytes - head_len
-    head = bytearray()
-    tail = bytearray()
-    complete = bytearray()
-    total = 0
+    source_bytes = path.stat().st_size
+    sample_span = max(max_bytes * 4, 65_536)
 
-    for redacted in iter_redacted_history(path):
-        data = redacted.encode("utf-8", errors="replace")
-        prior_total = total
-        total += len(data)
+    if source_bytes <= sample_span:
+        complete = "".join(iter_redacted_history(path)).encode("utf-8", errors="replace")
+        if len(complete) <= max_bytes:
+            return complete.decode("utf-8", errors="replace")
+        marker = f"\n\n[... {len(complete) - max_bytes} bytes omitted from middle ...]\n\n".encode()
+        return (complete[:head_len] + marker + complete[-tail_len:]).decode(
+            "utf-8", errors="replace"
+        )
 
-        if len(head) < head_len:
-            needed = head_len - len(head)
-            head.extend(data[:needed])
+    with path.open("rb") as handle:
+        head_raw = handle.read(sample_span)
+        # Drop a partially sampled history record; a credential could cross
+        # that arbitrary byte boundary and evade pattern-based redaction.
+        newline = head_raw.rfind(b"\n")
+        head_raw = head_raw[: newline + 1] if newline >= 0 else b""
 
-        if tail_len:
-            if len(data) >= tail_len:
-                tail[:] = data[-tail_len:]
-            else:
-                overflow = max(len(tail) + len(data) - tail_len, 0)
-                if overflow:
-                    del tail[:overflow]
-                tail.extend(data)
+        tail_offset = max(source_bytes - sample_span, 0)
+        tail_private = _private_key_state_at(handle, tail_offset)
+        handle.seek(tail_offset)
+        tail_raw = handle.read()
+        newline = tail_raw.find(b"\n")
+        if tail_offset:
+            tail_raw = tail_raw[newline + 1 :] if newline >= 0 else b""
 
-        if total <= max_bytes:
-            complete.extend(data)
-        elif prior_total <= max_bytes:
-            complete.clear()
-
-    if total <= max_bytes:
-        data = bytes(complete)
-    else:
-        marker = f"\n\n[... {total - max_bytes} bytes omitted from middle ...]\n\n".encode()
-        data = bytes(head) + marker + bytes(tail)
-    return data.decode("utf-8", errors="replace")
+    head = _redact_history_fragment(head_raw)[:head_len]
+    tail = _redact_history_fragment(tail_raw, in_private_key=tail_private)[-tail_len:]
+    omitted = max(source_bytes - len(head_raw) - len(tail_raw), 0)
+    marker = f"\n\n[... {omitted} source bytes omitted from middle ...]\n\n".encode()
+    return (head + marker + tail).decode("utf-8", errors="replace")
 
 
 def history_title(path: Path, runtime: str) -> str:
