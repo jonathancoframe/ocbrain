@@ -25,6 +25,7 @@ from ocbrain.core_v1 import append_core_event, get_core_v1_belief, is_core_v1
 from ocbrain.db import connect
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
+from ocbrain.wiki import current_wiki_beliefs, materialize_wiki
 
 ELIGIBLE_KINDS = frozenset(
     {
@@ -94,7 +95,11 @@ def load_env_value(path: Path, name: str) -> str | None:
 
 
 def select_evidence(
-    conn, *, limit: int, allow_hosted_egress: bool = False
+    conn,
+    *,
+    limit: int,
+    allow_hosted_egress: bool = False,
+    project: str | None = None,
 ) -> list[dict[str, Any]]:
     placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
     egress_policies = (
@@ -103,6 +108,8 @@ def select_evidence(
         else ("hosted_ok",)
     )
     egress_placeholders = ",".join("?" for _ in egress_policies)
+    scope_clause = " AND scope_id = ?" if project else ""
+    scope_params: tuple[str, ...] = (f"project:{project}",) if project else ()
     rows = [
         dict(row)
         for row in conn.execute(
@@ -113,9 +120,10 @@ def select_evidence(
             WHERE kind IN ({placeholders})
               AND visibility IN ('public', 'internal')
               AND egress_policy IN ({egress_placeholders})
+              {scope_clause}
             ORDER BY recorded_at DESC, evidence_id DESC
             """,
-            (*tuple(sorted(ELIGIBLE_KINDS)), *egress_policies),
+            (*tuple(sorted(ELIGIBLE_KINDS)), *egress_policies, *scope_params),
         )
     ]
 
@@ -139,32 +147,6 @@ def select_evidence(
     return selected
 
 
-def current_wiki_beliefs(conn) -> list[dict[str, Any]]:
-    beliefs: list[dict[str, Any]] = []
-    for row in conn.execute(
-        """
-        SELECT belief_id, body, attributes_json, confidence, evidence_ids, last_compiled_at
-        FROM current_beliefs
-        WHERE status='current' AND serve=1 AND belief_type='wiki_fact'
-        ORDER BY belief_id
-        """
-    ):
-        attributes = json.loads(row["attributes_json"] or "{}")
-        beliefs.append(
-            {
-                "belief_id": str(row["belief_id"]),
-                "key": attributes.get("key"),
-                "title": attributes.get("title"),
-                "body": str(row["body"]),
-                "category": attributes.get("category"),
-                "confidence": row["confidence"],
-                "evidence_ids": json.loads(row["evidence_ids"] or "[]"),
-                "updated_at": str(row["last_compiled_at"]),
-            }
-        )
-    return beliefs
-
-
 def input_digest(evidence: list[dict[str, Any]], existing: list[dict[str, Any]]) -> str:
     # The digest tracks source changes only. Existing wiki facts are compiler output;
     # including them would make every successful run invalidate its own cache.
@@ -185,6 +167,7 @@ def request_kimi(
     evidence: list[dict[str, Any]],
     existing: list[dict[str, Any]],
     max_beliefs: int,
+    max_tokens: int = 6_000,
 ) -> dict[str, Any]:
     source_blocks = []
     for row in evidence:
@@ -212,7 +195,7 @@ def request_kimi(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 1 if model.startswith("kimi-") else 0.1,
-        "max_tokens": 6_000,
+        "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
     request = urllib.request.Request(
@@ -235,11 +218,32 @@ def request_kimi(
         raise RuntimeError("Kimi API returned no choices")
     finish_reason = choices[0].get("finish_reason")
     content = choices[0].get("message", {}).get("content")
+    # Budget exhaustion must be diagnosed BEFORE the empty-content check.
+    # Thinking models (kimi-k2.5, kimi-k2.6) spend the entire max_tokens budget
+    # on reasoning_tokens under this prompt's strict quote-length rules and come
+    # back with finish_reason="length" and content="" — reporting that as an
+    # "empty message" hides the real cause and sends the operator hunting for a
+    # transport or auth fault. Ask for fewer beliefs, raise --max-tokens, or use
+    # a non-thinking moonshot-v1-* model.
+    if finish_reason == "length":
+        usage = result.get("usage") or {}
+        reasoning_tokens = (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens"
+        )
+        budget_detail = (
+            f" (reasoning_tokens={reasoning_tokens} of "
+            f"completion_tokens={usage.get('completion_tokens')})"
+            if reasoning_tokens
+            else ""
+        )
+        raise RuntimeError(
+            "Kimi response exceeded the output budget; request fewer beliefs, "
+            "raise --max-tokens, or use a non-thinking model"
+            f"{budget_detail}"
+        )
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("Kimi API returned an empty message")
     text = content.strip()
-    if finish_reason == "length":
-        raise RuntimeError("Kimi response exceeded the output budget; request fewer beliefs")
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
     parsed = json.loads(text)
@@ -324,12 +328,14 @@ def validate_claims(
     return list(accepted.values()), rejected
 
 
-def apply_claims(conn, claims: list[dict[str, Any]], *, model: str) -> dict[str, Any]:
+def apply_claims(
+    conn, claims: list[dict[str, Any]], *, model: str, project: str
+) -> dict[str, Any]:
     applied: list[str] = []
     unchanged: list[str] = []
     blocked: list[str] = []
     for claim in claims:
-        scope_id = "project:coframe"
+        scope_id = f"project:{project}"
         belief_id = stable_id("belief", "wiki", claim["key"], scope_id)
         existing = get_core_v1_belief(conn, belief_id)
         if (
@@ -407,91 +413,6 @@ def apply_claims(conn, claims: list[dict[str, Any]], *, model: str) -> dict[str,
     return {"applied": applied, "unchanged": unchanged, "blocked": blocked}
 
 
-def safe_slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "belief"
-
-
-def materialize_wiki(conn, wiki_dir: Path, *, run: dict[str, Any]) -> int:
-    pages_dir = wiki_dir / "pages"
-    pages_dir.mkdir(parents=True, exist_ok=True)
-    beliefs = current_wiki_beliefs(conn)
-    current_pages: set[str] = set()
-    index_lines = [
-        "# OCBrain current-truth wiki",
-        "",
-        "Sparse, source-linked beliefs compiled from the append-only OCBrain ledger.",
-        "",
-    ]
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for belief in beliefs:
-        grouped.setdefault(str(belief.get("category") or "system"), []).append(belief)
-        key = str(belief.get("key") or belief["belief_id"])
-        page_name = f"{safe_slug(key)}.md"
-        current_pages.add(page_name)
-        title = str(belief.get("title") or key.replace("-", " ").title())
-        page = "\n".join(
-            (
-                "---",
-                f'id: "{belief["belief_id"]}"',
-                f'key: "{key}"',
-                f'category: "{belief.get("category") or "system"}"',
-                f"confidence: {belief.get('confidence')}",
-                f'updated_at: "{belief.get("updated_at")}"',
-                "status: current",
-                "---",
-                "",
-                f"# {title}",
-                "",
-                str(belief["body"]),
-                "",
-                "## Sources",
-                "",
-                *[f"- `ocbrain://evidence/{item}`" for item in belief["evidence_ids"]],
-                "",
-            )
-        )
-        (pages_dir / page_name).write_text(page, encoding="utf-8")
-
-    # pages/ is a disposable materialization. Remove pages for beliefs that are
-    # no longer current while preserving the immutable SQLite ledger beneath it.
-    for page_path in pages_dir.glob("*.md"):
-        if page_path.name not in current_pages:
-            page_path.unlink()
-
-    for category in sorted(grouped):
-        index_lines.extend((f"## {category.title()}", ""))
-        for belief in sorted(grouped[category], key=lambda item: str(item.get("title") or "")):
-            key = str(belief.get("key") or belief["belief_id"])
-            title = str(belief.get("title") or key.replace("-", " ").title())
-            index_lines.append(f"- [{title}](pages/{safe_slug(key)}.md) — {belief['body']}")
-        index_lines.append("")
-    (wiki_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
-
-    schema = """# OCBrain wiki schema
-
-The SQLite event ledger is the immutable source layer. Files in `pages/` are a
-human-readable materialization of current `wiki_fact` beliefs. `index.md` is
-the content catalog; `log.md` is the chronological maintenance record.
-
-Only concise, source-linked, quote-validated claims may enter the wiki. Raw
-transcripts, routine progress, temporary counts, tool output, and unsupported
-inferences remain in the ledger and are never served as current truth.
-"""
-    (wiki_dir / "SCHEMA.md").write_text(schema, encoding="utf-8")
-    log_path = wiki_dir / "log.md"
-    if not log_path.exists():
-        log_path.write_text("# OCBrain wiki log\n\n", encoding="utf-8")
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"## [{run['at']}] curate | {run['model']}\n\n"
-            f"- Evidence considered: {run['evidence_count']}\n"
-            f"- Claims accepted: {run['accepted_count']}\n"
-            f"- Claims applied: {run['applied_count']}\n"
-            f"- Input digest: `{run['input_digest']}`\n\n"
-        )
-    return len(beliefs)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, required=True)
@@ -499,8 +420,19 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="KIMI_API_KEY")
     parser.add_argument("--base-url", default="https://api.moonshot.ai/v1")
     parser.add_argument("--model", default="moonshot-v1-32k")
+    parser.add_argument("--project", default="coframe")
     parser.add_argument("--max-evidence", type=int, default=260)
     parser.add_argument("--max-beliefs", type=int, default=24)
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=6_000,
+        help=(
+            "output token budget for the hosted compilation; thinking models "
+            "(kimi-k2.5/k2.6) spend most of it on reasoning tokens and need a "
+            "larger budget than non-thinking moonshot-v1-* models"
+        ),
+    )
     parser.add_argument("--wiki-dir", type=Path)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument(
@@ -525,8 +457,13 @@ def main() -> int:
             conn,
             limit=max(1, args.max_evidence),
             allow_hosted_egress=bool(args.allow_hosted_egress),
+            project=args.project,
         )
-        existing = current_wiki_beliefs(conn)
+        existing = [
+            item
+            for item in current_wiki_beliefs(conn)
+            if item.get("scope_id") == f"project:{args.project}"
+        ]
         digest = input_digest(evidence, existing)
         prior = {}
         if state_path.is_file():
@@ -566,6 +503,7 @@ def main() -> int:
             evidence=evidence,
             existing=existing,
             max_beliefs=max(1, min(args.max_beliefs, 40)),
+            max_tokens=max(1_000, args.max_tokens),
         )
         claims, rejected = validate_claims(
             response,
@@ -574,7 +512,9 @@ def main() -> int:
         )
         if not claims:
             raise RuntimeError(f"Kimi produced no quote-validated beliefs; rejected={rejected[:8]}")
-        applied = apply_claims(conn, claims, model=args.model)
+        applied = apply_claims(
+            conn, claims, model=args.model, project=args.project
+        )
         run = {
             "schema_version": WIKI_STATE_SCHEMA,
             "at": now_iso(),
@@ -588,9 +528,6 @@ def main() -> int:
             "blocked_count": len(applied["blocked"]),
         }
         wiki_count = materialize_wiki(conn, wiki_dir, run=run)
-        wiki_dir.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(state_path, 0o600)
         print(
             json.dumps(
                 preview
