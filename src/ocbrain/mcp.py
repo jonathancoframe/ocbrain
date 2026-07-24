@@ -1013,6 +1013,7 @@ def call_tool_v1(
             conn,
             context=context,
             limit=min(max(int(arguments.get("limit", 12)), 1), 50),
+            since=optional_string(arguments, "since"),
             delivery_target=delivery_target,
         )
         retrieval_id = record_core_v1_retrieval(
@@ -1218,6 +1219,7 @@ def read_resource(
             conn,
             context=ScopeContext(),
             limit=12,
+            since=None,
             delivery_target=delivery_target,
         )
         retrieval_id = record_core_v1_retrieval(

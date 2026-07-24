@@ -278,6 +278,23 @@ brain.context → brain.source → brain.feedback → brain.closeout
 
 Already-open chats may retain the MCP process they started before an upgrade.
 Start a fresh task or restart/reconnect the client when testing a new core.
+Never terminate an individual client-owned MCP child to force an upgrade:
+stdio hosts can retain the dead transport without reconnecting it.
+
+If a runtime call returns `Transport closed`, do not retry the dead connection.
+Save the exact tool arguments in a private JSON file and execute that normal
+runtime call once:
+
+```bash
+scripts/ocbrain-runtime-call brain.closeout \
+  --arguments-file /private/path/closeout-arguments.json
+```
+
+This one-shot path uses the same runtime dispatcher and runtime-only tool
+allowlist, then exits. It is not another server and cannot invoke admin tools.
+Reconnect or start a fresh client task afterward so later calls use a new MCP
+transport.
+
 Copy the short policy from the
 [runtime integration guide](docs/RUNTIME_INTEGRATION.md#client-instruction-block)
 into `AGENTS.md`, `CLAUDE.md`, or the equivalent durable

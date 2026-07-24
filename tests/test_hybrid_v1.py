@@ -111,6 +111,18 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     assert built["rows"] == 2
     assert vector_status(path)["healthy"] is True
 
+    append_core_event(
+        conn,
+        "retrieval_used",
+        {"retrieval_id": "retrieval:test", "outcome": "used"},
+        writer="test",
+    )
+    conn.commit()
+    after_ledger_only_event = vector_status(path)
+    assert after_ledger_only_event["event_fresh"] is False
+    assert after_ledger_only_event["corpus_fresh"] is True
+    assert after_ledger_only_event["healthy"] is True
+
     result = search_core_v1(
         conn,
         "citrus harvest",

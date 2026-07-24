@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ocbrain.closeout import record_closeout
@@ -574,6 +575,7 @@ def digest_v1(
     *,
     context: ScopeContext,
     limit: int,
+    since: str | None = None,
     delivery_target: str = LOCAL_MODEL_TARGET,
 ) -> dict[str, Any]:
     _require_v1(conn)
@@ -646,8 +648,153 @@ def digest_v1(
         "resolved_context": context.to_dict(),
         "counts": counts,
         "current": current,
+        "recent_closeouts": _recent_closeouts_v1(
+            conn,
+            context=context,
+            limit=min(limit, 5),
+            since=since,
+            delivery_target=delivery_target,
+        ),
         "excluded_scope_count": excluded,
     }
+
+
+def _recent_closeouts_v1(
+    conn: sqlite3.Connection,
+    *,
+    context: ScopeContext,
+    limit: int,
+    since: str | None,
+    delivery_target: str,
+) -> list[dict[str, Any]]:
+    """Return a tiny recent-work register without promoting receipts to beliefs.
+
+    Closeouts are execution receipts, not current truth.  They are still the
+    best source for "what just happened?" before a curator has promoted a
+    durable fact.  Keep this lane deliberately narrow: high-signal receipts
+    only, newest receipt per task, at most five.
+    """
+    if delivery_target != LOCAL_MODEL_TARGET:
+        return []
+    earliest = _digest_since(since)
+    rows = conn.execute(
+        """
+        SELECT receipt_json
+        FROM task_closeouts
+        WHERE closed_at >= ?
+        ORDER BY closed_at DESC, id DESC
+        LIMIT 250
+        """,
+        (earliest.isoformat(timespec="microseconds"),),
+    )
+    result: list[dict[str, Any]] = []
+    seen_tasks: set[str] = set()
+    for row in rows:
+        receipt = json.loads(row["receipt_json"])
+        task_ref = str(receipt.get("task_ref") or "").strip()
+        if not task_ref or task_ref in seen_tasks:
+            continue
+        if not _closeout_matches_context(receipt, context):
+            continue
+        if not _high_signal_closeout(receipt):
+            continue
+        seen_tasks.add(task_ref)
+        artifacts = []
+        for artifact in receipt.get("artifact_refs") or []:
+            if not isinstance(artifact, dict) or not artifact.get("uri"):
+                continue
+            artifacts.append(
+                {
+                    key: artifact[key]
+                    for key in ("uri", "kind", "label", "sha256")
+                    if artifact.get(key)
+                }
+            )
+            if len(artifacts) >= 4:
+                break
+        decision = receipt.get("decision") if isinstance(receipt.get("decision"), dict) else {}
+        result.append(
+            {
+                "id": receipt.get("id"),
+                "task_ref": task_ref,
+                "status": receipt.get("status"),
+                "summary": _human_excerpt(receipt.get("summary"), 600),
+                "closed_at": receipt.get("closed_at"),
+                "verification_status": receipt.get("verification_status"),
+                "decision_impact": decision.get("impact"),
+                "decision_note": _human_excerpt(decision.get("note"), 300),
+                "artifacts": artifacts,
+                "context": {
+                    key: value
+                    for key, value in (receipt.get("context") or {}).items()
+                    if key in {"project", "repo", "client", "task", "runtime"} and value
+                },
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _digest_since(raw: str | None) -> datetime:
+    if raw:
+        normalized = raw.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("since must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    return datetime.now(UTC) - timedelta(hours=72)
+
+
+def _closeout_matches_context(receipt: dict[str, Any], context: ScopeContext) -> bool:
+    receipt_context = receipt.get("context")
+    if not isinstance(receipt_context, dict):
+        receipt_context = {}
+    scoped = False
+    for key in ("project", "repo", "client"):
+        expected = getattr(context, key)
+        if not expected:
+            continue
+        scoped = True
+        if str(receipt_context.get(key) or "") != expected:
+            return False
+    if not scoped and context.task:
+        return (
+            str(receipt.get("task_ref") or "") == context.task
+            or str(receipt_context.get("task") or "") == context.task
+        )
+    return True
+
+
+def _high_signal_closeout(receipt: dict[str, Any]) -> bool:
+    status = str(receipt.get("status") or "")
+    if status not in {"completed", "partial", "blocked"}:
+        return False
+    artifacts = receipt.get("artifact_refs")
+    has_artifacts = isinstance(artifacts, list) and any(
+        isinstance(item, dict) and item.get("uri") for item in artifacts
+    )
+    decision = receipt.get("decision")
+    impact = str(decision.get("impact") or "") if isinstance(decision, dict) else ""
+    verification = str(receipt.get("verification_status") or "")
+    return (
+        verification == "verified"
+        or has_artifacts
+        or impact in {"changed", "prevented_error"}
+        or (status == "blocked" and bool(receipt.get("awaiting")))
+    )
+
+
+def _human_excerpt(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def feedback_v1(

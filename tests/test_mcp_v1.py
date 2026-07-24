@@ -4,6 +4,7 @@ import io
 import json
 import sys
 
+from ocbrain.closeout import record_closeout
 from ocbrain.core_v1 import (
     append_core_event,
     init_core_v1,
@@ -16,7 +17,7 @@ from ocbrain.mcp import (
     handle_request,
     serve,
 )
-from ocbrain.scope import ScopeTag
+from ocbrain.scope import ScopeContext, ScopeTag
 
 
 def _payload(response):
@@ -254,6 +255,111 @@ def test_v1_context_source_feedback_closeout_round_trip(tmp_path):
         ).fetchone()[0]
         == 1
     )
+
+
+def test_v1_digest_includes_only_scoped_high_signal_recent_closeouts(tmp_path):
+    conn = _seed_v1(tmp_path)
+    record_closeout(
+        conn,
+        task_ref="verified-ocbrain-work",
+        status="completed",
+        summary="Added a bounded human-readable recent-work register.",
+        context=ScopeContext(project="ocbrain", runtime="codex"),
+        verifier_refs=[
+            {
+                "uri": "pytest://test_recent_closeouts",
+                "kind": "pytest",
+                "status": "passed",
+            }
+        ],
+        artifact_refs=[
+            {
+                "uri": "file:///tmp/recent-work.json",
+                "kind": "report",
+                "sha256": "a" * 64,
+            }
+        ],
+    )
+    record_closeout(
+        conn,
+        task_ref="routine-ocbrain-health-check",
+        status="completed",
+        summary="Checked the service and found no material change.",
+        context=ScopeContext(project="ocbrain", runtime="codex"),
+    )
+    record_closeout(
+        conn,
+        task_ref="verified-other-project-work",
+        status="completed",
+        summary="This result belongs to another project.",
+        context=ScopeContext(project="other", runtime="codex"),
+        verifier_refs=[
+            {
+                "uri": "pytest://other",
+                "kind": "pytest",
+                "status": "passed",
+            }
+        ],
+    )
+    conn.commit()
+
+    digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain", "runtime": "codex"},
+                    "since": "2020-01-01T00:00:00Z",
+                },
+            ),
+        )
+    )
+    assert [item["task_ref"] for item in digest["recent_closeouts"]] == [
+        "verified-ocbrain-work"
+    ]
+    recent = digest["recent_closeouts"][0]
+    assert recent["verification_status"] == "verified"
+    assert recent["summary"] == "Added a bounded human-readable recent-work register."
+    assert recent["context"] == {"project": "ocbrain", "runtime": "codex"}
+    assert recent["artifacts"] == [
+        {
+            "uri": "file:///tmp/recent-work.json",
+            "kind": "report",
+            "sha256": "a" * 64,
+        }
+    ]
+
+    future_digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain"},
+                    "since": "2999-01-01T00:00:00Z",
+                },
+                request_id=2,
+            ),
+        )
+    )
+    assert future_digest["recent_closeouts"] == []
+
+    hosted_digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain"},
+                    "since": "2020-01-01T00:00:00Z",
+                },
+                request_id=3,
+            ),
+            delivery_target="hosted_model",
+        )
+    )
+    assert hosted_digest["recent_closeouts"] == []
 
 
 def test_v1_source_provenance_sample_is_bounded(tmp_path):

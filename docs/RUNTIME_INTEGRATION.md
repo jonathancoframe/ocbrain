@@ -74,6 +74,28 @@ Already-open tasks can retain the MCP child process they created before an
 upgrade. Start a fresh task or reconnect/restart each configured client for
 release acceptance.
 
+Never kill a client-owned MCP child to force an upgrade. A stdio host can keep
+the dead transport and return `Transport closed` for the rest of that task
+instead of spawning a replacement.
+
+### Transport failure recovery
+
+On the first `Transport closed` error, stop retrying that connection. Preserve
+the exact runtime-tool arguments in a private JSON file and execute them once
+through the runtime-only fallback:
+
+```bash
+/Users/jonathancoframe/Developer/ocbrain/scripts/ocbrain-runtime-call \
+  brain.closeout \
+  --arguments-file /private/path/closeout-arguments.json
+```
+
+The command invokes the same MCP runtime dispatcher against the activated core,
+permits only the normal runtime tool set, and exits after one request. It is not
+an admin path or a second long-lived server. If the one-shot call succeeds,
+retain its receipt and reconnect or start a fresh client task before the next
+MCP operation. If it fails, report both failures without a retry loop.
+
 Use the same semantic prompt in each runtime:
 
 ```text
@@ -113,6 +135,9 @@ Expand only needed issued handles with brain.source. When context influences
 the work, record brain.feedback. Finish substantive work with brain.closeout,
 linking retrievals, artifacts, and verifier evidence.
 Emit narrowly scoped evidence; do not write promoted knowledge directly.
+Never terminate a client-owned OCBrain MCP process to force an upgrade.
+On `Transport closed`, run the exact runtime call once through
+`/Users/jonathancoframe/Developer/ocbrain/scripts/ocbrain-runtime-call`.
 OCBrain is on-demand: never start hosted judgment, training, a loop, a timer,
 or a watchdog through it.
 ```
