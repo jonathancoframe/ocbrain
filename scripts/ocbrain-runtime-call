@@ -23,4 +23,3 @@ fi
 
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PYTHON" -m ocbrain.runtime_call --db "$DB" "$@"
-

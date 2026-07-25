@@ -52,4 +52,3 @@ def test_one_shot_runtime_fallback_rejects_admin_tool(tmp_path: Path) -> None:
         assert "runtime tools only" in str(exc)
     else:
         raise AssertionError("admin tool unexpectedly allowed")
-

@@ -109,7 +109,12 @@ def extract_records(conn: sqlite3.Connection) -> list[dict]:
         rows = []
     for key, value in rows:
         try:
-            data = json.loads(value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value)
+            serialized = (
+                value.decode("utf-8", errors="replace")
+                if isinstance(value, bytes)
+                else value
+            )
+            data = json.loads(serialized)
         except (ValueError, TypeError):
             continue
         if not isinstance(data, dict):
