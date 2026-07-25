@@ -420,7 +420,7 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="KIMI_API_KEY")
     parser.add_argument("--base-url", default="https://api.moonshot.ai/v1")
     parser.add_argument("--model", default="moonshot-v1-32k")
-    parser.add_argument("--project", default="coframe")
+    parser.add_argument("--project", default="workspace")
     parser.add_argument("--max-evidence", type=int, default=260)
     parser.add_argument("--max-beliefs", type=int, default=24)
     parser.add_argument(
