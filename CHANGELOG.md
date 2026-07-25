@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add evidence-only history imports, sparse source-backed wiki materialization,
+  deterministic sealed-release truth compilation, a recent verified-closeout
+  lane in `brain.digest`, a runtime-only one-shot transport recovery command,
+  corpus-based vector freshness, and the smaller local
+  `qwen3-embedding:0.6b` default.
+- Harden the optional compilers before activation: hosted curator prompts now
+  enforce exact project, visibility, and egress gates for both evidence and
+  existing wiki facts; `local_only`, prohibited, confidential, and secret
+  objects can never be overridden into hosted delivery; sealed truth requires
+  an explicit verified status plus passed verifier evidence and is preview-only
+  unless `--apply` is supplied; curator defaults are installation-neutral.
 - Bound SQLite writer-lock windows so concurrent agents stop seeing "database
   is locked": `import-history` now commits after every file instead of holding
   one implicit write transaction across up to `--batch-size` slow redactions

@@ -11,16 +11,51 @@ from pathlib import Path
 from typing import Any
 
 
-def current_wiki_beliefs(conn) -> list[dict[str, Any]]:
+def current_wiki_beliefs(
+    conn,
+    *,
+    project: str | None = None,
+    hosted_egress: bool = False,
+    allow_approval_required: bool = False,
+) -> list[dict[str, Any]]:
+    """Return current wiki facts, optionally restricted for hosted delivery.
+
+    Local materialization intentionally uses the unfiltered default. Hosted
+    callers must set ``hosted_egress`` so project, visibility, and egress gates
+    are applied before any belief body leaves SQLite. Explicit approval can add
+    ``approval_required`` facts; it never admits ``local_only``, ``prohibited``,
+    ``confidential``, or ``secret`` facts.
+    """
+    if allow_approval_required and not hosted_egress:
+        raise ValueError("allow_approval_required requires hosted_egress")
+    if hosted_egress and not project:
+        raise ValueError("project is required for hosted wiki selection")
+    filters = [
+        "status='current'",
+        "serve=1",
+        "belief_type='wiki_fact'",
+    ]
+    params: list[str] = []
+    if project is not None:
+        filters.extend(("scope_type='project'", "scope_id=?"))
+        params.append(f"project:{project}")
+    if hosted_egress:
+        filters.append("visibility IN ('public', 'internal')")
+        if allow_approval_required:
+            filters.append("egress_policy IN ('hosted_ok', 'approval_required')")
+        else:
+            filters.append("egress_policy='hosted_ok'")
+    where_clause = " AND ".join(filters)
     beliefs: list[dict[str, Any]] = []
     for row in conn.execute(
-        """
+        f"""
         SELECT belief_id, body, attributes_json, confidence, evidence_ids,
-               last_compiled_at, scope_type, scope_id
+               last_compiled_at, scope_type, scope_id, visibility, egress_policy
         FROM current_beliefs
-        WHERE status='current' AND serve=1 AND belief_type='wiki_fact'
+        WHERE {where_clause}
         ORDER BY scope_id, belief_id
-        """
+        """,
+        params,
     ):
         attributes = json.loads(row["attributes_json"] or "{}")
         beliefs.append(
@@ -35,6 +70,8 @@ def current_wiki_beliefs(conn) -> list[dict[str, Any]]:
                 "updated_at": str(row["last_compiled_at"]),
                 "scope_type": str(row["scope_type"]),
                 "scope_id": str(row["scope_id"]),
+                "visibility": str(row["visibility"]),
+                "egress_policy": str(row["egress_policy"]),
                 "attributes": attributes,
             }
         )

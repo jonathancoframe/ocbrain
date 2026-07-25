@@ -34,36 +34,20 @@ def compile_sealed_release(
     wiki_dir: Path,
     actor: str = "seal-truth-compiler",
 ) -> dict[str, Any]:
-    if not is_core_v1(conn):
-        raise ValueError("seal truth compilation requires an OCBrain v1 core")
-    seal_path = seal_path.expanduser().resolve()
-    seal = json.loads(seal_path.read_text(encoding="utf-8"))
-    if seal.get("schema_version") != "agent-control.release.v1":
-        raise ValueError("unsupported release seal schema")
-    if seal.get("state") != "sealed":
-        raise ValueError("release is not sealed")
-    release_id = required_text(seal.get("release_id"), "release_id")
-    task_id = required_text(seal.get("task_id"), "task_id")
-    artifacts = verify_artifacts(seal_path.parent, seal.get("artifacts"))
-    closeout_entry = next(
-        (item for item in artifacts if item["role"] == "closeout"), None
-    )
-    if closeout_entry is None:
+    prepared = _prepare_sealed_release(conn, seal_path)
+    if prepared["status"] == "ignored":
         return {
             "status": "ignored",
-            "reason": "sealed release has no canonical closeout artifact",
-            "release_id": release_id,
-            "task_id": task_id,
+            "reason": prepared["reason"],
+            "release_id": prepared["release_id"],
+            "task_id": prepared["task_id"],
         }
-    closeout = json.loads(Path(closeout_entry["path"]).read_text(encoding="utf-8"))
-    candidate = candidate_from_closeout(
-        closeout,
-        release_id=release_id,
-        seal_created_at=seal.get("created_at"),
-        fallback_task_id=task_id,
-    )
+    seal_path = prepared["seal_path"]
+    release_id = prepared["release_id"]
+    task_id = prepared["task_id"]
+    candidate = prepared["candidate"]
     project = candidate["project"]
-    belief_id = stable_id("belief", "sealed-task-truth", project, task_id)
+    belief_id = prepared["belief_id"]
     existing = get_core_v1_belief(conn, belief_id)
     existing_attributes = (existing or {}).get("attributes") or {}
     if (
@@ -204,6 +188,93 @@ def compile_sealed_release(
     }
 
 
+def preview_sealed_release(conn, seal_path: Path) -> dict[str, Any]:
+    """Validate one sealed release and describe its mutation without applying it."""
+    prepared = _prepare_sealed_release(conn, seal_path)
+    if prepared["status"] == "ignored":
+        return {
+            "status": "ignored",
+            "apply": False,
+            "database_touched": False,
+            "reason": prepared["reason"],
+            "release_id": prepared["release_id"],
+            "task_id": prepared["task_id"],
+        }
+    candidate = prepared["candidate"]
+    belief_id = prepared["belief_id"]
+    existing = get_core_v1_belief(conn, belief_id)
+    existing_attributes = (existing or {}).get("attributes") or {}
+    if (
+        existing is not None
+        and existing.get("status") == "current"
+        and bool(existing.get("serve"))
+        and existing_attributes.get("release_id") == prepared["release_id"]
+    ):
+        status = "unchanged"
+        would_apply = False
+    elif existing is not None and existing.get("status") in {"retracted", "tombstoned"}:
+        status = "blocked"
+        would_apply = False
+    else:
+        status = "preview"
+        would_apply = True
+    return {
+        "status": status,
+        "apply": False,
+        "database_touched": False,
+        "would_apply": would_apply,
+        "release_id": prepared["release_id"],
+        "task_id": prepared["task_id"],
+        "belief_id": belief_id,
+        "project": candidate["project"],
+        "summary": candidate["body"],
+        "supersedes_beliefs": candidate["supersedes"],
+        "existing_status": existing.get("status") if existing is not None else None,
+    }
+
+
+def _prepare_sealed_release(conn, seal_path: Path) -> dict[str, Any]:
+    if not is_core_v1(conn):
+        raise ValueError("seal truth compilation requires an OCBrain v1 core")
+    seal_path = seal_path.expanduser().resolve()
+    seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    if seal.get("schema_version") != "agent-control.release.v1":
+        raise ValueError("unsupported release seal schema")
+    if seal.get("state") != "sealed":
+        raise ValueError("release is not sealed")
+    release_id = required_text(seal.get("release_id"), "release_id")
+    task_id = required_text(seal.get("task_id"), "task_id")
+    artifacts = verify_artifacts(seal_path.parent, seal.get("artifacts"))
+    closeout_entry = next(
+        (item for item in artifacts if item["role"] == "closeout"), None
+    )
+    if closeout_entry is None:
+        return {
+            "status": "ignored",
+            "reason": "sealed release has no canonical closeout artifact",
+            "release_id": release_id,
+            "task_id": task_id,
+            "seal_path": seal_path,
+        }
+    closeout = json.loads(Path(closeout_entry["path"]).read_text(encoding="utf-8"))
+    candidate = candidate_from_closeout(
+        closeout,
+        release_id=release_id,
+        seal_created_at=seal.get("created_at"),
+        fallback_task_id=task_id,
+    )
+    project = candidate["project"]
+    belief_id = stable_id("belief", "sealed-task-truth", project, task_id)
+    return {
+        "status": "ready",
+        "seal_path": seal_path,
+        "release_id": release_id,
+        "task_id": task_id,
+        "belief_id": belief_id,
+        "candidate": candidate,
+    }
+
+
 def verify_artifacts(release_dir: Path, raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("seal artifacts must be a non-empty list")
@@ -248,10 +319,8 @@ def candidate_from_closeout(
         isinstance(item, dict) and item.get("status") == "passed"
         for item in verifier_refs
     )
-    explicitly_verified = closeout.get("verified") is True
     if verification_status != "verified" or not has_passed_verifier:
-        if not explicitly_verified:
-            raise ValueError("canonical closeout must be verified and verifier-backed")
+        raise ValueError("canonical closeout must be verified and verifier-backed")
     summary = human_text(closeout.get("summary"), maximum=420)
     context = closeout.get("context") if isinstance(closeout.get("context"), dict) else {}
     project = human_text(context.get("project") or closeout.get("project"), maximum=120)
@@ -341,4 +410,9 @@ def required_text(value: Any, label: str) -> str:
     return text
 
 
-__all__ = ["candidate_from_closeout", "compile_sealed_release", "verify_artifacts"]
+__all__ = [
+    "candidate_from_closeout",
+    "compile_sealed_release",
+    "preview_sealed_release",
+    "verify_artifacts",
+]
