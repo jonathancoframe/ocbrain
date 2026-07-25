@@ -25,12 +25,13 @@ from urllib.parse import urlparse
 
 DEFAULT_EMBED_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_EMBED_DIMENSIONS = 1024
+DEFAULT_EMBED_DOCUMENT_BYTES = 1_800
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QUERY_INSTRUCTION = (
     "Given a user or agent question, retrieve the most relevant verified memory, "
     "evidence, decision, correction, or current status."
 )
-VECTOR_SCHEMA_VERSION = "ocbrain.vectors.v1"
+VECTOR_SCHEMA_VERSION = "ocbrain.vectors.v2"
 
 
 class LocalEmbeddingUnavailable(RuntimeError):
@@ -171,7 +172,7 @@ def build_vector_index(
             "distance": "exact_cosine",
             "endpoint_class": "loopback_ollama",
             "query_instruction_sha256": _sha256(DEFAULT_QUERY_INSTRUCTION),
-            "document_format": "belief_body.v1",
+            "document_format": "belief_body_head_tail_1800b.v1",
             "model_digest": model_digest,
             "model_quantization": model_metadata.get("quantization", "unknown"),
             "model_parameter_size": model_metadata.get("parameter_size", "unknown"),
@@ -196,7 +197,7 @@ def build_vector_index(
             "corpus_sha256": corpus_sha256,
             "endpoint_class": "loopback_ollama",
         }
-    except Exception:
+    except BaseException:
         target.close()
         temp_path.unlink(missing_ok=True)
         raise
@@ -392,7 +393,10 @@ def embed_texts(
     if not texts:
         return []
     values = [
-        f"Instruct: {DEFAULT_QUERY_INSTRUCTION}\nQuery: {text}" if query else text for text in texts
+        _bounded_embedding_text(
+            f"Instruct: {DEFAULT_QUERY_INSTRUCTION}\nQuery: {text}" if query else text
+        )
+        for text in texts
     ]
     request = urllib.request.Request(
         endpoint.rstrip("/") + "/api/embed",
@@ -411,6 +415,17 @@ def embed_texts(
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
             payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            error_payload = json.loads(exc.read())
+            detail = str(error_payload.get("error") or "")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        suffix = f": {detail}" if detail else ""
+        raise LocalEmbeddingUnavailable(
+            f"embedding endpoint returned HTTP {exc.code}{suffix}"
+        ) from exc
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise LocalEmbeddingUnavailable(str(exc)) from exc
     if payload.get("error"):
@@ -498,9 +513,28 @@ def _sha256(value: str) -> str:
 
 
 def _document_text(row: sqlite3.Row) -> str:
-    # The projection has already removed archive/catalog/path-only rows.  Keep
-    # the derived embedding input deliberately simple and reproducible.
-    return str(row["body"]).strip()
+    # The projection has already removed archive/catalog/path-only rows. Keep
+    # the derived embedding input deliberately simple, bounded, and
+    # reproducible. Some Ollama Metal embedding runners terminate a request
+    # when one input crosses a backend compute microbatch even though it remains
+    # below the advertised model context. Preserve both the opening context and
+    # the latest tail for long receipts/transcripts.
+    return _bounded_embedding_text(str(row["body"]).strip())
+
+
+def _bounded_embedding_text(text: str) -> str:
+    """Return deterministic valid UTF-8 below the local runner's safe token ceiling."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= DEFAULT_EMBED_DOCUMENT_BYTES:
+        return text
+    marker = "\n\n[... middle omitted for local embedding ...]\n\n"
+    marker_bytes = marker.encode("utf-8")
+    available = DEFAULT_EMBED_DOCUMENT_BYTES - len(marker_bytes)
+    head_bytes = (available * 3) // 4
+    tail_bytes = available - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+    return f"{head}{marker}{tail}"
 
 
 def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
@@ -525,6 +559,7 @@ def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
 __all__ = [
     "DEFAULT_EMBED_MODEL",
     "DEFAULT_EMBED_DIMENSIONS",
+    "DEFAULT_EMBED_DOCUMENT_BYTES",
     "DEFAULT_OLLAMA_URL",
     "LocalEmbeddingUnavailable",
     "build_vector_index",

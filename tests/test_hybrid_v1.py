@@ -14,7 +14,13 @@ from ocbrain.core_v1 import (
 )
 from ocbrain.curation import apply_curated_manifest
 from ocbrain.db import connect
-from ocbrain.hybrid import build_vector_index, vector_status
+from ocbrain.hybrid import (
+    DEFAULT_EMBED_DOCUMENT_BYTES,
+    _bounded_embedding_text,
+    _document_text,
+    build_vector_index,
+    vector_status,
+)
 from ocbrain.mcp import handle_request
 from ocbrain.mcp_v1 import (
     build_context_v1,
@@ -79,6 +85,43 @@ def _mcp_call(name: str, arguments: dict, *, request_id: int) -> dict:
 def _mcp_payload(response: dict) -> dict:
     assert "error" not in response, response
     return json.loads(response["result"]["content"][0]["text"])
+
+
+def test_dense_document_text_is_bounded_and_preserves_head_and_tail() -> None:
+    short = "short belief"
+    assert _document_text({"body": short}) == short
+
+    long = "HEAD-" + ("🧠" * 2_000) + "-TAIL"
+    bounded = _document_text({"body": long})
+    assert len(bounded.encode("utf-8")) <= DEFAULT_EMBED_DOCUMENT_BYTES
+    assert bounded.startswith("HEAD-")
+    assert bounded.endswith("-TAIL")
+    assert "middle omitted for local embedding" in bounded
+    bounded_query = _bounded_embedding_text("Instruct: retrieve\nQuery: " + ("漢" * 2_000))
+    assert len(bounded_query.encode("utf-8")) <= DEFAULT_EMBED_DOCUMENT_BYTES
+
+
+def test_vector_build_cleans_temporary_sidecar_when_interrupted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "core.sqlite"
+    conn = connect(path)
+    init_core_v1(conn)
+    _seed_belief(conn, belief_id="curated:test:interrupt", body="bounded belief")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        "ocbrain.hybrid._ollama_model_metadata",
+        lambda *_args, **_kwargs: {"digest": "sha256:test-model"},
+    )
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ocbrain.hybrid.embed_texts", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        build_vector_index(path, model="test-local")
+    assert not list(tmp_path.glob(".core-vectors.sqlite.*.tmp"))
 
 
 def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypatch) -> None:

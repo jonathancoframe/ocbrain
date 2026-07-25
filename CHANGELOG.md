@@ -7,6 +7,9 @@
   lane in `brain.digest`, a runtime-only one-shot transport recovery command,
   corpus-based vector freshness, and the smaller local
   `qwen3-embedding:0.6b` default.
+- Bound local dense-index inputs to a deterministic 1,800-byte head/tail view
+  so Ollama runners do not terminate on long or token-dense transcript beliefs,
+  and preserve the endpoint's structured HTTP error when a local rebuild fails.
 - Harden the optional compilers before activation: hosted curator prompts now
   enforce exact project, visibility, and egress gates for both evidence and
   existing wiki facts; `local_only`, prohibited, confidential, and secret
