@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import re
 import sys
 from importlib.metadata import entry_points
@@ -18,11 +19,13 @@ from ocbrain.core_ops import (
 )
 from ocbrain.core_v1 import (
     append_core_event,
+    automatic_activation_enabled,
     get_core_v1_belief,
     get_core_v1_evidence,
     init_core_v1,
     is_core_v1,
     record_core_v1_evidence,
+    set_automatic_activation,
 )
 from ocbrain.curation import apply_curated_manifest
 from ocbrain.db import (
@@ -373,6 +376,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scan, redact, and report planned imports without opening the database",
     )
+    import_memory_parser.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append memory-file evidence without promoting the whole file into a serving belief",
+    )
     import_memory_parser.set_defaults(func=cmd_import_memory)
 
     import_history_parser = subparsers.add_parser(
@@ -401,6 +409,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         type=int,
         default=500,
         help="Commit after this many imported files",
+    )
+    import_history_parser.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append transcript evidence without promoting whole transcripts into serving beliefs",
     )
     import_history_parser.add_argument(
         "--dry-run",
@@ -983,6 +996,11 @@ def build_parser() -> argparse.ArgumentParser:
     import_memory.add_argument("--limit", type=int)
     import_memory.add_argument("--max-bytes", type=int, default=50_000)
     import_memory.add_argument("--dry-run", action="store_true")
+    import_memory.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append memory-file evidence without promoting the whole file into a serving belief",
+    )
     import_memory.set_defaults(func=cmd_import_memory)
 
     import_history = commands.add_parser(
@@ -995,7 +1013,17 @@ def build_parser() -> argparse.ArgumentParser:
     import_history.add_argument("--privacy-scope", choices=PRIVACY_SCOPES, default="private")
     import_history.add_argument("--limit", type=int)
     import_history.add_argument("--max-bytes", type=int, default=20_000)
-    import_history.add_argument("--batch-size", type=int, default=500)
+    import_history.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Deprecated: history imports commit per file to bound SQLite writer-lock windows",
+    )
+    import_history.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="append transcript evidence without promoting whole transcripts into serving beliefs",
+    )
     import_history.add_argument("--dry-run", action="store_true")
     import_history.set_defaults(func=cmd_import_history)
 
@@ -1011,8 +1039,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deprecated alias for --profile admin",
     )
+    mcp_parser.add_argument(
+        "--delivery-target",
+        choices=["local_model", "hosted_model"],
+        help=(
+            "delivery filter for served memory; default local_model. "
+            "Overrides OCBRAIN_DELIVERY_TARGET."
+        ),
+    )
     mcp_parser.add_argument("--active-db-file", type=Path, help=argparse.SUPPRESS)
     mcp_parser.set_defaults(func=cmd_mcp)
+    automatic_activation_parser = commands.add_parser(
+        "automatic-activation",
+        help="Show or set unattended evidence/closeout to belief promotion",
+    )
+    automatic_activation_group = automatic_activation_parser.add_mutually_exclusive_group()
+    automatic_activation_group.add_argument(
+        "--enable",
+        action="store_true",
+        help="auto-promote ingested evidence and closeouts into served beliefs",
+    )
+    automatic_activation_group.add_argument(
+        "--disable",
+        action="store_true",
+        help="keep promotion human-gated (the default)",
+    )
+    automatic_activation_parser.set_defaults(func=cmd_automatic_activation)
     parser.add_argument("--input", type=Path, help=argparse.SUPPRESS)
     return parser
 
@@ -2251,6 +2303,7 @@ def cmd_import_memory(args: argparse.Namespace) -> int:
                     project=args.project,
                     privacy_scope=args.privacy_scope,
                     max_bytes=args.max_bytes,
+                    activate=not args.evidence_only,
                 )
             else:
                 result = import_memory_file(
@@ -2303,14 +2356,21 @@ def cmd_import_history(args: argparse.Namespace) -> int:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA cache_size=-200000")
-    existing_sources = set() if is_core_v1(conn) else imported_history_sources(conn)
-    current_fingerprints = current_history_fingerprints(conn)
+    core_v1 = is_core_v1(conn)
+    existing_sources = set() if core_v1 else imported_history_sources(conn)
+    if core_v1:
+        # Persisted stat-fingerprint gate: unchanged files skip the full
+        # redact-and-read pass. import_source_v1 stays authoritative for any
+        # file whose fingerprint changed; this only fast-paths files that
+        # provably have not changed since their last completed import.
+        current_fingerprints = load_v1_history_fingerprints(conn)
+    else:
+        current_fingerprints = current_history_fingerprints(conn)
     imported = 0
     existing = 0
     by_runtime: dict[str, int] = {}
     samples: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = list(selection_skipped)
-    batch_size = max(args.batch_size, 1)
     for path in files:
         source_key = (str(path), f"{history_runtime(path)}_history_file")
         fingerprint = file_fingerprint(path)
@@ -2325,6 +2385,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
                     project=args.project,
                     privacy_scope=args.privacy_scope,
                     max_bytes=args.max_bytes,
+                    activate=not args.evidence_only,
                 )
             else:
                 result = import_history_file(
@@ -2349,8 +2410,19 @@ def cmd_import_history(args: argparse.Namespace) -> int:
             samples.append(result)
         existing_sources.add((result["path"], f"{result['runtime']}_history_file"))
         current_fingerprints[source_key] = fingerprint
-        if imported % batch_size == 0:
-            conn.commit()
+        # Commit after every file. History files can take minutes to redact,
+        # and an implicit write transaction held across that work monopolises
+        # SQLite's single writer slot: every other local writer (MCP
+        # ingest/closeout/retrieval logging from Codex/Claude/Cursor/Hermes)
+        # then fails with "database is locked". Per-file commits bound the
+        # writer window to one file's actual DB writes; the slow redaction
+        # of the next file happens outside any transaction. Same rationale
+        # as DatasetWriteBatch for the dataset miners.
+        if core_v1:
+            store_v1_history_fingerprints(conn, current_fingerprints)
+        conn.commit()
+    if core_v1:
+        store_v1_history_fingerprints(conn, current_fingerprints)
     conn.commit()
     output(
         args,
@@ -2577,6 +2649,7 @@ def import_memory_file_v1(
     project: str | None,
     privacy_scope: str,
     max_bytes: int,
+    activate: bool = True,
 ) -> dict[str, object] | None:
     raw = path.read_text(encoding="utf-8", errors="replace")
     if not raw.strip():
@@ -2596,6 +2669,7 @@ def import_memory_file_v1(
         project=project,
         privacy_scope=privacy_scope,
         confidence=0.7,
+        activate=activate,
     )
 
 
@@ -2606,6 +2680,7 @@ def import_history_file_v1(
     project: str | None,
     privacy_scope: str,
     max_bytes: int,
+    activate: bool = True,
 ) -> dict[str, object] | None:
     if path.stat().st_size == 0:
         return None
@@ -2621,6 +2696,7 @@ def import_history_file_v1(
         project=project,
         privacy_scope=privacy_scope,
         confidence=0.55,
+        activate=activate,
     )
 
 
@@ -2635,6 +2711,7 @@ def import_source_v1(
     project: str | None,
     privacy_scope: str,
     confidence: float,
+    activate: bool = True,
 ) -> dict[str, object]:
     source_uri = str(path.resolve())
     scope = scope_for_privacy(project, privacy_scope)
@@ -2663,7 +2740,7 @@ def import_source_v1(
     )
     proposal_id = None
     decision_id = None
-    if not unchanged:
+    if activate and not unchanged:
         proposal_id = append_core_event(
             conn,
             "compilation_proposed",
@@ -2698,7 +2775,7 @@ def import_source_v1(
         "evidence_event_id": evidence_event_id,
         "proposal_event_id": proposal_id,
         "decision_event_id": decision_id,
-        "changed": bool(evidence_event_id or not unchanged),
+        "changed": bool(evidence_event_id or (activate and not unchanged)),
     }
 
 
@@ -2841,6 +2918,53 @@ def imported_history_sources(conn) -> set[tuple[str, str]]:
     }
 
 
+_V1_HISTORY_FINGERPRINTS_KEY = "history_file_fingerprints_v1"
+
+
+def _v1_fingerprint_key(source_key: tuple[str, str]) -> str:
+    return json.dumps([source_key[0], source_key[1]])
+
+
+def load_v1_history_fingerprints(conn) -> dict[tuple[str, str], str]:
+    """Load the persisted stat-fingerprint gate for v1 history imports.
+
+    Stored as one JSON blob in ``schema_meta`` so no schema migration is
+    needed. Keys are ``[path, source_type]`` JSON pairs; values are
+    ``file_fingerprint`` digests from the last completed import.
+    """
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?", (_V1_HISTORY_FINGERPRINTS_KEY,)
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        raw = json.loads(row[0])
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    loaded: dict[tuple[str, str], str] = {}
+    for key, fingerprint in raw.items():
+        try:
+            path, source_type = json.loads(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(path, str) and isinstance(source_type, str) and isinstance(fingerprint, str):
+            loaded[(path, source_type)] = fingerprint
+    return loaded
+
+
+def store_v1_history_fingerprints(conn, fingerprints: dict[tuple[str, str], str]) -> None:
+    blob = json.dumps(
+        {_v1_fingerprint_key(key): value for key, value in fingerprints.items()},
+        sort_keys=True,
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+        (_V1_HISTORY_FINGERPRINTS_KEY, blob),
+    )
+
+
 def current_history_fingerprints(conn) -> dict[tuple[str, str], str]:
     """Return the fingerprint backing each currently searchable history doc.
 
@@ -2872,32 +2996,65 @@ def current_history_fingerprints(conn) -> dict[tuple[str, str], str]:
     }
 
 
+def _iter_redacted_lines(lines, *, in_private_key: bool = False):
+    for raw_line in lines:
+        remaining = raw_line
+        while remaining:
+            if in_private_key:
+                end = _PRIVATE_KEY_END_RE.search(remaining)
+                if end is None:
+                    break
+                remaining = remaining[end.end() :]
+                in_private_key = False
+                continue
+
+            begin = _PRIVATE_KEY_BEGIN_RE.search(remaining)
+            if begin is None:
+                yield redact_secrets(remaining)
+                break
+
+            prefix = remaining[: begin.start()]
+            if prefix:
+                yield redact_secrets(prefix)
+            yield "[REDACTED_PRIVATE_KEY]"
+            remaining = remaining[begin.end() :]
+            in_private_key = True
+
+
 def iter_redacted_history(path: Path):
     """Yield redacted history text without loading the whole file at once."""
-    in_private_key = False
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        for raw_line in handle:
-            remaining = raw_line
-            while remaining:
-                if in_private_key:
-                    end = _PRIVATE_KEY_END_RE.search(remaining)
-                    if end is None:
-                        break
-                    remaining = remaining[end.end() :]
-                    in_private_key = False
-                    continue
+        yield from _iter_redacted_lines(handle)
 
-                begin = _PRIVATE_KEY_BEGIN_RE.search(remaining)
-                if begin is None:
-                    yield redact_secrets(remaining)
-                    break
 
-                prefix = remaining[: begin.start()]
-                if prefix:
-                    yield redact_secrets(prefix)
-                yield "[REDACTED_PRIVATE_KEY]"
-                remaining = remaining[begin.end() :]
-                in_private_key = True
+def _private_key_state_at(handle, offset: int) -> bool:
+    """Return whether ``offset`` lies inside a PEM private-key block."""
+    if offset <= 0:
+        return False
+    with mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ) as mapped:
+        state = False
+        cursor = 0
+        needle = b"PRIVATE KEY-----"
+        while True:
+            found = mapped.find(needle, cursor, offset)
+            if found < 0:
+                return state
+            prefix = mapped[max(0, found - 80) : found]
+            begin = prefix.rfind(b"-----BEGIN ")
+            end = prefix.rfind(b"-----END ")
+            if begin >= 0 and begin > end:
+                state = True
+            elif end >= 0:
+                state = False
+            cursor = found + len(needle)
+
+
+def _redact_history_fragment(raw: bytes, *, in_private_key: bool = False) -> bytes:
+    text = raw.decode("utf-8", errors="replace")
+    redacted = "".join(
+        _iter_redacted_lines(text.splitlines(keepends=True), in_private_key=in_private_key)
+    )
+    return redacted.encode("utf-8", errors="replace")
 
 
 def history_text_window(path: Path, *, max_bytes: int) -> str:
@@ -2905,40 +3062,38 @@ def history_text_window(path: Path, *, max_bytes: int) -> str:
         return ""
     head_len = max_bytes // 2
     tail_len = max_bytes - head_len
-    head = bytearray()
-    tail = bytearray()
-    complete = bytearray()
-    total = 0
+    source_bytes = path.stat().st_size
+    sample_span = max(max_bytes * 4, 65_536)
 
-    for redacted in iter_redacted_history(path):
-        data = redacted.encode("utf-8", errors="replace")
-        prior_total = total
-        total += len(data)
+    if source_bytes <= sample_span:
+        complete = "".join(iter_redacted_history(path)).encode("utf-8", errors="replace")
+        if len(complete) <= max_bytes:
+            return complete.decode("utf-8", errors="replace")
+        marker = f"\n\n[... {len(complete) - max_bytes} bytes omitted from middle ...]\n\n".encode()
+        return (complete[:head_len] + marker + complete[-tail_len:]).decode(
+            "utf-8", errors="replace"
+        )
 
-        if len(head) < head_len:
-            needed = head_len - len(head)
-            head.extend(data[:needed])
+    with path.open("rb") as handle:
+        head_raw = handle.read(sample_span)
+        # Drop a partially sampled history record; a credential could cross
+        # that arbitrary byte boundary and evade pattern-based redaction.
+        newline = head_raw.rfind(b"\n")
+        head_raw = head_raw[: newline + 1] if newline >= 0 else b""
 
-        if tail_len:
-            if len(data) >= tail_len:
-                tail[:] = data[-tail_len:]
-            else:
-                overflow = max(len(tail) + len(data) - tail_len, 0)
-                if overflow:
-                    del tail[:overflow]
-                tail.extend(data)
+        tail_offset = max(source_bytes - sample_span, 0)
+        tail_private = _private_key_state_at(handle, tail_offset)
+        handle.seek(tail_offset)
+        tail_raw = handle.read()
+        newline = tail_raw.find(b"\n")
+        if tail_offset:
+            tail_raw = tail_raw[newline + 1 :] if newline >= 0 else b""
 
-        if total <= max_bytes:
-            complete.extend(data)
-        elif prior_total <= max_bytes:
-            complete.clear()
-
-    if total <= max_bytes:
-        data = bytes(complete)
-    else:
-        marker = f"\n\n[... {total - max_bytes} bytes omitted from middle ...]\n\n".encode()
-        data = bytes(head) + marker + bytes(tail)
-    return data.decode("utf-8", errors="replace")
+    head = _redact_history_fragment(head_raw)[:head_len]
+    tail = _redact_history_fragment(tail_raw, in_private_key=tail_private)[-tail_len:]
+    omitted = max(source_bytes - len(head_raw) - len(tail_raw), 0)
+    marker = f"\n\n[... {omitted} source bytes omitted from middle ...]\n\n".encode()
+    return (head + marker + tail).decode("utf-8", errors="replace")
 
 
 def history_title(path: Path, runtime: str) -> str:
@@ -3050,12 +3205,34 @@ def cmd_liveness_check(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
+    import os
+
+    from ocbrain.scope import normalize_delivery_target
+
+    # Local coding agents get full-fidelity local delivery by default. Hosted
+    # (egress-filtered) delivery stays available via --delivery-target or the
+    # OCBRAIN_DELIVERY_TARGET env, for feeding a hosted teacher model.
+    selected = getattr(args, "delivery_target", None) or os.environ.get(
+        "OCBRAIN_DELIVERY_TARGET"
+    )
     return serve(
         args.db,
         allow_writes=args.allow_writes,
         profile=args.profile,
         active_db_file=getattr(args, "active_db_file", None),
+        delivery_target=normalize_delivery_target(selected or None),
     )
+
+
+def cmd_automatic_activation(args: argparse.Namespace) -> int:
+    conn = open_db(args)
+    if not is_core_v1(conn):
+        raise SystemExit("automatic-activation requires an OCBrain v1 core")
+    if args.enable or args.disable:
+        set_automatic_activation(conn, bool(args.enable))
+        conn.commit()
+    output(args, {"automatic_activation": automatic_activation_enabled(conn)})
+    return 0
 
 
 # --------------------------------------------------------------------------- #

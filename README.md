@@ -103,6 +103,35 @@ embeddings, rankings, summaries, and model-specific features are derived and
 replaceable. Raw events, scope, provenance, corrections, retrieval receipts,
 source handles, and closeouts remain durable.
 
+### Optional sparse wiki compiler
+
+`scripts/kimi-wiki-curator.py` can compile reviewed, high-signal evidence into
+concise `wiki_fact` beliefs and a human-readable wiki. It never selects raw
+transcript evidence, sends only bounded already-redacted evidence, rejects any
+claim whose supporting quote cannot be found verbatim in its named evidence,
+and makes no hosted call without explicit `--apply`. Confidential/prohibited
+evidence is never eligible; sending bounded internal local-only evidence also
+requires `--allow-hosted-egress`.
+
+```bash
+# Keep background harvesting in the evidence ledger, not current truth.
+ocbrain --db /absolute/core.sqlite import-history /history/root \
+  --project my-project --privacy-scope workspace --evidence-only
+
+# Preview locally, then explicitly authorize one Moonshot/Kimi compilation.
+.venv/bin/python scripts/kimi-wiki-curator.py \
+  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
+  --allow-hosted-egress
+.venv/bin/python scripts/kimi-wiki-curator.py \
+  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
+  --allow-hosted-egress --apply
+```
+
+The generated `wiki/index.md`, `wiki/pages/`, and append-only `wiki/log.md`
+follow the raw-sources-plus-derived-wiki pattern. SQLite remains authoritative;
+the Markdown wiki is a disposable current-truth materialization. Keep
+`automatic_activation` disabled when using this sparse mode.
+
 ## The runtime loop
 
 ```text
@@ -249,6 +278,23 @@ brain.context → brain.source → brain.feedback → brain.closeout
 
 Already-open chats may retain the MCP process they started before an upgrade.
 Start a fresh task or restart/reconnect the client when testing a new core.
+Never terminate an individual client-owned MCP child to force an upgrade:
+stdio hosts can retain the dead transport without reconnecting it.
+
+If a runtime call returns `Transport closed`, do not retry the dead connection.
+Save the exact tool arguments in a private JSON file and execute that normal
+runtime call once:
+
+```bash
+scripts/ocbrain-runtime-call brain.closeout \
+  --arguments-file /private/path/closeout-arguments.json
+```
+
+This one-shot path uses the same runtime dispatcher and runtime-only tool
+allowlist, then exits. It is not another server and cannot invoke admin tools.
+Reconnect or start a fresh client task afterward so later calls use a new MCP
+transport.
+
 Copy the short policy from the
 [runtime integration guide](docs/RUNTIME_INTEGRATION.md#client-instruction-block)
 into `AGENTS.md`, `CLAUDE.md`, or the equivalent durable

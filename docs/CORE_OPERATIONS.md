@@ -120,6 +120,16 @@ chmod 600 data/active-core.path
 Migration never performs this step. Start fresh clients afterward; already-open
 tasks can retain their older MCP process.
 
+Do not terminate a client-owned MCP child to make an already-open task pick up
+the new core. Some stdio hosts retain a dead transport instead of reconnecting.
+Use a fresh task or explicitly reconnect the client.
+
+If a task reports `Transport closed`, stop after the first failure and preserve
+the exact runtime-tool arguments. Run that request once through
+`scripts/ocbrain-runtime-call`, which uses the normal runtime dispatcher and
+rejects admin tools, then reconnect the client. Do not build a retry loop around
+a dead stdio handle.
+
 Run a real `context → source → feedback → closeout` turn from Codex, Claude Code,
 and OpenClaw. Confirm all three receipts landed in the same v1 core before
 declaring activation complete.

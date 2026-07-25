@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-DEFAULT_EMBED_MODEL = "qwen3-embedding:4b-fp16"
+DEFAULT_EMBED_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_EMBED_DIMENSIONS = 1024
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QUERY_INSTRUCTION = (
@@ -90,6 +90,7 @@ def build_vector_index(
         head = source.execute(
             "SELECT event_seq, event_hash FROM brain_events ORDER BY event_seq DESC LIMIT 1"
         ).fetchone()
+        corpus_sha256 = _corpus_fingerprint(rows)
         source.commit()
     finally:
         source.close()
@@ -164,6 +165,8 @@ def build_vector_index(
             "core_path": str(core_path),
             "core_event_seq": str(head["event_seq"] if head else 0),
             "core_event_hash": str(head["event_hash"] if head else ""),
+            "corpus_sha256": corpus_sha256,
+            "corpus_rows": str(len(rows)),
             "rows": str(len(rows)),
             "distance": "exact_cosine",
             "endpoint_class": "loopback_ollama",
@@ -190,6 +193,7 @@ def build_vector_index(
             "rows": len(rows),
             "core_event_seq": int(head["event_seq"] if head else 0),
             "core_event_hash": str(head["event_hash"] if head else ""),
+            "corpus_sha256": corpus_sha256,
             "endpoint_class": "loopback_ollama",
         }
     except Exception:
@@ -209,10 +213,18 @@ def vector_status(core_path: Path, *, sidecar_path: Path | None = None) -> dict[
         rows = int(conn.execute("SELECT COUNT(*) FROM belief_vectors").fetchone()[0])
         integrity = str(conn.execute("PRAGMA quick_check").fetchone()[0])
         core = sqlite3.connect(f"file:{core_path}?mode=ro", uri=True)
+        core.row_factory = sqlite3.Row
         try:
             head = core.execute(
                 "SELECT event_seq, event_hash FROM brain_events ORDER BY event_seq DESC LIMIT 1"
             ).fetchone()
+            corpus_rows = list(
+                core.execute(
+                    "SELECT belief_id, body, scope_type, scope_id, visibility, egress_policy, "
+                    "last_compiled_at FROM current_beliefs "
+                    "WHERE serve=1 AND status='current' ORDER BY belief_id"
+                )
+            )
         finally:
             core.close()
         current_seq = str(head[0] if head else 0)
@@ -220,6 +232,11 @@ def vector_status(core_path: Path, *, sidecar_path: Path | None = None) -> dict[
         event_fresh = (
             meta.get("core_event_seq") == current_seq
             and meta.get("core_event_hash") == current_hash
+        )
+        current_corpus_sha256 = _corpus_fingerprint(corpus_rows)
+        corpus_fresh = (
+            meta.get("corpus_sha256") == current_corpus_sha256
+            and meta.get("corpus_rows") == str(len(corpus_rows))
         )
         configured_model = os.environ.get("OCBRAIN_EMBED_MODEL") or DEFAULT_EMBED_MODEL
         configured_dimensions = int(
@@ -239,7 +256,9 @@ def vector_status(core_path: Path, *, sidecar_path: Path | None = None) -> dict[
             and meta.get("query_instruction_sha256") == configured_instruction_hash
             and meta.get("model_digest", "unknown") == installed_digest
         )
-        fresh = event_fresh and identity_fresh
+        # Retrieval receipts, feedback, and other ledger-only events do not
+        # change the vectors. Freshness follows the served belief corpus.
+        fresh = corpus_fresh and identity_fresh
         healthy = (
             meta.get("schema_version") == VECTOR_SCHEMA_VERSION
             and rows == int(meta.get("rows", "-1"))
@@ -254,6 +273,7 @@ def vector_status(core_path: Path, *, sidecar_path: Path | None = None) -> dict[
             "integrity": integrity,
             "fresh": fresh,
             "event_fresh": event_fresh,
+            "corpus_fresh": corpus_fresh,
             "identity_fresh": identity_fresh,
             "configured_model": configured_model,
             "configured_dimensions": configured_dimensions,
@@ -261,6 +281,7 @@ def vector_status(core_path: Path, *, sidecar_path: Path | None = None) -> dict[
             "installed_model_digest": installed_digest,
             "current_core_event_seq": int(current_seq),
             "current_core_event_hash": current_hash,
+            "current_corpus_sha256": current_corpus_sha256,
             "metadata": meta,
         }
     finally:
@@ -287,12 +308,16 @@ def semantic_neighbors(
         meta = {str(row[0]): str(row[1]) for row in sidecar.execute("SELECT key, value FROM meta")}
         if meta.get("schema_version") != VECTOR_SCHEMA_VERSION:
             return [], "vector_schema_mismatch"
-        core_head = conn.execute(
-            "SELECT event_seq, event_hash FROM brain_events ORDER BY event_seq DESC LIMIT 1"
-        ).fetchone()
-        if meta.get("core_event_seq") != str(
-            core_head["event_seq"] if core_head else 0
-        ) or meta.get("core_event_hash") != str(core_head["event_hash"] if core_head else ""):
+        corpus_rows = list(
+            conn.execute(
+                "SELECT belief_id, body, scope_type, scope_id, visibility, egress_policy, "
+                "last_compiled_at FROM current_beliefs "
+                "WHERE serve=1 AND status='current' ORDER BY belief_id"
+            )
+        )
+        if meta.get("corpus_sha256") != _corpus_fingerprint(
+            corpus_rows
+        ) or meta.get("corpus_rows") != str(len(corpus_rows)):
             return [], "vector_sidecar_stale"
         model = meta.get("model") or DEFAULT_EMBED_MODEL
         configured_model = os.environ.get("OCBRAIN_EMBED_MODEL") or DEFAULT_EMBED_MODEL
@@ -476,6 +501,25 @@ def _document_text(row: sqlite3.Row) -> str:
     # The projection has already removed archive/catalog/path-only rows.  Keep
     # the derived embedding input deliberately simple and reproducible.
     return str(row["body"]).strip()
+
+
+def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        document = {
+            "belief_id": str(row["belief_id"]),
+            "body": str(row["body"]),
+            "scope_type": str(row["scope_type"]),
+            "scope_id": str(row["scope_id"]),
+            "visibility": str(row["visibility"]),
+            "egress_policy": str(row["egress_policy"]),
+            "last_compiled_at": str(row["last_compiled_at"]),
+        }
+        digest.update(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 __all__ = [

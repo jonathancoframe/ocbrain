@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ocbrain.closeout import record_closeout
 from ocbrain.core_v1 import (
     CORE_V1_SCHEMA_VERSION,
     append_core_event,
+    automatic_activation_enabled,
     canonical_json,
     compilation_block_reason,
     get_core_v1_belief,
@@ -46,6 +48,106 @@ MAX_CONTEXT_QUERY_CHARS = 4_000
 MAX_ITEM_EXCERPT_CHARS = 1_600
 MAX_ITEM_SOURCE_HANDLES = 3
 RETRIEVAL_ID_PLACEHOLDER = "ret_0000000000000000"
+
+AUTO_COMPILE_BELIEF_TYPE = "auto_compiled"
+AUTO_COMPILE_CONFIDENCE = 0.6
+AUTO_COMPILE_TITLE_CHARS = 80
+
+
+def _auto_compile_title(body: str) -> str:
+    line = body.strip().splitlines()[0] if body.strip() else "auto-compiled belief"
+    return line[:AUTO_COMPILE_TITLE_CHARS]
+
+
+def auto_compile_scope(context: ScopeContext) -> ScopeTag:
+    """Scope for unattended promotion: broadest shared context, never hosted.
+
+    Continuity across clients means a belief compiled while Claude Code worked
+    should be recallable by Codex or Cursor on the same project. So this prefers
+    the widest *shared* scope (project, then repo, then client) rather than the
+    narrowest one ``resolve_write_scope`` picks. Egress stays ``local_only`` so
+    automation can never promote content into hosted-model delivery; visibility
+    is ``internal`` so same-instance clients share it. Task/session-only or
+    empty contexts fall back to the standard narrow write scope.
+    """
+    for scope_type, value in (
+        ("project", context.project),
+        ("repo", context.repo),
+        ("client", context.client),
+    ):
+        if value:
+            return ScopeTag(
+                scope_type,
+                f"{scope_type}:{value}",
+                visibility="internal",
+                egress_policy="local_only",
+                provenance="auto_compiled",
+            )
+    return resolve_write_scope(context)
+
+
+def auto_compile_evidence(
+    conn: sqlite3.Connection,
+    *,
+    evidence_id: str,
+    body: str,
+    scope: ScopeTag,
+    actor: str,
+    source_kind: str,
+) -> str:
+    """Promote one just-recorded evidence into a served belief, no human review.
+
+    Called only when ``automatic_activation`` is enabled. The belief inherits
+    the evidence scope and visibility verbatim, so unattended promotion can
+    never widen egress (confidential/local_only evidence yields a
+    confidential/local_only belief). The belief id is content-and-scope stable,
+    so re-ingesting identical evidence converges on one belief instead of
+    appending duplicate compilation events.
+    """
+    belief_id = stable_id("belief", "auto", body, scope.scope_id)
+    scope_dict = scope.to_dict()
+    existing = get_core_v1_belief(conn, belief_id)
+    if (
+        existing is not None
+        and existing.get("status") == "current"
+        and bool(existing.get("serve"))
+        and str(existing.get("body")) == body
+        and existing.get("scope") == scope_dict
+    ):
+        return belief_id
+    proposal_id = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "schema_version": "ocbrain.compilation.v1",
+            "subject": {"kind": "belief", "id": belief_id},
+            "belief_id": belief_id,
+            "belief_type": AUTO_COMPILE_BELIEF_TYPE,
+            "body": body,
+            "evidence_ids": [evidence_id],
+            "scope": scope_dict,
+            "confidence": AUTO_COMPILE_CONFIDENCE,
+            "reward_band": "weak",
+            "attributes": {
+                "title": _auto_compile_title(body),
+                "auto_compiled": True,
+                "source_kind": source_kind,
+                "source_evidence_id": evidence_id,
+                "content_sha256": sha256_text(body),
+                "lifecycle": "durable",
+            },
+        },
+        writer=actor,
+    )
+    decide_proposal_v1(
+        conn,
+        proposal_event_id=proposal_id,
+        decision="approve",
+        actor=actor,
+        edited_body=None,
+        reason="automatic_activation",
+    )
+    return belief_id
 
 
 def build_context_v1(
@@ -473,6 +575,7 @@ def digest_v1(
     *,
     context: ScopeContext,
     limit: int,
+    since: str | None = None,
     delivery_target: str = LOCAL_MODEL_TARGET,
 ) -> dict[str, Any]:
     _require_v1(conn)
@@ -545,8 +648,153 @@ def digest_v1(
         "resolved_context": context.to_dict(),
         "counts": counts,
         "current": current,
+        "recent_closeouts": _recent_closeouts_v1(
+            conn,
+            context=context,
+            limit=min(limit, 5),
+            since=since,
+            delivery_target=delivery_target,
+        ),
         "excluded_scope_count": excluded,
     }
+
+
+def _recent_closeouts_v1(
+    conn: sqlite3.Connection,
+    *,
+    context: ScopeContext,
+    limit: int,
+    since: str | None,
+    delivery_target: str,
+) -> list[dict[str, Any]]:
+    """Return a tiny recent-work register without promoting receipts to beliefs.
+
+    Closeouts are execution receipts, not current truth.  They are still the
+    best source for "what just happened?" before a curator has promoted a
+    durable fact.  Keep this lane deliberately narrow: high-signal receipts
+    only, newest receipt per task, at most five.
+    """
+    if delivery_target != LOCAL_MODEL_TARGET:
+        return []
+    earliest = _digest_since(since)
+    rows = conn.execute(
+        """
+        SELECT receipt_json
+        FROM task_closeouts
+        WHERE closed_at >= ?
+        ORDER BY closed_at DESC, id DESC
+        LIMIT 250
+        """,
+        (earliest.isoformat(timespec="microseconds"),),
+    )
+    result: list[dict[str, Any]] = []
+    seen_tasks: set[str] = set()
+    for row in rows:
+        receipt = json.loads(row["receipt_json"])
+        task_ref = str(receipt.get("task_ref") or "").strip()
+        if not task_ref or task_ref in seen_tasks:
+            continue
+        if not _closeout_matches_context(receipt, context):
+            continue
+        if not _high_signal_closeout(receipt):
+            continue
+        seen_tasks.add(task_ref)
+        artifacts = []
+        for artifact in receipt.get("artifact_refs") or []:
+            if not isinstance(artifact, dict) or not artifact.get("uri"):
+                continue
+            artifacts.append(
+                {
+                    key: artifact[key]
+                    for key in ("uri", "kind", "label", "sha256")
+                    if artifact.get(key)
+                }
+            )
+            if len(artifacts) >= 4:
+                break
+        decision = receipt.get("decision") if isinstance(receipt.get("decision"), dict) else {}
+        result.append(
+            {
+                "id": receipt.get("id"),
+                "task_ref": task_ref,
+                "status": receipt.get("status"),
+                "summary": _human_excerpt(receipt.get("summary"), 600),
+                "closed_at": receipt.get("closed_at"),
+                "verification_status": receipt.get("verification_status"),
+                "decision_impact": decision.get("impact"),
+                "decision_note": _human_excerpt(decision.get("note"), 300),
+                "artifacts": artifacts,
+                "context": {
+                    key: value
+                    for key, value in (receipt.get("context") or {}).items()
+                    if key in {"project", "repo", "client", "task", "runtime"} and value
+                },
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _digest_since(raw: str | None) -> datetime:
+    if raw:
+        normalized = raw.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("since must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    return datetime.now(UTC) - timedelta(hours=72)
+
+
+def _closeout_matches_context(receipt: dict[str, Any], context: ScopeContext) -> bool:
+    receipt_context = receipt.get("context")
+    if not isinstance(receipt_context, dict):
+        receipt_context = {}
+    scoped = False
+    for key in ("project", "repo", "client"):
+        expected = getattr(context, key)
+        if not expected:
+            continue
+        scoped = True
+        if str(receipt_context.get(key) or "") != expected:
+            return False
+    if not scoped and context.task:
+        return (
+            str(receipt.get("task_ref") or "") == context.task
+            or str(receipt_context.get("task") or "") == context.task
+        )
+    return True
+
+
+def _high_signal_closeout(receipt: dict[str, Any]) -> bool:
+    status = str(receipt.get("status") or "")
+    if status not in {"completed", "partial", "blocked"}:
+        return False
+    artifacts = receipt.get("artifact_refs")
+    has_artifacts = isinstance(artifacts, list) and any(
+        isinstance(item, dict) and item.get("uri") for item in artifacts
+    )
+    decision = receipt.get("decision")
+    impact = str(decision.get("impact") or "") if isinstance(decision, dict) else ""
+    verification = str(receipt.get("verification_status") or "")
+    return (
+        verification == "verified"
+        or has_artifacts
+        or impact in {"changed", "prevented_error"}
+        or (status == "blocked" and bool(receipt.get("awaiting")))
+    )
+
+
+def _human_excerpt(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def feedback_v1(
@@ -579,20 +827,36 @@ def ingest_v1(
     session_id: str | None,
     artifact_ref: str | None,
 ) -> dict[str, Any]:
+    auto = automatic_activation_enabled(conn)
+    # When auto-compiling, the evidence and its belief share one scope so
+    # brain.source expansion stays scope-consistent, and that scope is the
+    # shared continuity scope rather than the narrowest per-client one.
+    scope = auto_compile_scope(context) if auto else resolve_write_scope(context)
     evidence_id, event_id = record_core_v1_evidence(
         conn,
         body=body,
         kind=kind,
-        scope=resolve_write_scope(context),
+        scope=scope,
         writer=writer,
         session_id=session_id,
         artifact_ref=artifact_ref,
     )
-    return {
+    result = {
         "event_id": event_id,
         "evidence_id": evidence_id,
         "kind": "evidence_recorded",
     }
+    if auto:
+        result["auto_compiled_belief_id"] = auto_compile_evidence(
+            conn,
+            evidence_id=evidence_id,
+            body=body,
+            scope=scope,
+            actor=writer,
+            source_kind=kind,
+        )
+        result["kind"] = "evidence_recorded_and_compiled"
+    return result
 
 
 def closeout_v1(
@@ -612,7 +876,7 @@ def closeout_v1(
     awaiting: str | None,
     actor: str,
 ) -> dict[str, Any]:
-    return record_closeout(
+    receipt = record_closeout(
         conn,
         task_ref=task_ref,
         status=status,
@@ -628,6 +892,28 @@ def closeout_v1(
         awaiting=awaiting,
         actor=actor,
     )
+    if automatic_activation_enabled(conn):
+        # Make the closeout summary recallable by a later retrieval on the same
+        # project: record it as scoped evidence and promote it under the shared
+        # continuity scope.
+        scope = auto_compile_scope(context)
+        evidence_id, _event_id = record_core_v1_evidence(
+            conn,
+            body=summary,
+            kind="task_closeout_summary",
+            scope=scope,
+            writer=actor,
+            artifact_ref=f"closeout:{receipt['id']}",
+        )
+        receipt["auto_compiled_belief_id"] = auto_compile_evidence(
+            conn,
+            evidence_id=evidence_id,
+            body=summary,
+            scope=scope,
+            actor=actor,
+            source_kind="task_closeout_summary",
+        )
+    return receipt
 
 
 def correct_v1(
@@ -1080,6 +1366,8 @@ def _require_v1(conn: sqlite3.Connection) -> None:
 
 
 __all__ = [
+    "auto_compile_evidence",
+    "auto_compile_scope",
     "build_context_v1",
     "bind_retrieval_id_v1",
     "closeout_v1",

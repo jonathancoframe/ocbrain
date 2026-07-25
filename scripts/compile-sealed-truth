@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+REPO="/Users/jonathancoframe/Developer/ocbrain"
+exec "$REPO/.venv/bin/python" "$REPO/scripts/compile-sealed-truth.py" "$@"
+

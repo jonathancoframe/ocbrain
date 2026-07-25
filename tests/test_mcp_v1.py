@@ -4,6 +4,7 @@ import io
 import json
 import sys
 
+from ocbrain.closeout import record_closeout
 from ocbrain.core_v1 import (
     append_core_event,
     init_core_v1,
@@ -16,7 +17,7 @@ from ocbrain.mcp import (
     handle_request,
     serve,
 )
-from ocbrain.scope import ScopeTag
+from ocbrain.scope import ScopeContext, ScopeTag
 
 
 def _payload(response):
@@ -254,6 +255,111 @@ def test_v1_context_source_feedback_closeout_round_trip(tmp_path):
         ).fetchone()[0]
         == 1
     )
+
+
+def test_v1_digest_includes_only_scoped_high_signal_recent_closeouts(tmp_path):
+    conn = _seed_v1(tmp_path)
+    record_closeout(
+        conn,
+        task_ref="verified-ocbrain-work",
+        status="completed",
+        summary="Added a bounded human-readable recent-work register.",
+        context=ScopeContext(project="ocbrain", runtime="codex"),
+        verifier_refs=[
+            {
+                "uri": "pytest://test_recent_closeouts",
+                "kind": "pytest",
+                "status": "passed",
+            }
+        ],
+        artifact_refs=[
+            {
+                "uri": "file:///tmp/recent-work.json",
+                "kind": "report",
+                "sha256": "a" * 64,
+            }
+        ],
+    )
+    record_closeout(
+        conn,
+        task_ref="routine-ocbrain-health-check",
+        status="completed",
+        summary="Checked the service and found no material change.",
+        context=ScopeContext(project="ocbrain", runtime="codex"),
+    )
+    record_closeout(
+        conn,
+        task_ref="verified-other-project-work",
+        status="completed",
+        summary="This result belongs to another project.",
+        context=ScopeContext(project="other", runtime="codex"),
+        verifier_refs=[
+            {
+                "uri": "pytest://other",
+                "kind": "pytest",
+                "status": "passed",
+            }
+        ],
+    )
+    conn.commit()
+
+    digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain", "runtime": "codex"},
+                    "since": "2020-01-01T00:00:00Z",
+                },
+            ),
+        )
+    )
+    assert [item["task_ref"] for item in digest["recent_closeouts"]] == [
+        "verified-ocbrain-work"
+    ]
+    recent = digest["recent_closeouts"][0]
+    assert recent["verification_status"] == "verified"
+    assert recent["summary"] == "Added a bounded human-readable recent-work register."
+    assert recent["context"] == {"project": "ocbrain", "runtime": "codex"}
+    assert recent["artifacts"] == [
+        {
+            "uri": "file:///tmp/recent-work.json",
+            "kind": "report",
+            "sha256": "a" * 64,
+        }
+    ]
+
+    future_digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain"},
+                    "since": "2999-01-01T00:00:00Z",
+                },
+                request_id=2,
+            ),
+        )
+    )
+    assert future_digest["recent_closeouts"] == []
+
+    hosted_digest = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.digest",
+                {
+                    "context": {"project": "ocbrain"},
+                    "since": "2020-01-01T00:00:00Z",
+                },
+                request_id=3,
+            ),
+            delivery_target="hosted_model",
+        )
+    )
+    assert hosted_digest["recent_closeouts"] == []
 
 
 def test_v1_source_provenance_sample_is_bounded(tmp_path):
@@ -968,7 +1074,9 @@ def test_v1_source_handles_follow_current_linkage_and_policy_revocation(tmp_path
     assert "not eligible for hosted_model" in revoked["error"]["message"]
 
 
-def test_v1_stdio_is_hosted_and_tool_arguments_cannot_override_delivery(tmp_path, monkeypatch):
+def test_v1_stdio_defaults_local_and_tool_arguments_cannot_override_delivery(
+    tmp_path, monkeypatch
+):
     conn, _ids = _seed_delivery_v1(tmp_path)
     conn.close()
     frames = "\n".join(
@@ -980,7 +1088,7 @@ def test_v1_stdio_is_hosted_and_tool_arguments_cannot_override_delivery(tmp_path
                     {
                         "query": "Delivery target sentinel",
                         "context": {"project": "ocbrain"},
-                        "delivery_target": "local_model",
+                        "delivery_target": "hosted_model",
                     },
                     request_id=2,
                 )
@@ -991,9 +1099,25 @@ def test_v1_stdio_is_hosted_and_tool_arguments_cannot_override_delivery(tmp_path
     output = io.StringIO()
     monkeypatch.setattr(sys, "stdout", output)
 
+    # The stdio server defaults to local_model so local coding agents get
+    # full-fidelity delivery of their own memory.
     assert serve(tmp_path / "delivery-v1.sqlite") == 0
 
     initialize, override = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert initialize["result"]["serverInfo"]["deliveryTarget"] == "hosted_model"
+    assert initialize["result"]["serverInfo"]["deliveryTarget"] == "local_model"
     assert override["error"]["code"] == -32602
     assert "server-controlled" in override["error"]["message"]
+
+
+def test_v1_stdio_delivery_target_is_selectable(tmp_path, monkeypatch):
+    conn, _ids = _seed_delivery_v1(tmp_path)
+    conn.close()
+    frames = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+    monkeypatch.setattr(sys, "stdin", io.StringIO(frames))
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    assert serve(tmp_path / "delivery-v1.sqlite", delivery_target="hosted_model") == 0
+
+    initialize = json.loads(output.getvalue().splitlines()[0])
+    assert initialize["result"]["serverInfo"]["deliveryTarget"] == "hosted_model"
