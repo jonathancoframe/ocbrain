@@ -132,7 +132,10 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     _seed_belief(conn, belief_id="curated:bountiful:tomato", body="Tomatoes are available.")
     conn.commit()
 
+    embedded_texts = []
+
     def fake_embed(texts, **_kwargs):
+        embedded_texts.extend(texts)
         result = []
         for text in texts:
             lowered = text.lower()
@@ -152,6 +155,8 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     )
     built = build_vector_index(path, model="test-local")
     assert built["rows"] == 2
+    assert built["embedded_rows"] == 2
+    assert built["reused_rows"] == 0
     assert vector_status(path)["healthy"] is True
 
     append_core_event(
@@ -212,6 +217,14 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     assert stale["ranking"]["mode"] == "lexical"
     assert stale["ranking"]["dense_fallback"] == "vector_sidecar_stale"
     assert stale["items"][0]["belief_id"] == "curated:bountiful:pear"
+
+    embedded_before = len(embedded_texts)
+    rebuilt = build_vector_index(path, model="test-local")
+    assert rebuilt["rows"] == 3
+    assert rebuilt["embedded_rows"] == 1
+    assert rebuilt["reused_rows"] == 2
+    assert len(embedded_texts) == embedded_before + 1
+    assert vector_status(path)["healthy"] is True
 
 
 def test_irrelevant_fresh_dense_candidate_cannot_outrank_exact_lexical_match(

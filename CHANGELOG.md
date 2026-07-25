@@ -10,6 +10,9 @@
 - Bound local dense-index inputs to a deterministic 1,800-byte head/tail view
   so Ollama runners do not terminate on long or token-dense transcript beliefs,
   and preserve the endpoint's structured HTTP error when a local rebuild fails.
+- Reuse content-hash-identical vectors during an atomic rebuild so a small
+  corpus delta embeds only changed or new beliefs instead of recomputing the
+  entire disposable sidecar.
 - Harden the optional compilers before activation: hosted curator prompts now
   enforce exact project, visibility, and egress gates for both evidence and
   existing wiki facts; `local_only`, prohibited, confidential, and secret
