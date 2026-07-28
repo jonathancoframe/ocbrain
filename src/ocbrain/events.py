@@ -20,6 +20,103 @@ EVENT_KINDS = {
 REWARD_BANDS = {"discard", "weak", "moderate", "strong"}
 DECISIONS = ("approve", "reject", "edit", "shadow")
 
+# Skill-usage telemetry convention (docs/SKILL_TELEMETRY.md). These are
+# *evidence* kinds (brain.ingest ``kind=``), not ledger EVENT_KINDS: a skill
+# lifecycle observation is evidence about what an agent ran, never a belief.
+# The envelope is metadata only — hashes, URIs, and ids. Skill bodies,
+# prompts, transcripts, and tool output are forbidden fields.
+SKILL_TELEMETRY_SCHEMA_VERSION = "ocbrain.skill_telemetry.v1"
+SKILL_TELEMETRY_KINDS = frozenset(
+    {
+        "skill_build",
+        "skill_install",
+        "skill_load",
+        "skill_outcome",
+        "skill_correction_candidate",
+        "skill_retirement",
+    }
+)
+SKILL_TELEMETRY_REQUIRED_FIELDS = frozenset({"schema_version", "kind", "skill_id"})
+SKILL_TELEMETRY_LOCATOR_FIELDS = frozenset(
+    {"source_commit", "tree_sha256", "skill_uri"}
+)
+SKILL_TELEMETRY_OPTIONAL_FIELDS = frozenset(
+    {
+        "skill_version",
+        "runtime",
+        "session_id",
+        "task_ref",
+        "outcome",
+        "evidence_id",
+        "parent_event_id",
+        "artifact_uri",
+        "artifact_sha256",
+        "superseded_by",
+        "reason_code",
+    }
+)
+SKILL_TELEMETRY_FORBIDDEN_FIELDS = frozenset(
+    {
+        "skill_body",
+        "skill_markdown",
+        "skill_text",
+        "transcript",
+        "messages",
+        "prompt",
+        "completion",
+        "tool_output",
+        "body",
+    }
+)
+
+
+def validate_skill_telemetry(envelope: dict[str, Any] | str) -> dict[str, Any]:
+    """Validate one skill-telemetry envelope, returning it as a dict.
+
+    Producers call this before ``brain.ingest`` (kind = one of
+    SKILL_TELEMETRY_KINDS, body = the canonical JSON envelope). Raises
+    ValueError on the first violation.
+    """
+    parsed = envelope
+    if isinstance(envelope, str):
+        try:
+            parsed = json.loads(envelope)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"skill telemetry envelope must be JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("skill telemetry envelope must be a JSON object")
+    missing = SKILL_TELEMETRY_REQUIRED_FIELDS - set(parsed)
+    if missing:
+        raise ValueError(f"skill telemetry missing required fields: {sorted(missing)}")
+    if parsed["schema_version"] != SKILL_TELEMETRY_SCHEMA_VERSION:
+        raise ValueError(
+            f"skill telemetry schema_version must be {SKILL_TELEMETRY_SCHEMA_VERSION}"
+        )
+    if parsed["kind"] not in SKILL_TELEMETRY_KINDS:
+        raise ValueError(f"unknown skill telemetry kind: {parsed['kind']}")
+    if not str(parsed.get("skill_id") or "").strip():
+        raise ValueError("skill telemetry skill_id must be non-empty")
+    if not any(str(parsed.get(field) or "").strip() for field in SKILL_TELEMETRY_LOCATOR_FIELDS):
+        raise ValueError(
+            "skill telemetry needs at least one locator: "
+            + ", ".join(sorted(SKILL_TELEMETRY_LOCATOR_FIELDS))
+        )
+    forbidden = SKILL_TELEMETRY_FORBIDDEN_FIELDS & set(parsed)
+    if forbidden:
+        raise ValueError(
+            "skill telemetry is metadata-only; forbidden content fields: "
+            f"{sorted(forbidden)}"
+        )
+    unknown = (
+        set(parsed)
+        - SKILL_TELEMETRY_REQUIRED_FIELDS
+        - SKILL_TELEMETRY_LOCATOR_FIELDS
+        - SKILL_TELEMETRY_OPTIONAL_FIELDS
+    )
+    if unknown:
+        raise ValueError(f"unknown skill telemetry fields: {sorted(unknown)}")
+    return parsed
+
 
 def append_event(
     conn: sqlite3.Connection,
