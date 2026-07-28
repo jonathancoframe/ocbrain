@@ -19,6 +19,36 @@
   objects can never be overridden into hosted delivery; sealed truth requires
   an explicit verified status plus passed verifier evidence and is preview-only
   unless `--apply` is supplied; curator defaults are installation-neutral.
+- Accept dot-free MCP tool names (`brain_context`) that clients such as Cursor
+  substitute for the canonical dotted names (`brain.context`). The profile
+  gate previously rejected every tools/call from those clients as "not
+  available". Unknown or ambiguous spellings still raise PermissionError.
+- Exact-locator retrieval: `brain.search` on the v1 core now runs an
+  exact-match pre-pass before semantic ranking. Queries that are locators —
+  event/evidence/belief/closeout/retrieval-use ids, artifact URIs or SHA-256
+  hashes, or an exact `task_ref` on a recorded closeout — return
+  `match_mode: "exact"` with metadata-only, scope-gated `exact_matches`
+  instead of unrelated ranked beliefs. Auto-derived
+  `retrieval_uses.task_ref` values are never matched, so a repeated query
+  cannot hijack itself. Closeout and retrieval receipts remain local-only,
+  underspecified contexts fail closed, and hosted evidence/event metadata
+  redacts local locators and writers.
+- Wiki freshness and supersession: materialized pages carry `valid_from`
+  frontmatter (derived from `last_compiled_at`) plus optional `valid_until` /
+  `superseded_by` from belief attributes; `index.md` renders
+  `**[stale: ...]**` markers, and stale pages show a notice under their
+  title. Validity timestamps are normalized to UTC before comparison. New
+  `scripts/wiki-lint.py` flags expired/superseded pages, pages the ledger no
+  longer serves as current, pages older than the ledger's latest compilation,
+  and conflicting pages that share a key.
+- Skill-usage telemetry convention (`docs/SKILL_TELEMETRY.md`): a metadata-only
+  event envelope (`ocbrain.skill_telemetry.v1`) for `skill_build`,
+  `skill_install`, `skill_load`, `skill_outcome`,
+  `skill_correction_candidate`, and `skill_retirement` evidence — hashes,
+  URIs, and ids only, never skill bodies or transcripts. Constants and
+  `validate_skill_telemetry()` live in `ocbrain.events`; both legacy and v1
+  ingest paths enforce the envelope, and automatic activation never promotes
+  telemetry evidence into current truth.
 - Bound SQLite writer-lock windows so concurrent agents stop seeing "database
   is locked": `import-history` now commits after every file instead of holding
   one implicit write transaction across up to `--batch-size` slow redactions

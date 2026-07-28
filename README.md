@@ -150,6 +150,17 @@ scripts/compile-sealed-truth --seal /private/release/SEAL.json
 scripts/compile-sealed-truth --seal /private/release/SEAL.json --apply
 ```
 
+Wiki pages carry lightweight freshness frontmatter (`valid_from`, plus
+optional `valid_until` / `superseded_by` from belief attributes); `index.md`
+renders a `**[stale: ...]**` marker for expired or superseded pages, and
+`scripts/wiki-lint.py` flags expired/superseded pages, pages the ledger no
+longer serves as current, pages older than the ledger's latest compilation,
+and conflicting pages that share a key:
+
+```bash
+.venv/bin/python scripts/wiki-lint.py /path/to/wiki --db /absolute/core.sqlite
+```
+
 ## The runtime loop
 
 ```text

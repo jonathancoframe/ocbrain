@@ -46,6 +46,8 @@ from ocbrain.db import (
 )
 from ocbrain.egress import egress_preview
 from ocbrain.events import (
+    SKILL_TELEMETRY_KINDS,
+    canonical_json,
     decide_compilation,
     event_core_digest,
     evidence_id_for,
@@ -55,6 +57,7 @@ from ocbrain.events import (
     record_correction,
     record_evidence,
     record_tombstone,
+    validate_skill_telemetry,
 )
 from ocbrain.fsutil import file_fingerprint, history_runtime
 from ocbrain.hybrid import build_vector_index, vector_status
@@ -1722,13 +1725,20 @@ def cmd_preview(args: argparse.Namespace) -> int:
 
 def cmd_event_ingest(args: argparse.Namespace) -> int:
     conn = open_db(args)
+    body = args.body
+    kind = args.kind
+    if kind in SKILL_TELEMETRY_KINDS:
+        envelope = validate_skill_telemetry(body)
+        if envelope["kind"] != kind:
+            raise ValueError("skill telemetry body kind must match event-ingest kind")
+        body = canonical_json(envelope)
     scope = global_scope() if args.global_doctrine else resolve_write_scope(context_from_args(args))
     if is_core_v1(conn):
         if args.global_doctrine:
             evidence_id, event_id = record_core_v1_evidence(
                 conn,
-                body=args.body,
-                kind=args.kind,
+                body=body,
+                kind=kind,
                 scope=scope,
                 writer=args.writer,
                 session_id=args.session,
@@ -1738,8 +1748,8 @@ def cmd_event_ingest(args: argparse.Namespace) -> int:
         else:
             result = ingest_v1(
                 conn,
-                body=args.body,
-                kind=args.kind,
+                body=body,
+                kind=kind,
                 context=context_from_args(args),
                 writer=args.writer,
                 session_id=args.session,
@@ -1750,8 +1760,8 @@ def cmd_event_ingest(args: argparse.Namespace) -> int:
         return 0
     event_id = record_evidence(
         conn,
-        body=args.body,
-        kind=args.kind,
+        body=body,
+        kind=kind,
         context=context_from_args(args),
         scope=scope,
         writer=args.writer,

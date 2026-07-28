@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -19,6 +20,137 @@ EVENT_KINDS = {
 }
 REWARD_BANDS = {"discard", "weak", "moderate", "strong"}
 DECISIONS = ("approve", "reject", "edit", "shadow")
+
+# Skill-usage telemetry convention (docs/SKILL_TELEMETRY.md). These are
+# *evidence* kinds (brain.ingest ``kind=``), not ledger EVENT_KINDS: a skill
+# lifecycle observation is evidence about what an agent ran, never a belief.
+# The envelope is metadata only — hashes, URIs, and ids. Skill bodies,
+# prompts, transcripts, and tool output are forbidden fields.
+SKILL_TELEMETRY_SCHEMA_VERSION = "ocbrain.skill_telemetry.v1"
+SKILL_TELEMETRY_KINDS = frozenset(
+    {
+        "skill_build",
+        "skill_install",
+        "skill_load",
+        "skill_outcome",
+        "skill_correction_candidate",
+        "skill_retirement",
+    }
+)
+SKILL_TELEMETRY_REQUIRED_FIELDS = frozenset({"schema_version", "kind", "skill_id"})
+SKILL_TELEMETRY_LOCATOR_FIELDS = frozenset(
+    {"source_commit", "tree_sha256", "skill_uri"}
+)
+SKILL_TELEMETRY_OPTIONAL_FIELDS = frozenset(
+    {
+        "skill_version",
+        "runtime",
+        "session_id",
+        "task_ref",
+        "outcome",
+        "evidence_id",
+        "parent_event_id",
+        "artifact_uri",
+        "artifact_sha256",
+        "superseded_by",
+        "reason_code",
+    }
+)
+SKILL_TELEMETRY_FORBIDDEN_FIELDS = frozenset(
+    {
+        "skill_body",
+        "skill_markdown",
+        "skill_text",
+        "transcript",
+        "messages",
+        "prompt",
+        "completion",
+        "tool_output",
+        "body",
+    }
+)
+SKILL_TELEMETRY_MAX_FIELD_CHARS = 2_048
+SKILL_TELEMETRY_MAX_ENVELOPE_BYTES = 16_384
+_SKILL_TELEMETRY_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_SKILL_TELEMETRY_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def validate_skill_telemetry(envelope: dict[str, Any] | str) -> dict[str, Any]:
+    """Validate one skill-telemetry envelope, returning it as a dict.
+
+    Producers call this before ``brain.ingest`` (kind = one of
+    SKILL_TELEMETRY_KINDS, body = the canonical JSON envelope). Raises
+    ValueError on the first violation.
+    """
+    parsed = envelope
+    if isinstance(envelope, str):
+        try:
+            parsed = json.loads(envelope)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"skill telemetry envelope must be JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("skill telemetry envelope must be a JSON object")
+    missing = SKILL_TELEMETRY_REQUIRED_FIELDS - set(parsed)
+    if missing:
+        raise ValueError(f"skill telemetry missing required fields: {sorted(missing)}")
+    forbidden = SKILL_TELEMETRY_FORBIDDEN_FIELDS & set(parsed)
+    if forbidden:
+        raise ValueError(
+            "skill telemetry is metadata-only; forbidden content fields: "
+            f"{sorted(forbidden)}"
+        )
+    unknown = (
+        set(parsed)
+        - SKILL_TELEMETRY_REQUIRED_FIELDS
+        - SKILL_TELEMETRY_LOCATOR_FIELDS
+        - SKILL_TELEMETRY_OPTIONAL_FIELDS
+    )
+    if unknown:
+        raise ValueError(f"unknown skill telemetry fields: {sorted(unknown)}")
+
+    normalized: dict[str, str] = {}
+    for field, value in parsed.items():
+        if not isinstance(value, str):
+            raise ValueError(f"skill telemetry field {field} must be a string")
+        text = value.strip()
+        if not text:
+            raise ValueError(f"skill telemetry field {field} must be non-empty")
+        if len(text) > SKILL_TELEMETRY_MAX_FIELD_CHARS:
+            raise ValueError(
+                f"skill telemetry field {field} exceeds "
+                f"{SKILL_TELEMETRY_MAX_FIELD_CHARS} characters"
+            )
+        normalized[field] = text
+
+    if normalized["schema_version"] != SKILL_TELEMETRY_SCHEMA_VERSION:
+        raise ValueError(
+            f"skill telemetry schema_version must be {SKILL_TELEMETRY_SCHEMA_VERSION}"
+        )
+    if normalized["kind"] not in SKILL_TELEMETRY_KINDS:
+        raise ValueError(f"unknown skill telemetry kind: {normalized['kind']}")
+    if not any(normalized.get(field) for field in SKILL_TELEMETRY_LOCATOR_FIELDS):
+        raise ValueError(
+            "skill telemetry needs at least one locator: "
+            + ", ".join(sorted(SKILL_TELEMETRY_LOCATOR_FIELDS))
+        )
+    for field in ("tree_sha256", "artifact_sha256"):
+        value = normalized.get(field)
+        if value is not None:
+            if not _SKILL_TELEMETRY_SHA256_RE.fullmatch(value):
+                raise ValueError(f"skill telemetry field {field} must be a full SHA-256")
+            normalized[field] = value.lower()
+    source_commit = normalized.get("source_commit")
+    if source_commit is not None:
+        if not _SKILL_TELEMETRY_COMMIT_RE.fullmatch(source_commit):
+            raise ValueError(
+                "skill telemetry field source_commit must be a 7-64 character hex commit id"
+            )
+        normalized["source_commit"] = source_commit.lower()
+    if len(canonical_json(normalized).encode("utf-8")) > SKILL_TELEMETRY_MAX_ENVELOPE_BYTES:
+        raise ValueError(
+            f"skill telemetry envelope exceeds {SKILL_TELEMETRY_MAX_ENVELOPE_BYTES} bytes"
+        )
+    return normalized
 
 
 def append_event(
