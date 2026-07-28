@@ -29,6 +29,7 @@ from ocbrain.core_v1 import (
     search_core_v1,
     sha256_text,
 )
+from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
 from ocbrain.ids import stable_id
 from ocbrain.scope import (
     HOSTED_MODEL_TARGET,
@@ -448,6 +449,82 @@ def exact_lookup_v1(
             cross_scope=cross_scope,
         )
 
+    def _stored_context_allowed(raw: Any, *, task_ref: str | None = None) -> bool:
+        if delivery_target != LOCAL_MODEL_TARGET:
+            return False
+        try:
+            stored = json.loads(str(raw or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(stored, dict):
+            return False
+        if not any(
+            (
+                context.project,
+                context.repo,
+                context.client,
+                context.task,
+                context.session,
+            )
+        ):
+            return False
+        if (
+            context.session
+            and not any((context.project, context.repo, context.client, context.task))
+        ):
+            return str(stored.get("session") or "") == context.session
+        return _closeout_matches_context(
+            {"context": stored, "task_ref": task_ref},
+            context,
+        )
+
+    def _event_scope_allowed(
+        event: sqlite3.Row,
+        *,
+        visited: frozenset[str] = frozenset(),
+    ) -> bool:
+        event_id = str(event["id"])
+        if event_id in visited or len(visited) >= 4:
+            return False
+        visited = visited | {event_id}
+        try:
+            body = json.loads(str(event["body_json"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(body, dict):
+            return False
+        raw_scope = body.get("scope")
+        if isinstance(raw_scope, dict):
+            return _scope_allowed_for_delivery(
+                raw_scope,
+                context=context,
+                delivery_target=delivery_target,
+                cross_scope=cross_scope,
+            )
+        subject = body.get("subject")
+        if not isinstance(subject, dict):
+            return False
+        subject_id = str(subject.get("id") or "")
+        subject_kind = str(subject.get("kind") or "")
+        if subject_kind == "evidence":
+            evidence = get_core_v1_evidence(conn, subject_id)
+            return evidence is not None and _evidence_scope_allowed(evidence)
+        if subject_kind == "belief":
+            belief = get_core_v1_belief(conn, subject_id)
+            return belief is not None and _scope_allowed_for_delivery(
+                belief.get("scope"),
+                context=context,
+                delivery_target=delivery_target,
+                cross_scope=cross_scope,
+            )
+        if subject_kind in {"event", "proposal"}:
+            parent = conn.execute(
+                "SELECT id, body_json FROM brain_events WHERE id=?",
+                (subject_id,),
+            ).fetchone()
+            return parent is not None and _event_scope_allowed(parent, visited=visited)
+        return False
+
     def _add_evidence(evidence_id: str, matched_by: str) -> None:
         evidence = get_core_v1_evidence(conn, evidence_id)
         if evidence is None or not _evidence_scope_allowed(evidence):
@@ -458,7 +535,11 @@ def exact_lookup_v1(
             str(evidence["evidence_id"]),
             matched_by,
             evidence_kind=str(evidence["kind"]),
-            artifact_uri=evidence.get("artifact_uri"),
+            artifact_uri=(
+                evidence.get("artifact_uri")
+                if delivery_target == LOCAL_MODEL_TARGET
+                else f"ocbrain://evidence/{evidence['evidence_id']}"
+            ),
             artifact_hash=evidence.get("artifact_hash"),
             content_hash=evidence.get("content_hash"),
             occurred_at=evidence.get("occurred_at"),
@@ -466,6 +547,8 @@ def exact_lookup_v1(
         )
 
     def _add_closeout(row: sqlite3.Row, matched_by: str) -> None:
+        if not _stored_context_allowed(row["context_json"], task_ref=str(row["task_ref"])):
+            return
         add(
             "closeout",
             str(row["id"]),
@@ -477,16 +560,20 @@ def exact_lookup_v1(
 
     # Stable-id equality lookups (primary keys / unique columns only).
     event = conn.execute(
-        "SELECT id, ts, kind, writer FROM brain_events WHERE id=?", (text,)
+        "SELECT id, ts, kind, writer, body_json FROM brain_events WHERE id=?", (text,)
     ).fetchone()
-    if event is not None:
+    if event is not None and _event_scope_allowed(event):
         add(
             "event",
             str(event["id"]),
             "id",
             ts=str(event["ts"]),
             event_kind=str(event["kind"]),
-            writer=str(event["writer"]),
+            writer=(
+                str(event["writer"])
+                if delivery_target == LOCAL_MODEL_TARGET
+                else None
+            ),
         )
     _add_evidence(text, "id")
     belief = get_core_v1_belief(conn, text)
@@ -506,16 +593,21 @@ def exact_lookup_v1(
             scope_id=(belief.get("scope") or {}).get("scope_id"),
         )
     closeout = conn.execute(
-        "SELECT id, task_ref, status, closed_at FROM task_closeouts WHERE id=?",
+        "SELECT id, task_ref, status, closed_at, context_json "
+        "FROM task_closeouts WHERE id=?",
         (text,),
     ).fetchone()
     if closeout is not None:
         _add_closeout(closeout, "id")
     retrieval = conn.execute(
-        "SELECT id, task_ref, outcome, served_at FROM retrieval_uses WHERE id=?",
+        "SELECT id, task_ref, outcome, served_at, context_json "
+        "FROM retrieval_uses WHERE id=?",
         (text,),
     ).fetchone()
-    if retrieval is not None:
+    if retrieval is not None and _stored_context_allowed(
+        retrieval["context_json"],
+        task_ref=str(retrieval["task_ref"] or ""),
+    ):
         add(
             "retrieval_use",
             str(retrieval["id"]),
@@ -527,7 +619,7 @@ def exact_lookup_v1(
 
     # Exact task_ref on recorded closeouts ("show me closeout X").
     for row in conn.execute(
-        "SELECT id, task_ref, status, closed_at FROM task_closeouts "
+        "SELECT id, task_ref, status, closed_at, context_json FROM task_closeouts "
         "WHERE task_ref=? ORDER BY closed_at DESC LIMIT ?",
         (text, limit),
     ):
@@ -543,7 +635,7 @@ def exact_lookup_v1(
         ):
             _add_evidence(str(row["evidence_id"]), "artifact_uri")
         for row in conn.execute(
-            "SELECT id, task_ref, status, closed_at, artifact_refs_json "
+            "SELECT id, task_ref, status, closed_at, context_json, artifact_refs_json "
             "FROM task_closeouts WHERE artifact_refs_json LIKE '%' || ? || '%' LIMIT ?",
             (text, limit * 4),
         ):
@@ -568,14 +660,14 @@ def exact_lookup_v1(
             )
             _add_evidence(str(row["evidence_id"]), matched)
         receipt = conn.execute(
-            "SELECT id, task_ref, status, closed_at FROM task_closeouts "
+            "SELECT id, task_ref, status, closed_at, context_json FROM task_closeouts "
             "WHERE content_hash=?",
             (lowered,),
         ).fetchone()
         if receipt is not None:
             _add_closeout(receipt, "content_sha256")
         for row in conn.execute(
-            "SELECT id, task_ref, status, closed_at, artifact_refs_json "
+            "SELECT id, task_ref, status, closed_at, context_json, artifact_refs_json "
             "FROM task_closeouts WHERE artifact_refs_json LIKE '%' || ? || '%' LIMIT ?",
             (lowered, limit * 4),
         ):
@@ -626,7 +718,14 @@ def search_v1(
             conn,
             query=str(payload["query"]),
             context={**context.to_dict(), "delivery_target": payload["delivery_target"]},
-            items=[{"belief_id": item["id"], "score": 1.0} for item in exact_matches],
+            items=[
+                {
+                    "object_id": item["id"],
+                    "object_kind": item["kind"],
+                    "score": 1.0,
+                }
+                for item in exact_matches
+            ],
             runtime=context.runtime or "mcp",
             task_ref=context.task or f"brain.search:{payload['query']}",
             session_id=context.session,
@@ -1065,7 +1164,13 @@ def ingest_v1(
     session_id: str | None,
     artifact_ref: str | None,
 ) -> dict[str, Any]:
-    auto = automatic_activation_enabled(conn)
+    telemetry = kind in SKILL_TELEMETRY_KINDS
+    if telemetry:
+        envelope = validate_skill_telemetry(body)
+        if envelope["kind"] != kind:
+            raise ValueError("skill telemetry body kind must match brain.ingest kind")
+        body = canonical_json(envelope)
+    auto = automatic_activation_enabled(conn) and not telemetry
     # When auto-compiling, the evidence and its belief share one scope so
     # brain.source expansion stays scope-consistent, and that scope is the
     # shared continuity scope rather than the narrowest per-client one.

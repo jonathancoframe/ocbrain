@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from ocbrain.closeout import record_closeout
 from ocbrain.core_v1 import (
+    append_core_event,
     init_core_v1,
     record_core_v1_evidence,
     sha256_text,
 )
 from ocbrain.db import connect
 from ocbrain.mcp_v1 import exact_lookup_v1, search_v1
-from ocbrain.scope import ScopeContext, ScopeTag
+from ocbrain.scope import HOSTED_MODEL_TARGET, ScopeContext, ScopeTag
 
 ARTIFACT_URI = "file:///tmp/exact-lookup-proof.txt"
 ARTIFACT_SHA256 = sha256_text("exact-lookup-proof")
@@ -131,16 +132,132 @@ def test_exact_lookup_does_not_match_retrieval_use_task_refs(tmp_path):
     assert "match_mode" not in second
 
 
-def test_exact_lookup_respects_scope_gating(tmp_path):
-    conn, _evidence_id, _event_id, _receipt = _seed(tmp_path)
-    # The evidence lives in project:ocbrain; a caller scoped to another
-    # project without cross_scope must not receive it.
+def test_exact_lookup_respects_scope_and_delivery_gating_for_every_kind(tmp_path):
+    conn, evidence_id, event_id, receipt = _seed(tmp_path)
+    local_context = ScopeContext(project="ocbrain")
+    foreign_context = ScopeContext(project="other-project")
+
+    first = _search(conn, receipt["id"])
+    retrieval_id = first["retrieval_use_id"]
+    locators = (
+        evidence_id,
+        event_id,
+        receipt["id"],
+        receipt["task_ref"],
+        retrieval_id,
+        ARTIFACT_URI,
+        ARTIFACT_SHA256,
+    )
+
+    for locator in locators:
+        assert exact_lookup_v1(conn, locator, context=foreign_context) == []
+        assert exact_lookup_v1(conn, locator, context=ScopeContext()) == []
+
+    # Closeout and retrieval receipts are local-only. Evidence/event hits still
+    # pass their own egress policies, which this fixture deliberately sets to
+    # local_only.
+    for locator in locators:
+        assert (
+            exact_lookup_v1(
+                conn,
+                locator,
+                context=local_context,
+                delivery_target=HOSTED_MODEL_TARGET,
+            )
+            == []
+        )
+
+
+def test_hosted_exact_lookup_redacts_local_evidence_metadata(tmp_path):
+    conn = connect(tmp_path / "hosted-exact-v1.sqlite")
+    init_core_v1(conn)
+    evidence_id, event_id = record_core_v1_evidence(
+        conn,
+        body="Hosted-safe evidence with a local-only source locator.",
+        kind="observation",
+        scope=ScopeTag(
+            "project",
+            "project:hosted-project",
+            egress_policy="hosted_ok",
+        ),
+        writer="private-local-writer",
+        artifact_ref="file:///Users/example/private/source.txt",
+    )
+    conn.commit()
+    context = ScopeContext(project="hosted-project")
+
+    evidence_matches = exact_lookup_v1(
+        conn,
+        evidence_id,
+        context=context,
+        delivery_target=HOSTED_MODEL_TARGET,
+    )
+    assert len(evidence_matches) == 1
+    assert evidence_matches[0]["artifact_uri"] == f"ocbrain://evidence/{evidence_id}"
+    assert "file:///Users/" not in str(evidence_matches)
+
+    event_matches = exact_lookup_v1(
+        conn,
+        event_id,
+        context=context,
+        delivery_target=HOSTED_MODEL_TARGET,
+    )
+    assert event_matches[0]["kind"] == "event"
+    assert "writer" not in event_matches[0]
+
+
+def test_exact_lookup_inherits_scope_from_a_proposal_event(tmp_path):
+    conn = connect(tmp_path / "proposal-event-v1.sqlite")
+    init_core_v1(conn)
+    scope = ScopeTag("project", "project:ocbrain")
+    proposal_id = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "schema_version": "ocbrain.compilation.v1",
+            "scope": scope.to_dict(),
+            "subject": {"kind": "belief", "id": "belief:proposal-event"},
+        },
+        writer="test",
+    )
+    decision_id = append_core_event(
+        conn,
+        "compilation_decided",
+        {
+            "schema_version": "ocbrain.compilation-decision.v1",
+            "subject": {"kind": "proposal", "id": proposal_id},
+            "decision": "reject",
+        },
+        writer="test",
+    )
+    conn.commit()
+
     matches = exact_lookup_v1(
         conn,
-        ARTIFACT_URI,
-        context=ScopeContext(project="other-project"),
+        decision_id,
+        context=ScopeContext(project="ocbrain"),
     )
-    assert all(match["kind"] != "evidence" for match in matches)
+    assert matches[0]["id"] == decision_id
+    assert matches[0]["kind"] == "event"
+    assert (
+        exact_lookup_v1(
+            conn,
+            decision_id,
+            context=ScopeContext(project="other-project"),
+        )
+        == []
+    )
+
+
+def test_exact_lookup_records_the_real_object_kind(tmp_path):
+    conn, _evidence_id, _event_id, receipt = _seed(tmp_path)
+    payload = _search(conn, receipt["id"])
+    row = conn.execute(
+        "SELECT object_id, object_kind FROM retrieval_items "
+        "WHERE retrieval_use_id=? AND rank=0",
+        (payload["retrieval_use_id"],),
+    ).fetchone()
+    assert dict(row) == {"object_id": receipt["id"], "object_kind": "closeout"}
 
 
 def test_exact_lookup_rejects_oversized_or_blank_queries(tmp_path):

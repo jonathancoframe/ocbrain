@@ -142,6 +142,19 @@ def test_page_staleness_markers_only_fire_when_derived():
     assert page_staleness_markers({"valid_until": "2026-07-01"}, now="") == []
 
 
+def test_page_staleness_normalizes_timezone_offsets_before_comparing():
+    # 00:30 +01:00 is 23:30Z on the prior day, so it is already stale.
+    assert page_staleness_markers(
+        {"valid_until": "2026-07-27T00:30:00+01:00"},
+        now="2026-07-27T00:00:00Z",
+    ) == ["past valid_until 2026-07-27T00:30:00+01:00"]
+    # 23:30 -01:00 is 00:30Z on the next day, so it is still fresh.
+    assert page_staleness_markers(
+        {"valid_until": "2026-07-26T23:30:00-01:00"},
+        now="2026-07-27T00:00:00Z",
+    ) == []
+
+
 def test_wiki_lint_flags_expired_page_and_passes_fresh_wiki(tmp_path, capsys):
     conn, wiki_dir = _materialize(
         tmp_path,

@@ -20,8 +20,10 @@ work?" without trusting prose.
 3. **Locator required.** Every event names the skill by `skill_id` plus at
    least one content locator (`source_commit`, `tree_sha256`, or
    `skill_uri`) so the exact artifact is reproducible.
-4. Validate with `validate_skill_telemetry(envelope)` before ingest; it
-   accepts a dict or a JSON string and raises `ValueError` on violation.
+4. `brain.ingest` validates telemetry again at the trust boundary. Producers
+   should also call `validate_skill_telemetry(envelope)` before ingest for an
+   earlier error; it accepts a dict or a JSON string and raises `ValueError`
+   on violation.
 
 ## Envelope
 
@@ -67,7 +69,7 @@ work?" without trusting prose.
   "kind": "skill_outcome",
   "skill_id": "ocbrain-ops",
   "source_commit": "a5b35db",
-  "tree_sha256": "9f2c…",
+  "tree_sha256": "9f2c0de7c1252565dcea6856c462d9a74ab94d6ea4f7ca9b8a3d5f105b30b19c",
   "runtime": "hermes",
   "task_ref": "mission-exact-lookup",
   "outcome": "success"

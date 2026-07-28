@@ -30,7 +30,9 @@ from ocbrain.db import (
 )
 from ocbrain.egress import egress_preview
 from ocbrain.events import (
+    SKILL_TELEMETRY_KINDS,
     approval_packet,
+    canonical_json,
     decide_compilation,
     event_core_digest,
     get_current_belief,
@@ -38,6 +40,7 @@ from ocbrain.events import (
     record_correction,
     record_evidence,
     record_tombstone,
+    validate_skill_telemetry,
 )
 from ocbrain.mcp_v1 import (
     bind_retrieval_id_v1,
@@ -839,10 +842,17 @@ def call_tool(
             }
         )
     if name == "brain.ingest":
+        body = require_string(arguments, "body")
+        kind = optional_string(arguments, "kind") or "observation"
+        if kind in SKILL_TELEMETRY_KINDS:
+            envelope = validate_skill_telemetry(body)
+            if envelope["kind"] != kind:
+                raise ValueError("skill telemetry body kind must match brain.ingest kind")
+            body = canonical_json(envelope)
         event_id = record_evidence(
             conn,
-            body=require_string(arguments, "body"),
-            kind=optional_string(arguments, "kind") or "observation",
+            body=body,
+            kind=kind,
             context=context_from_arguments(arguments),
             scope=scope_from_arguments(arguments),
             writer=optional_string(arguments, "writer") or "mcp",

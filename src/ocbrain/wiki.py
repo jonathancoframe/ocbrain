@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,18 +72,33 @@ def page_staleness_markers(
 ) -> list[str]:
     """Return human-readable staleness markers derivable from frontmatter.
 
-    ``valid_until`` and ``superseded_by`` are ISO-8601 strings / belief ids, so
-    lexical comparison against an ISO ``now`` is sufficient; no wall-clock or
-    ledger access happens here.
+    ``valid_until`` and ``now`` are normalized to UTC before comparison so
+    equivalent ISO-8601 timestamps with different offsets cannot invert the
+    result. No wall-clock or ledger access happens here.
     """
     markers: list[str] = []
     superseded_by = str(frontmatter.get("superseded_by") or "").strip()
     if superseded_by:
         markers.append(f"superseded by {superseded_by}")
     valid_until = str(frontmatter.get("valid_until") or "").strip()
-    if valid_until and now and valid_until < now:
+    valid_until_at = _parse_iso_timestamp(valid_until)
+    now_at = _parse_iso_timestamp(now)
+    if valid_until_at is not None and now_at is not None and valid_until_at < now_at:
         markers.append(f"past valid_until {valid_until}")
     return markers
+
+
+def _parse_iso_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def materialize_wiki(conn, wiki_dir: Path, *, run: dict[str, Any]) -> int:

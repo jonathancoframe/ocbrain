@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -68,6 +69,10 @@ SKILL_TELEMETRY_FORBIDDEN_FIELDS = frozenset(
         "body",
     }
 )
+SKILL_TELEMETRY_MAX_FIELD_CHARS = 2_048
+SKILL_TELEMETRY_MAX_ENVELOPE_BYTES = 16_384
+_SKILL_TELEMETRY_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_SKILL_TELEMETRY_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
 def validate_skill_telemetry(envelope: dict[str, Any] | str) -> dict[str, Any]:
@@ -88,19 +93,6 @@ def validate_skill_telemetry(envelope: dict[str, Any] | str) -> dict[str, Any]:
     missing = SKILL_TELEMETRY_REQUIRED_FIELDS - set(parsed)
     if missing:
         raise ValueError(f"skill telemetry missing required fields: {sorted(missing)}")
-    if parsed["schema_version"] != SKILL_TELEMETRY_SCHEMA_VERSION:
-        raise ValueError(
-            f"skill telemetry schema_version must be {SKILL_TELEMETRY_SCHEMA_VERSION}"
-        )
-    if parsed["kind"] not in SKILL_TELEMETRY_KINDS:
-        raise ValueError(f"unknown skill telemetry kind: {parsed['kind']}")
-    if not str(parsed.get("skill_id") or "").strip():
-        raise ValueError("skill telemetry skill_id must be non-empty")
-    if not any(str(parsed.get(field) or "").strip() for field in SKILL_TELEMETRY_LOCATOR_FIELDS):
-        raise ValueError(
-            "skill telemetry needs at least one locator: "
-            + ", ".join(sorted(SKILL_TELEMETRY_LOCATOR_FIELDS))
-        )
     forbidden = SKILL_TELEMETRY_FORBIDDEN_FIELDS & set(parsed)
     if forbidden:
         raise ValueError(
@@ -115,7 +107,50 @@ def validate_skill_telemetry(envelope: dict[str, Any] | str) -> dict[str, Any]:
     )
     if unknown:
         raise ValueError(f"unknown skill telemetry fields: {sorted(unknown)}")
-    return parsed
+
+    normalized: dict[str, str] = {}
+    for field, value in parsed.items():
+        if not isinstance(value, str):
+            raise ValueError(f"skill telemetry field {field} must be a string")
+        text = value.strip()
+        if not text:
+            raise ValueError(f"skill telemetry field {field} must be non-empty")
+        if len(text) > SKILL_TELEMETRY_MAX_FIELD_CHARS:
+            raise ValueError(
+                f"skill telemetry field {field} exceeds "
+                f"{SKILL_TELEMETRY_MAX_FIELD_CHARS} characters"
+            )
+        normalized[field] = text
+
+    if normalized["schema_version"] != SKILL_TELEMETRY_SCHEMA_VERSION:
+        raise ValueError(
+            f"skill telemetry schema_version must be {SKILL_TELEMETRY_SCHEMA_VERSION}"
+        )
+    if normalized["kind"] not in SKILL_TELEMETRY_KINDS:
+        raise ValueError(f"unknown skill telemetry kind: {normalized['kind']}")
+    if not any(normalized.get(field) for field in SKILL_TELEMETRY_LOCATOR_FIELDS):
+        raise ValueError(
+            "skill telemetry needs at least one locator: "
+            + ", ".join(sorted(SKILL_TELEMETRY_LOCATOR_FIELDS))
+        )
+    for field in ("tree_sha256", "artifact_sha256"):
+        value = normalized.get(field)
+        if value is not None:
+            if not _SKILL_TELEMETRY_SHA256_RE.fullmatch(value):
+                raise ValueError(f"skill telemetry field {field} must be a full SHA-256")
+            normalized[field] = value.lower()
+    source_commit = normalized.get("source_commit")
+    if source_commit is not None:
+        if not _SKILL_TELEMETRY_COMMIT_RE.fullmatch(source_commit):
+            raise ValueError(
+                "skill telemetry field source_commit must be a 7-64 character hex commit id"
+            )
+        normalized["source_commit"] = source_commit.lower()
+    if len(canonical_json(normalized).encode("utf-8")) > SKILL_TELEMETRY_MAX_ENVELOPE_BYTES:
+        raise ValueError(
+            f"skill telemetry envelope exceeds {SKILL_TELEMETRY_MAX_ENVELOPE_BYTES} bytes"
+        )
+    return normalized
 
 
 def append_event(
