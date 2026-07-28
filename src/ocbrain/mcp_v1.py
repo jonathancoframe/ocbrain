@@ -7,6 +7,7 @@ It never queries a legacy relational knowledge table or a companion store.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -388,6 +389,206 @@ def expand_source_v1(
     }
 
 
+EXACT_MATCH_LIMIT = 8
+EXACT_MATCH_MAX_QUERY_CHARS = 512
+_SHA256_TEXT_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def exact_lookup_v1(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    context: ScopeContext,
+    cross_scope: bool = False,
+    delivery_target: str = LOCAL_MODEL_TARGET,
+    limit: int = EXACT_MATCH_LIMIT,
+) -> list[dict[str, Any]]:
+    """Exact-locator pre-pass for ``brain.search`` on the v1 core.
+
+    Semantic ranking cannot answer "show me closeout X" or "the artifact with
+    hash H": a locator string shares no lexical terms with unrelated belief
+    bodies, so stale beliefs outrank the exact record. When the query *is* a
+    locator, equality lookups short-circuit ranking. A locator is an event,
+    evidence, belief, closeout, or retrieval-use id, an artifact URI or
+    SHA-256, or an exact ``task_ref`` on a recorded closeout.
+
+    Matches are metadata-only and scope-gated like any other delivery; expand
+    bodies through ``brain.get`` / ``brain.source``. ``retrieval_uses.task_ref``
+    is deliberately *not* matched: those refs are auto-derived from past query
+    text (``brain.search:<query>``), so matching them would let a repeated
+    search hijack itself.
+    """
+    delivery_target = normalize_delivery_target(delivery_target)
+    text = str(query).strip()
+    if not text or len(text) > EXACT_MATCH_MAX_QUERY_CHARS:
+        return []
+    limit = max(int(limit), 1)
+    matches: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, object_id: str, matched_by: str, **fields: Any) -> None:
+        key = (kind, object_id)
+        if key in seen:
+            return
+        seen.add(key)
+        matches.append(
+            {
+                "kind": kind,
+                "id": object_id,
+                "matched_by": matched_by,
+                **{k: v for k, v in fields.items() if v is not None},
+            }
+        )
+
+    def _evidence_scope_allowed(evidence: dict[str, Any]) -> bool:
+        return _scope_allowed_for_delivery(
+            evidence.get("scope"),
+            context=context,
+            delivery_target=delivery_target,
+            cross_scope=cross_scope,
+        )
+
+    def _add_evidence(evidence_id: str, matched_by: str) -> None:
+        evidence = get_core_v1_evidence(conn, evidence_id)
+        if evidence is None or not _evidence_scope_allowed(evidence):
+            return
+        scope = evidence.get("scope") or {}
+        add(
+            "evidence",
+            str(evidence["evidence_id"]),
+            matched_by,
+            evidence_kind=str(evidence["kind"]),
+            artifact_uri=evidence.get("artifact_uri"),
+            artifact_hash=evidence.get("artifact_hash"),
+            content_hash=evidence.get("content_hash"),
+            occurred_at=evidence.get("occurred_at"),
+            scope_id=scope.get("scope_id"),
+        )
+
+    def _add_closeout(row: sqlite3.Row, matched_by: str) -> None:
+        add(
+            "closeout",
+            str(row["id"]),
+            matched_by,
+            task_ref=str(row["task_ref"]),
+            status=str(row["status"]),
+            closed_at=str(row["closed_at"]),
+        )
+
+    # Stable-id equality lookups (primary keys / unique columns only).
+    event = conn.execute(
+        "SELECT id, ts, kind, writer FROM brain_events WHERE id=?", (text,)
+    ).fetchone()
+    if event is not None:
+        add(
+            "event",
+            str(event["id"]),
+            "id",
+            ts=str(event["ts"]),
+            event_kind=str(event["kind"]),
+            writer=str(event["writer"]),
+        )
+    _add_evidence(text, "id")
+    belief = get_core_v1_belief(conn, text)
+    if belief is not None and _scope_allowed_for_delivery(
+        belief.get("scope"),
+        context=context,
+        delivery_target=delivery_target,
+        cross_scope=cross_scope,
+    ):
+        add(
+            "belief",
+            str(belief["belief_id"]),
+            "id",
+            status=str(belief.get("status") or ""),
+            belief_type=belief.get("belief_type"),
+            confidence=belief.get("confidence"),
+            scope_id=(belief.get("scope") or {}).get("scope_id"),
+        )
+    closeout = conn.execute(
+        "SELECT id, task_ref, status, closed_at FROM task_closeouts WHERE id=?",
+        (text,),
+    ).fetchone()
+    if closeout is not None:
+        _add_closeout(closeout, "id")
+    retrieval = conn.execute(
+        "SELECT id, task_ref, outcome, served_at FROM retrieval_uses WHERE id=?",
+        (text,),
+    ).fetchone()
+    if retrieval is not None:
+        add(
+            "retrieval_use",
+            str(retrieval["id"]),
+            "id",
+            task_ref=retrieval["task_ref"],
+            outcome=str(retrieval["outcome"]),
+            served_at=str(retrieval["served_at"]),
+        )
+
+    # Exact task_ref on recorded closeouts ("show me closeout X").
+    for row in conn.execute(
+        "SELECT id, task_ref, status, closed_at FROM task_closeouts "
+        "WHERE task_ref=? ORDER BY closed_at DESC LIMIT ?",
+        (text, limit),
+    ):
+        _add_closeout(row, "task_ref")
+
+    # Artifact URI equality (evidence columns, then closeout artifact refs).
+    # The uri columns are unindexed, so only scan them for path-like queries.
+    if "/" in text:
+        for row in conn.execute(
+            "SELECT evidence_id FROM evidence_objects "
+            "WHERE artifact_uri=? OR source_uri=? LIMIT ?",
+            (text, text, limit),
+        ):
+            _add_evidence(str(row["evidence_id"]), "artifact_uri")
+        for row in conn.execute(
+            "SELECT id, task_ref, status, closed_at, artifact_refs_json "
+            "FROM task_closeouts WHERE artifact_refs_json LIKE '%' || ? || '%' LIMIT ?",
+            (text, limit * 4),
+        ):
+            refs = json.loads(row["artifact_refs_json"] or "[]")
+            if any(
+                isinstance(ref, dict) and str(ref.get("uri") or "") == text for ref in refs
+            ):
+                _add_closeout(row, "artifact_uri")
+
+    # SHA-256 equality (evidence hashes, closeout receipt hash, artifact refs).
+    lowered = text.lower()
+    if _SHA256_TEXT_RE.match(lowered):
+        for row in conn.execute(
+            "SELECT evidence_id, artifact_hash, content_hash FROM evidence_objects "
+            "WHERE artifact_hash=? OR content_hash=? LIMIT ?",
+            (lowered, lowered, limit),
+        ):
+            matched = (
+                "artifact_sha256"
+                if str(row["artifact_hash"] or "") == lowered
+                else "content_sha256"
+            )
+            _add_evidence(str(row["evidence_id"]), matched)
+        receipt = conn.execute(
+            "SELECT id, task_ref, status, closed_at FROM task_closeouts "
+            "WHERE content_hash=?",
+            (lowered,),
+        ).fetchone()
+        if receipt is not None:
+            _add_closeout(receipt, "content_sha256")
+        for row in conn.execute(
+            "SELECT id, task_ref, status, closed_at, artifact_refs_json "
+            "FROM task_closeouts WHERE artifact_refs_json LIKE '%' || ? || '%' LIMIT ?",
+            (lowered, limit * 4),
+        ):
+            refs = json.loads(row["artifact_refs_json"] or "[]")
+            if any(
+                isinstance(ref, dict) and str(ref.get("sha256") or "").lower() == lowered
+                for ref in refs
+            ):
+                _add_closeout(row, "artifact_sha256")
+
+    return matches[:limit]
+
+
 def search_v1(
     conn: sqlite3.Connection,
     query: str,
@@ -397,6 +598,43 @@ def search_v1(
     cross_scope: bool,
     delivery_target: str = LOCAL_MODEL_TARGET,
 ) -> dict[str, Any]:
+    exact_matches = exact_lookup_v1(
+        conn,
+        query,
+        context=context,
+        cross_scope=cross_scope,
+        delivery_target=delivery_target,
+        limit=min(limit, EXACT_MATCH_LIMIT),
+    )
+    if exact_matches:
+        payload = {
+            "schema_version": "ocbrain.search.v1",
+            "delivery_target": delivery_target,
+            "query": query,
+            "resolved_context": context.to_dict(),
+            "match_mode": "exact",
+            "items": [],
+            "exact_matches": exact_matches,
+            "contradictions": [],
+            "coverage": {
+                "requested_limit": limit,
+                "returned": len(exact_matches),
+                "feedback_needed": True,
+            },
+        }
+        retrieval_id = record_core_v1_retrieval(
+            conn,
+            query=str(payload["query"]),
+            context={**context.to_dict(), "delivery_target": payload["delivery_target"]},
+            items=[{"belief_id": item["id"], "score": 1.0} for item in exact_matches],
+            runtime=context.runtime or "mcp",
+            task_ref=context.task or f"brain.search:{payload['query']}",
+            session_id=context.session,
+            packet_schema="ocbrain.search.v1",
+        )
+        payload["retrieval_use_id"] = retrieval_id
+        payload["retrieval_use_status"] = "recorded"
+        return payload
     packet, handles = build_context_v1(
         conn,
         query,
@@ -1374,6 +1612,7 @@ __all__ = [
     "correct_v1",
     "decide_proposal_v1",
     "digest_v1",
+    "exact_lookup_v1",
     "expand_source_v1",
     "feedback_v1",
     "forget_v1",

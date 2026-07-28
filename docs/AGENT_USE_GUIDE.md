@@ -73,6 +73,15 @@ Compact lookup helpers. They still create retrieval receipts. Prefer
 `brain.context` for cross-client task startup because it has the stable packet,
 coverage, contradiction, and source-expansion contract.
 
+`brain.search` runs an exact-locator pre-pass before semantic ranking: when
+the query *is* a locator — an event, evidence, belief, closeout, or
+retrieval-use id, an artifact URI or SHA-256, or an exact `task_ref` on a
+recorded closeout — it returns `match_mode: "exact"` with metadata-only
+`exact_matches` instead of ranked beliefs. Expand hits with `brain.get` /
+`brain.source`. Auto-derived `retrieval_uses.task_ref` values
+(`brain.search:<query>`) are never matched, so repeating a query cannot
+hijack itself.
+
 ### `brain.feedback`
 
 Use the packet's `retrieval_use_id` and one honest outcome:
