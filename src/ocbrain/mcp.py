@@ -516,6 +516,20 @@ def _log_context_and_issue_if_available(
         return None, "database_busy"
 
 
+def canonical_tool_name(name: str, allowed: Any) -> str:
+    """Accept the dot-free tool names some MCP clients substitute for ``brain.x``.
+
+    Cursor rewrites ``brain.context`` to ``brain_context`` when it advertises the
+    catalogue and sends that rewritten name back on tools/call, so the profile
+    gate below rejects every call from those clients as "not available".
+    """
+    allowed_names = {str(item) for item in allowed}
+    if name in allowed_names:
+        return name
+    matches = [item for item in allowed_names if item.replace(".", "_") == name]
+    return matches[0] if len(matches) == 1 else name
+
+
 def call_tool(
     conn,
     params: dict[str, Any],
@@ -526,6 +540,8 @@ def call_tool(
     profile = resolve_profile(profile=profile)
     delivery_target = normalize_delivery_target(delivery_target)
     name = params.get("name")
+    if isinstance(name, str):
+        name = canonical_tool_name(name, tools_for_profile(profile))
     if not isinstance(name, str) or name not in tools_for_profile(profile):
         raise PermissionError(f"tool is not available in {profile} profile: {name}")
     raw_arguments = params.get("arguments", {})
