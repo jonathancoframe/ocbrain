@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make `runtime-check` verify Claude's actual `ocbrain` registration instead
+  of accepting any successful `claude mcp list`, and treat an absent optional
+  OpenClaw installation as skipped while still failing broken installed probes.
 - Refuse irrelevant same-scope filler in hybrid retrieval: expand FTS stopword
   filtering, raise the general dense-candidate floor, and require stronger
   cosine evidence for dense-only results so unrelated queries return an honest
