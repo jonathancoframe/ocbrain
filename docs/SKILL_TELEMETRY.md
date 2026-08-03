@@ -69,7 +69,7 @@ work?" without trusting prose.
   "kind": "skill_outcome",
   "skill_id": "ocbrain-ops",
   "source_commit": "a5b35db",
-  "tree_sha256": "9f2c0de7c1252565dcea6856c462d9a74ab94d6ea4f7ca9b8a3d5f105b30b19c",
+  "tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "runtime": "hermes",
   "task_ref": "mission-exact-lookup",
   "outcome": "success"

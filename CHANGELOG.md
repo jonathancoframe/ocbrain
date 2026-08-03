@@ -29,8 +29,8 @@
   available". Unknown or ambiguous spellings still raise PermissionError.
 - Exact-locator retrieval: `brain.search` on the v1 core now runs an
   exact-match pre-pass before semantic ranking. Queries that are locators —
-  event/evidence/belief/closeout/retrieval-use ids, artifact URIs or SHA-256
-  hashes, or an exact `task_ref` on a recorded closeout — return
+  event ids, evidence ids, belief ids, closeout ids, retrieval-use ids,
+  artifact URIs, SHA-256 hashes, or an exact `task_ref` on a recorded closeout — return
   `match_mode: "exact"` with metadata-only, scope-gated `exact_matches`
   instead of unrelated ranked beliefs. Auto-derived
   `retrieval_uses.task_ref` values are never matched, so a repeated query
