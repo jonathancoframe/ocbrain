@@ -196,16 +196,23 @@ def _normalize_action(value: Any) -> dict[str, Any]:
         item = value.get(key)
         if item is not None:
             result[key] = _required_text(item, f"actions[].{key}")
-    for key in ("context_before", "policy", "cost", "provenance", "features"):
+    for key in ("context_before", "policy", "cost", "provenance"):
         item = value.get(key)
         if item is not None:
             result[key] = _json_object(item, f"actions[].{key}", required=False)
+    features = value.get("features")
+    if features is not None:
+        normalized_features = _json_object(
+            features, "actions[].features", required=False
+        )
+        if normalized_features:
+            result["features"] = normalized_features
     if "features" in result:
         result["feature_schema"] = _required_text(
             value.get("feature_schema"), "actions[].feature_schema"
         )
     elif value.get("feature_schema") is not None:
-        raise ValueError("actions[].feature_schema requires actions[].features")
+        raise ValueError("actions[].feature_schema requires non-empty actions[].features")
     return result
 
 
@@ -234,19 +241,23 @@ def _normalize_outcome(value: Any) -> dict[str, Any]:
         "counterfactual",
         "attribution",
         "uncertainty",
-        "features",
     ):
         item = value.get(key)
         if item is not None:
             result[key] = _json_value(item, f"outcomes[].{key}")
+    features = value.get("features")
+    if features is not None:
+        normalized_features = _json_object(
+            features, "outcomes[].features", required=False
+        )
+        if normalized_features:
+            result["features"] = normalized_features
     if "features" in result:
-        if not isinstance(result["features"], dict):
-            raise ValueError("outcomes[].features must be an object")
         result["feature_schema"] = _required_text(
             value.get("feature_schema"), "outcomes[].feature_schema"
         )
     elif value.get("feature_schema") is not None:
-        raise ValueError("outcomes[].feature_schema requires outcomes[].features")
+        raise ValueError("outcomes[].feature_schema requires non-empty outcomes[].features")
     return result
 
 

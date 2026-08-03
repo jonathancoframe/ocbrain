@@ -2669,13 +2669,14 @@ def import_memory_file_v1(
         "utf-8", errors="replace"
     )
     text = truncated
+    runtime = history_runtime(path)
     return import_source_v1(
         conn,
         path=path,
         text=text,
         title=title_from_text(text, path.stem),
         source_type="memory_file",
-        runtime="openclaw",
+        runtime=runtime,
         project=project,
         privacy_scope=privacy_scope,
         confidence=0.7,
@@ -2804,11 +2805,12 @@ def import_memory_file(
     text = redacted.encode("utf-8", errors="replace")[:max_bytes].decode("utf-8", errors="replace")
     title = title_from_text(text, path.stem)
     source_uri = str(path)
+    runtime = history_runtime(path)
     digest = content_hash(raw)
     evidence_id = upsert_evidence(
         conn,
         source_type="memory_file",
-        source_runtime="openclaw",
+        source_runtime=runtime,
         source_uri=source_uri,
         content_hash=digest,
         claim=f"Memory file {path.name}: {compact_whitespace(text[:900])}",

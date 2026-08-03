@@ -318,7 +318,7 @@ def test_hybrid_relevance_gate_returns_empty_instead_of_same_scope_filler(
     assert upgrade["items"] == []
     assert upgrade["ranking"]["lexical_candidates"] == 0
     assert upgrade["ranking"]["dense_candidates"] == 1
-    assert upgrade["ranking"]["min_dense_only_cosine"] == 0.45
+    assert upgrade["ranking"]["min_dense_only_cosine"] == 0.55
 
 
 def test_hybrid_relevance_gate_keeps_strong_dense_only_recall(tmp_path: Path, monkeypatch) -> None:
@@ -345,6 +345,117 @@ def test_hybrid_relevance_gate_keeps_strong_dense_only_recall(tmp_path: Path, mo
     )
     assert [item["belief_id"] for item in result["items"]] == [relevant]
     assert result["items"][0]["ranking"]["dense_similarity"] == 0.72
+
+
+def test_hybrid_dense_only_floor_includes_boundary_and_rejects_below(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    boundary = "curated:bountiful:dense-boundary"
+    below = "curated:bountiful:dense-below"
+    _seed_belief(conn, belief_id=boundary, body="Meyer lemons are available nearby.")
+    _seed_belief(conn, belief_id=below, body="Tomatoes are ready for pickup.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: (
+            [
+                {"belief_id": below, "similarity": 0.5499},
+                {"belief_id": boundary, "similarity": 0.55},
+            ],
+            None,
+        ),
+    )
+
+    result = search_core_v1(
+        conn,
+        "otherwise unmatched semantic probe",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert [item["belief_id"] for item in result["items"]] == [boundary]
+    assert result["ranking"]["min_dense_only_cosine"] == 0.55
+
+
+def test_multi_term_lexical_query_drops_single_generic_token_filler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    relevant = "curated:bountiful:transport-recovery"
+    filler = "curated:bountiful:model-fallback"
+    _seed_belief(
+        conn,
+        belief_id=relevant,
+        body=(
+            "Preserve exact feedback after a closed client stdio transport with a "
+            "one-shot runtime-only fallback."
+        ),
+    )
+    _seed_belief(
+        conn,
+        belief_id=filler,
+        body="Use a second model as an independent fallback for planning.",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], "test_lexical_only"),
+    )
+
+    result = search_core_v1(
+        conn,
+        "one-shot runtime-only fallback closed client stdio transport",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert [item["belief_id"] for item in result["items"]] == [relevant]
+    assert result["ranking"]["lexical_candidates"] == 1
+    assert result["ranking"]["min_lexical_query_term_matches"] == 2
+    assert result["ranking"]["min_redundant_lexical_strength_ratio"] == 0.5
+
+
+def test_multi_term_lexical_query_preserves_distinctive_single_term_coverage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    generic = "curated:bountiful:generic-recovery"
+    distinctive = "curated:bountiful:postgres-recovery"
+    _seed_belief(
+        conn,
+        belief_id=generic,
+        body="Database recovery procedures are documented.",
+    )
+    _seed_belief(
+        conn,
+        belief_id=distinctive,
+        body="Postgres uses WAL archiving for point-in-time restore.",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], "test_lexical_only"),
+    )
+
+    result = search_core_v1(
+        conn,
+        "postgres database backup recovery",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert {item["belief_id"] for item in result["items"]} == {
+        generic,
+        distinctive,
+    }
+    assert result["ranking"]["lexical_candidates"] == 2
 
 
 def test_curated_manifest_is_hash_verified_and_idempotent(tmp_path: Path) -> None:

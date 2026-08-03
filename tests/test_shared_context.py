@@ -12,6 +12,26 @@ def _payload(response):
     return json.loads(response["result"]["content"][0]["text"])
 
 
+def _sample_action(**overrides):
+    value = {
+        "mechanism": "code_edit",
+        "semantic_role": "correction",
+        "target": {"repo": "ocbrain"},
+    }
+    value.update(overrides)
+    return value
+
+
+def _sample_outcome(**overrides):
+    value = {
+        "metric": "contract_tests",
+        "value": 1,
+        "interpretation": "The closeout contract test passed.",
+    }
+    value.update(overrides)
+    return value
+
+
 def _insert_global_belief(conn, *, belief_id="belief_shared_context"):
     conn.execute(
         """
@@ -261,6 +281,101 @@ def test_closeout_is_append_only_and_marks_decision_impact(tmp_path):
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("DELETE FROM task_closeouts WHERE id = ?", (receipt["id"],))
     conn.rollback()
+
+
+def test_closeout_empty_features_are_normalized_as_absent(tmp_path):
+    conn = connect(tmp_path / "ocbrain.sqlite")
+    init_db(conn)
+
+    receipt = record_closeout(
+        conn,
+        task_ref="empty-features",
+        status="completed",
+        summary="Normalized empty feature maps.",
+        actions=[_sample_action(features={})],
+        outcomes=[_sample_outcome(features={})],
+    )
+
+    for value in (receipt["actions"][0], receipt["outcomes"][0]):
+        assert "features" not in value
+        assert "feature_schema" not in value
+
+
+@pytest.mark.parametrize("feature_schema", [None, "", "   "])
+@pytest.mark.parametrize("kind", ["actions", "outcomes"])
+def test_closeout_nonempty_features_require_nonblank_schema(
+    tmp_path, kind, feature_schema
+):
+    conn = connect(tmp_path / f"{kind}-{feature_schema!r}.sqlite")
+    init_db(conn)
+    values = {
+        "actions": [_sample_action(features={"model": "v1"})],
+        "outcomes": [_sample_outcome(features={"model": "v1"})],
+    }
+    if feature_schema is not None:
+        values[kind][0]["feature_schema"] = feature_schema
+
+    with pytest.raises(
+        ValueError, match=rf"{kind}\[\]\.feature_schema must be a non-empty string"
+    ):
+        record_closeout(
+            conn,
+            task_ref=f"{kind}-missing-schema",
+            status="completed",
+            summary="Rejected unversioned features.",
+            **{kind: values[kind]},
+        )
+
+
+@pytest.mark.parametrize("features", [None, {}])
+@pytest.mark.parametrize("kind", ["actions", "outcomes"])
+def test_closeout_feature_schema_requires_nonempty_features(tmp_path, kind, features):
+    conn = connect(tmp_path / f"{kind}-{features!r}.sqlite")
+    init_db(conn)
+    value = (
+        _sample_action(feature_schema="features.v1")
+        if kind == "actions"
+        else _sample_outcome(feature_schema="features.v1")
+    )
+    if features is not None:
+        value["features"] = features
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{kind}\[\]\.feature_schema requires non-empty {kind}\[\]\.features",
+    ):
+        record_closeout(
+            conn,
+            task_ref=f"{kind}-orphan-schema",
+            status="completed",
+            summary="Rejected an orphan feature schema.",
+            **{kind: [value]},
+        )
+
+
+def test_closeout_nonempty_features_and_schema_are_preserved(tmp_path):
+    conn = connect(tmp_path / "ocbrain.sqlite")
+    init_db(conn)
+
+    receipt = record_closeout(
+        conn,
+        task_ref="versioned-features",
+        status="completed",
+        summary="Preserved versioned feature maps.",
+        actions=[
+            _sample_action(features={"model": "v1"}, feature_schema="action.features.v1")
+        ],
+        outcomes=[
+            _sample_outcome(
+                features={"model": "v1"}, feature_schema="outcome.features.v1"
+            )
+        ],
+    )
+
+    assert receipt["actions"][0]["features"] == {"model": "v1"}
+    assert receipt["actions"][0]["feature_schema"] == "action.features.v1"
+    assert receipt["outcomes"][0]["features"] == {"model": "v1"}
+    assert receipt["outcomes"][0]["feature_schema"] == "outcome.features.v1"
 
 
 @pytest.mark.parametrize(

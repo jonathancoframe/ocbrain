@@ -35,7 +35,13 @@ HYBRID_RRF_K = 60
 # corroborate, but require a stronger score before a dense-only item may be
 # served. These gates favor an honest empty packet over same-scope filler.
 MIN_DENSE_COSINE = 0.30
-MIN_DENSE_ONLY_COSINE = 0.45
+MIN_DENSE_ONLY_COSINE = 0.55
+# FTS5 ranks every OR-term hit, even when a long, specific query shares only
+# one generic token with an unrelated belief. Suppress a one-term hit only when
+# stronger multi-term candidates already cover that term; preserving new query
+# term coverage avoids dropping distinctive one-term results.
+MIN_LEXICAL_QUERY_TERM_MATCHES = 2
+MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO = 0.50
 
 LEGACY_IMPORT_KINDS = {
     "legacy_evidence_imported",
@@ -1565,6 +1571,48 @@ def search_core_v1(
                 (fts, *scope_params, candidate_limit),
             )
         )
+        query_terms = {
+            term
+            for term in re.findall(r"[a-z0-9]{2,}", fts.lower())
+            if term != "or"
+        }
+        if len(query_terms) >= MIN_LEXICAL_QUERY_TERM_MATCHES and len(lexical_rows) > 1:
+            overlaps: list[set[str]] = []
+            for row in lexical_rows:
+                attributes = json.loads(row["attributes_json"] or "{}")
+                document = " ".join(
+                    (
+                        str(attributes.get("title") or attributes.get("subject") or ""),
+                        str(row["body"]),
+                    )
+                )
+                document_terms = set(re.findall(r"[a-z0-9]{2,}", document.lower()))
+                overlaps.append(query_terms & document_terms)
+            corroborated = [
+                (row, overlap)
+                for row, overlap in zip(lexical_rows, overlaps, strict=True)
+                if len(overlap) >= MIN_LEXICAL_QUERY_TERM_MATCHES
+            ]
+            if corroborated:
+                covered_terms = set().union(*(overlap for _row, overlap in corroborated))
+                strongest_corroborated = max(
+                    max(0.0, -float(row["lexical_score"] or 0.0))
+                    for row, _overlap in corroborated
+                )
+                lexical_rows = [
+                    row
+                    for row, overlap in zip(lexical_rows, overlaps, strict=True)
+                    if (
+                        len(overlap) >= MIN_LEXICAL_QUERY_TERM_MATCHES
+                        or bool(overlap - covered_terms)
+                        or strongest_corroborated <= 0.0
+                        or max(0.0, -float(row["lexical_score"] or 0.0))
+                        >= (
+                            strongest_corroborated
+                            * MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
+                        )
+                    )
+                ]
     dense_rows, dense_fallback = semantic_neighbors(
         conn,
         query,
@@ -1593,6 +1641,10 @@ def search_core_v1(
                 "dense_candidates": 0,
                 "min_dense_cosine": MIN_DENSE_COSINE,
                 "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
+                "min_lexical_query_term_matches": MIN_LEXICAL_QUERY_TERM_MATCHES,
+                "min_redundant_lexical_strength_ratio": (
+                    MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
+                ),
             },
         }
     feedback = _retrieval_feedback_scores(conn, candidate_ids)
@@ -1699,6 +1751,10 @@ def search_core_v1(
             "rrf_k": HYBRID_RRF_K,
             "min_dense_cosine": MIN_DENSE_COSINE,
             "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
+            "min_lexical_query_term_matches": MIN_LEXICAL_QUERY_TERM_MATCHES,
+            "min_redundant_lexical_strength_ratio": (
+                MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
+            ),
         },
     }
 

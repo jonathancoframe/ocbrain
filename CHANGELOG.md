@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Treat exact-shaped but missing object IDs, SHA-256 hashes, and artifact URIs
+  as terminal empty exact lookups instead of feeding them into semantic search;
+  raise the dense-only relevance floor and suppress weak single-token FTS
+  matches when a multi-term query has a much stronger lexical hit.
+- Normalize empty closeout feature maps as absent while preserving the required
+  schema contract for non-empty features, preventing valid runtime closeouts
+  from failing on provider-generated empty objects.
+- Attribute future Codex, Claude, Hermes, and OpenClaw memory imports to the
+  runtime inferred from their source path instead of labeling every import as
+  OpenClaw.
 - Make `runtime-check` verify Claude's actual `ocbrain` registration instead
   of accepting any successful `claude mcp list`, and treat an absent optional
   OpenClaw installation as skipped while still failing broken installed probes.
