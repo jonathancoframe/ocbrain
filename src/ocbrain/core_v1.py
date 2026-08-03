@@ -30,7 +30,12 @@ CORE_V1_USER_VERSION = 10_000
 CORE_V1_SCHEMA_VERSION = "ocbrain.core.v1"
 CORE_V1_EVENT_SCHEMA = "ocbrain.event.v1"
 HYBRID_RRF_K = 60
-MIN_DENSE_COSINE = 0.15
+# Qwen3's low positive tail is not evidence of topical relevance. Keep a
+# moderately permissive floor for candidates that lexical retrieval can
+# corroborate, but require a stronger score before a dense-only item may be
+# served. These gates favor an honest empty packet over same-scope filler.
+MIN_DENSE_COSINE = 0.30
+MIN_DENSE_ONLY_COSINE = 0.45
 
 LEGACY_IMPORT_KINDS = {
     "legacy_evidence_imported",
@@ -1586,6 +1591,8 @@ def search_core_v1(
                 "eligible_count": visibility_counts["eligible_count"],
                 "lexical_candidates": 0,
                 "dense_candidates": 0,
+                "min_dense_cosine": MIN_DENSE_COSINE,
+                "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
             },
         }
     feedback = _retrieval_feedback_scores(conn, candidate_ids)
@@ -1594,6 +1601,11 @@ def search_core_v1(
     for belief_id in candidate_ids:
         row = eligible.get(belief_id)
         if row is None:
+            continue
+        if (
+            belief_id not in lexical_rank
+            and dense_similarity.get(belief_id, 0.0) < MIN_DENSE_ONLY_COSINE
+        ):
             continue
         scope = ScopeTag(
             str(row["scope_type"]),
@@ -1686,6 +1698,7 @@ def search_core_v1(
             "deduplicated_candidates": len(ranked) - len(items),
             "rrf_k": HYBRID_RRF_K,
             "min_dense_cosine": MIN_DENSE_COSINE,
+            "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
         },
     }
 
@@ -1780,20 +1793,35 @@ def _normalize_fts_query(query: str) -> str:
     terms = re.findall(r"[\w-]{2,}", query.lower())
     stopwords = {
         "about",
+        "an",
         "after",
         "again",
         "also",
         "and",
         "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "by",
         "can",
         "could",
+        "did",
+        "do",
+        "does",
         "for",
         "from",
         "have",
         "how",
+        "if",
+        "in",
         "into",
         "just",
         "make",
+        "of",
+        "on",
+        "or",
         "our",
         "should",
         "that",
@@ -1802,8 +1830,11 @@ def _normalize_fts_query(query: str) -> str:
         "them",
         "then",
         "this",
+        "to",
         "very",
+        "via",
         "was",
+        "we",
         "were",
         "what",
         "when",
@@ -1811,6 +1842,7 @@ def _normalize_fts_query(query: str) -> str:
         "which",
         "with",
         "would",
+        "you",
         "your",
     }
     meaningful = list(dict.fromkeys(term for term in terms if term not in stopwords))

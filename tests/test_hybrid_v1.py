@@ -263,6 +263,90 @@ def test_irrelevant_fresh_dense_candidate_cannot_outrank_exact_lexical_match(
     assert irrelevant not in [item["belief_id"] for item in result["items"]]
 
 
+def test_hybrid_relevance_gate_returns_empty_instead_of_same_scope_filler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    garden_noise = "curated:ocbrain:sparse-truth-hygiene"
+    upgrade_noise = "curated:bountiful:old-deploy"
+    _seed_belief(
+        conn,
+        belief_id=garden_noise,
+        project="ocbrain",
+        body=(
+            "Keep background history harvests in the evidence ledger with evidence-only imports."
+        ),
+    )
+    _seed_belief(
+        conn,
+        belief_id=upgrade_noise,
+        body="A July deployment completed and production probes passed.",
+    )
+    conn.commit()
+
+    similarities = {garden_noise: 0.22, upgrade_noise: 0.395}
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, candidate_ids=None, **_kwargs: (
+            [
+                {"belief_id": belief_id, "similarity": similarities[belief_id]}
+                for belief_id in sorted(candidate_ids or [])
+            ],
+            None,
+        ),
+    )
+
+    garden = search_core_v1(
+        conn,
+        "Which tomatoes and peppers in my garden are ready to harvest today?",
+        context=ScopeContext(project="ocbrain"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert garden["items"] == []
+    assert garden["ranking"]["lexical_candidates"] == 0
+    assert garden["ranking"]["dense_candidates"] == 0
+
+    upgrade = search_core_v1(
+        conn,
+        "How are OCBrain MCP tool schemas validated after an upgrade?",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert upgrade["items"] == []
+    assert upgrade["ranking"]["lexical_candidates"] == 0
+    assert upgrade["ranking"]["dense_candidates"] == 1
+    assert upgrade["ranking"]["min_dense_only_cosine"] == 0.45
+
+
+def test_hybrid_relevance_gate_keeps_strong_dense_only_recall(tmp_path: Path, monkeypatch) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    relevant = "curated:bountiful:semantic-recall"
+    _seed_belief(
+        conn,
+        belief_id=relevant,
+        body="Meyer lemons are ready for neighborhood pickup.",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([{"belief_id": relevant, "similarity": 0.72}], None),
+    )
+
+    result = search_core_v1(
+        conn,
+        "ripe citrus available nearby",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert [item["belief_id"] for item in result["items"]] == [relevant]
+    assert result["items"][0]["ranking"]["dense_similarity"] == 0.72
+
+
 def test_curated_manifest_is_hash_verified_and_idempotent(tmp_path: Path) -> None:
     source = tmp_path / "truth.md"
     source.write_text("verified truth\n", encoding="utf-8")

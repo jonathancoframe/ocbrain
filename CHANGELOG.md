@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refuse irrelevant same-scope filler in hybrid retrieval: expand FTS stopword
+  filtering, raise the general dense-candidate floor, and require stronger
+  cosine evidence for dense-only results so unrelated queries return an honest
+  empty packet without weakening strong semantic-only recall.
 - Add evidence-only history imports, sparse source-backed wiki materialization,
   deterministic sealed-release truth compilation, a recent verified-closeout
   lane in `brain.digest`, a runtime-only one-shot transport recovery command,
