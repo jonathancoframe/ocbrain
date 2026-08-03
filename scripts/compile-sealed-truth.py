@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from ocbrain.db import connect
-from ocbrain.seal_truth import compile_sealed_release
+from ocbrain.seal_truth import compile_sealed_release, preview_sealed_release
 
 
 def main() -> int:
@@ -25,14 +25,22 @@ def main() -> int:
         ),
     )
     parser.add_argument("--wiki-dir", type=Path, default=Path.home() / ".ocbrain/wiki")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the validated sealed release; without this flag only preview",
+    )
     args = parser.parse_args()
     conn = connect(args.db.expanduser())
     try:
-        result = compile_sealed_release(
-            conn,
-            args.seal,
-            wiki_dir=args.wiki_dir,
-        )
+        if args.apply:
+            result = compile_sealed_release(
+                conn,
+                args.seal,
+                wiki_dir=args.wiki_dir,
+            )
+        else:
+            result = preview_sealed_release(conn, args.seal)
     finally:
         conn.close()
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -41,4 +49,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

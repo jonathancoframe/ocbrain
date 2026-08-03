@@ -1,5 +1,28 @@
 #!/bin/bash
 set -euo pipefail
-REPO="/Users/jonathancoframe/Developer/ocbrain"
-exec "$REPO/.venv/bin/python" "$REPO/scripts/compile-sealed-truth.py" "$@"
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${OCBRAIN_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+DB="${OCBRAIN_DB:-}"
+ACTIVE_DB_FILE="${OCBRAIN_ACTIVE_DB_FILE:-$ROOT/data/active-core.path}"
+
+if [[ -z "$DB" && -r "$ACTIVE_DB_FILE" ]]; then
+  IFS= read -r DB < "$ACTIVE_DB_FILE"
+  if [[ "$DB" != /* ]]; then
+    echo "ocbrain: $ACTIVE_DB_FILE must contain one absolute database path" >&2
+    exit 2
+  fi
+fi
+DB="${DB:-$HOME/.ocbrain/ocbrain.sqlite}"
+
+if [[ -n "${OCBRAIN_PYTHON:-}" ]]; then
+  PYTHON="$OCBRAIN_PYTHON"
+elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PYTHON="$ROOT/.venv/bin/python"
+else
+  PYTHON="$(command -v python3)"
+fi
+
+export OCBRAIN_DB="$DB"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" "$ROOT/scripts/compile-sealed-truth.py" "$@"

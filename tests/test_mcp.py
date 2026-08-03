@@ -9,7 +9,7 @@ from ocbrain.db import (
     upsert_evidence,
     upsert_knowledge,
 )
-from ocbrain.mcp import handle_request
+from ocbrain.mcp import canonical_tool_name, handle_request
 
 
 def test_mcp_initialize_includes_agent_conduct_guardrails(tmp_path):
@@ -549,3 +549,76 @@ def test_mcp_feedback_approves_or_rejects_human_gated_knowledge(tmp_path):
     assert rejected_payload["status"] == "archived"
     assert rejected_row["status"] == "archived"
     assert rejected_row["invalidation_reason"] == "not ready"
+
+
+def test_canonical_tool_name_maps_dot_free_cursor_names():
+    allowed = {"brain.context", "brain.search", "brain.get"}
+    assert canonical_tool_name("brain_context", allowed) == "brain.context"
+    assert canonical_tool_name("brain_search", allowed) == "brain.search"
+    # Canonical dotted names pass through untouched.
+    assert canonical_tool_name("brain.context", allowed) == "brain.context"
+    # Unknown names are returned unchanged so the profile gate rejects them.
+    assert canonical_tool_name("brain_nope", allowed) == "brain_nope"
+    # A dot-free spelling matching exactly one allowed tool still resolves.
+    assert canonical_tool_name("brain_get", {"brain_get_now", "brain.get"}) == "brain.get"
+    # A genuinely ambiguous spelling maps to nothing rather than guessing.
+    ambiguous = canonical_tool_name("a_b_c", {"a.b_c", "a.b.c"})
+    assert ambiguous == "a_b_c"
+
+
+def test_mcp_dot_free_tool_name_reaches_dotted_tool(tmp_path):
+    conn = connect(tmp_path / "ocbrain.sqlite")
+    init_db(conn)
+
+    response = handle_request(
+        conn,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "brain_context",
+                "arguments": {"query": "dot-free client rewrite"},
+            },
+        },
+    )
+
+    assert "result" in response
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["query"] == "dot-free client rewrite"
+
+
+def test_mcp_unknown_dot_free_tool_name_is_still_gated(tmp_path):
+    conn = connect(tmp_path / "ocbrain.sqlite")
+    init_db(conn)
+
+    response = handle_request(
+        conn,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "brain_hack", "arguments": {}},
+        },
+    )
+
+    assert response["error"]["code"] == -32001
+    assert "not available" in response["error"]["message"]
+
+
+def test_mcp_admin_only_tool_stays_gated_for_dot_free_runtime_name(tmp_path):
+    conn = connect(tmp_path / "ocbrain.sqlite")
+    init_db(conn)
+
+    response = handle_request(
+        conn,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "brain_forget", "arguments": {"target": "x"}},
+        },
+    )
+
+    assert response["error"]["code"] == -32001
+    assert "not available in runtime profile" in response["error"]["message"]

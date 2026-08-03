@@ -109,9 +109,11 @@ source handles, and closeouts remain durable.
 concise `wiki_fact` beliefs and a human-readable wiki. It never selects raw
 transcript evidence, sends only bounded already-redacted evidence, rejects any
 claim whose supporting quote cannot be found verbatim in its named evidence,
-and makes no hosted call without explicit `--apply`. Confidential/prohibited
-evidence is never eligible; sending bounded internal local-only evidence also
-requires `--allow-hosted-egress`.
+and makes no hosted call without explicit `--apply`. Project, visibility, and
+egress gates apply to both evidence and existing wiki facts before prompt
+construction. Local-only, prohibited, confidential, and secret objects are
+never eligible; `--allow-hosted-egress` may add only bounded
+`approval_required` objects.
 
 ```bash
 # Keep background harvesting in the evidence ledger, not current truth.
@@ -131,6 +133,33 @@ The generated `wiki/index.md`, `wiki/pages/`, and append-only `wiki/log.md`
 follow the raw-sources-plus-derived-wiki pattern. SQLite remains authoritative;
 the Markdown wiki is a disposable current-truth materialization. Keep
 `automatic_activation` disabled when using this sparse mode.
+
+### Optional sealed-truth compiler
+
+`scripts/compile-sealed-truth` validates an immutable Agent Control release and
+its canonical closeout before compiling one sparse local-only wiki fact. A
+closeout must declare `verification_status: verified` and include at least one
+passed verifier reference; a legacy `verified: true` boolean is not sufficient.
+The command is preview-only unless `--apply` is explicit:
+
+```bash
+# Verify hashes, closeout evidence, scope, and the proposed mutation.
+scripts/compile-sealed-truth --seal /private/release/SEAL.json
+
+# Apply only after reviewing the preview.
+scripts/compile-sealed-truth --seal /private/release/SEAL.json --apply
+```
+
+Wiki pages carry lightweight freshness frontmatter (`valid_from`, plus
+optional `valid_until` / `superseded_by` from belief attributes); `index.md`
+renders a `**[stale: ...]**` marker for expired or superseded pages, and
+`scripts/wiki-lint.py` flags expired/superseded pages, pages the ledger no
+longer serves as current, pages older than the ledger's latest compilation,
+and conflicting pages that share a key:
+
+```bash
+.venv/bin/python scripts/wiki-lint.py /path/to/wiki --db /absolute/core.sqlite
+```
 
 ## The runtime loop
 

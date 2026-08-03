@@ -6,13 +6,27 @@
 # and ocbrain evidence ids are stable/deduped.
 set -uo pipefail
 
-# The shared core per ~/.ocbrain/install-receipt.md — the same DB Codex,
-# Cursor, Claude Desktop, and Hermes use via MCP. The repo data/ocbrain.sqlite
-# is dev scratch only; do not harvest into it.
-REPO="$HOME/Developer/ocbrain"
-PY="$REPO/.venv/bin/python"
-DB="$HOME/.ocbrain/ocbrain.sqlite"
-export OCBRAIN_CONFIG="$REPO/data/ocbrain.config.json"
+# Resolve the installed checkout and the same active core used by MCP clients.
+# Explicit environment values win; otherwise use the checkout-local active DB
+# pointer and only fall back to ~/.ocbrain for installations without one.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${OCBRAIN_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+PY="${OCBRAIN_PYTHON:-$REPO/.venv/bin/python}"
+ACTIVE_DB_FILE="${OCBRAIN_ACTIVE_DB_FILE:-$REPO/data/active-core.path}"
+DB="${OCBRAIN_DB:-}"
+if [[ -z "$DB" && -r "$ACTIVE_DB_FILE" ]]; then
+  IFS= read -r DB < "$ACTIVE_DB_FILE"
+fi
+DB="${DB:-$HOME/.ocbrain/ocbrain.sqlite}"
+if [[ "$DB" != /* ]]; then
+  echo "OCBrain DB path must be absolute: $DB" >&2
+  exit 2
+fi
+export OCBRAIN_CONFIG="${OCBRAIN_CONFIG:-$REPO/data/ocbrain.config.json}"
+
+SYNC_PROJECT="${OCBRAIN_SYNC_PROJECT:-workspace}"
+SYNC_PRIVACY_SCOPE="${OCBRAIN_SYNC_PRIVACY_SCOPE:-workspace}"
+SYNC_BATCH_SIZE="${OCBRAIN_SYNC_BATCH_SIZE:-25}"
 
 # Hard ceiling for the whole harvest. A cold multi-GB import can take a while,
 # but a stuck run must never block the launchd schedule indefinitely (launchd
@@ -83,7 +97,8 @@ run_with_budget "$HARVEST_BUDGET_SECONDS" \
   "$HOME/.claude/projects" \
   "$HOME/.hermes/sessions" \
   "$HOME/.ocbrain/exports/cursor" \
-  --project coframe --privacy-scope workspace --batch-size 25 --evidence-only
+  --project "$SYNC_PROJECT" --privacy-scope "$SYNC_PRIVACY_SCOPE" \
+  --batch-size "$SYNC_BATCH_SIZE" --evidence-only
 
 # 4. Agent memory/instruction files.
 "$PY" -m ocbrain.cli --db "$DB" import-memory \
@@ -91,7 +106,7 @@ run_with_budget "$HARVEST_BUDGET_SECONDS" \
   "$HOME/.codex/AGENTS.md" \
   "$HOME/.hermes/SOUL.md" \
   "$HOME/.hermes/memories" \
-  --project coframe --privacy-scope workspace --evidence-only
+  --project "$SYNC_PROJECT" --privacy-scope "$SYNC_PRIVACY_SCOPE" --evidence-only
 
 # 5. Reconcile core projections.
 "$PY" -m ocbrain.cli --db "$DB" sync

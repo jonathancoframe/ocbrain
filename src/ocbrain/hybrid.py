@@ -25,12 +25,14 @@ from urllib.parse import urlparse
 
 DEFAULT_EMBED_MODEL = "qwen3-embedding:0.6b"
 DEFAULT_EMBED_DIMENSIONS = 1024
+DEFAULT_EMBED_DOCUMENT_BYTES = 1_800
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QUERY_INSTRUCTION = (
     "Given a user or agent question, retrieve the most relevant verified memory, "
     "evidence, decision, correction, or current status."
 )
-VECTOR_SCHEMA_VERSION = "ocbrain.vectors.v1"
+VECTOR_SCHEMA_VERSION = "ocbrain.vectors.v2"
+VECTOR_DOCUMENT_FORMAT = "belief_body_head_tail_1800b.v1"
 
 
 class LocalEmbeddingUnavailable(RuntimeError):
@@ -102,7 +104,18 @@ def build_vector_index(
     temp_path = Path(temp_name)
     temp_path.unlink(missing_ok=True)
     target = sqlite3.connect(temp_path)
-    dimensions: int | None = None
+    configured_dimensions = int(
+        os.environ.get("OCBRAIN_EMBED_DIMENSIONS") or DEFAULT_EMBED_DIMENSIONS
+    )
+    reusable_vectors, reusable_dimensions = _load_reusable_vectors(
+        output_path,
+        model=model,
+        model_digest=model_digest,
+        dimensions=configured_dimensions,
+    )
+    dimensions: int | None = reusable_dimensions
+    reused_rows = 0
+    embedded_rows = 0
     try:
         target.executescript(
             """
@@ -127,16 +140,39 @@ def build_vector_index(
         )
         for start in range(0, len(rows), batch_size):
             batch = rows[start : start + batch_size]
+            pending: list[sqlite3.Row] = []
+            for row in batch:
+                content_hash = _sha256(str(row["body"]))
+                reusable = reusable_vectors.get(str(row["belief_id"]))
+                if reusable is None or reusable[0] != content_hash:
+                    pending.append(row)
+                    continue
+                target.execute(
+                    "INSERT INTO belief_vectors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["belief_id"],
+                        content_hash,
+                        model,
+                        dimensions,
+                        reusable[1],
+                        row["scope_type"],
+                        row["scope_id"],
+                        row["visibility"],
+                        row["egress_policy"],
+                        row["last_compiled_at"],
+                    ),
+                )
+                reused_rows += 1
             vectors = embed_texts(
-                [_document_text(row) for row in batch],
+                [_document_text(row) for row in pending],
                 model=model,
                 endpoint=endpoint,
                 query=False,
                 timeout_seconds=300,
             )
-            if len(vectors) != len(batch):
+            if len(vectors) != len(pending):
                 raise LocalEmbeddingUnavailable("embedding response count mismatch")
-            for row, vector in zip(batch, vectors, strict=True):
+            for row, vector in zip(pending, vectors, strict=True):
                 if dimensions is None:
                     dimensions = len(vector)
                 if len(vector) != dimensions:
@@ -156,6 +192,7 @@ def build_vector_index(
                         row["last_compiled_at"],
                     ),
                 )
+                embedded_rows += 1
         built_at = datetime.now(UTC).isoformat(timespec="microseconds")
         metadata = {
             "schema_version": VECTOR_SCHEMA_VERSION,
@@ -171,7 +208,9 @@ def build_vector_index(
             "distance": "exact_cosine",
             "endpoint_class": "loopback_ollama",
             "query_instruction_sha256": _sha256(DEFAULT_QUERY_INSTRUCTION),
-            "document_format": "belief_body.v1",
+            "document_format": VECTOR_DOCUMENT_FORMAT,
+            "reused_rows": str(reused_rows),
+            "embedded_rows": str(embedded_rows),
             "model_digest": model_digest,
             "model_quantization": model_metadata.get("quantization", "unknown"),
             "model_parameter_size": model_metadata.get("parameter_size", "unknown"),
@@ -195,8 +234,10 @@ def build_vector_index(
             "core_event_hash": str(head["event_hash"] if head else ""),
             "corpus_sha256": corpus_sha256,
             "endpoint_class": "loopback_ollama",
+            "reused_rows": reused_rows,
+            "embedded_rows": embedded_rows,
         }
-    except Exception:
+    except BaseException:
         target.close()
         temp_path.unlink(missing_ok=True)
         raise
@@ -392,7 +433,10 @@ def embed_texts(
     if not texts:
         return []
     values = [
-        f"Instruct: {DEFAULT_QUERY_INSTRUCTION}\nQuery: {text}" if query else text for text in texts
+        _bounded_embedding_text(
+            f"Instruct: {DEFAULT_QUERY_INSTRUCTION}\nQuery: {text}" if query else text
+        )
+        for text in texts
     ]
     request = urllib.request.Request(
         endpoint.rstrip("/") + "/api/embed",
@@ -411,6 +455,17 @@ def embed_texts(
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
             payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            error_payload = json.loads(exc.read())
+            detail = str(error_payload.get("error") or "")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        suffix = f": {detail}" if detail else ""
+        raise LocalEmbeddingUnavailable(
+            f"embedding endpoint returned HTTP {exc.code}{suffix}"
+        ) from exc
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise LocalEmbeddingUnavailable(str(exc)) from exc
     if payload.get("error"):
@@ -472,6 +527,46 @@ def _ollama_model_metadata(endpoint: str, model: str) -> dict[str, str]:
     }
 
 
+def _load_reusable_vectors(
+    path: Path,
+    *,
+    model: str,
+    model_digest: str,
+    dimensions: int,
+) -> tuple[dict[str, tuple[str, bytes]], int | None]:
+    """Load compatible derived rows so a stale sidecar can rebuild only its delta."""
+    if not path.is_file():
+        return {}, None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        meta = {str(row[0]): str(row[1]) for row in conn.execute("SELECT key, value FROM meta")}
+        expected = {
+            "schema_version": VECTOR_SCHEMA_VERSION,
+            "model": model,
+            "dimensions": str(dimensions),
+            "model_digest": model_digest,
+            "query_instruction_sha256": _sha256(DEFAULT_QUERY_INSTRUCTION),
+            "document_format": VECTOR_DOCUMENT_FORMAT,
+        }
+        if any(meta.get(key) != value for key, value in expected.items()):
+            return {}, None
+        rows: dict[str, tuple[str, bytes]] = {}
+        expected_bytes = dimensions * array("f").itemsize
+        for row in conn.execute(
+            "SELECT belief_id, content_hash, vector FROM belief_vectors ORDER BY belief_id"
+        ):
+            vector = bytes(row["vector"])
+            if len(vector) != expected_bytes:
+                return {}, None
+            rows[str(row["belief_id"])] = (str(row["content_hash"]), vector)
+        return rows, dimensions
+    except sqlite3.Error:
+        return {}, None
+    finally:
+        conn.close()
+
+
 def _normalize(values: list[float]) -> list[float]:
     norm = math.sqrt(sum(value * value for value in values))
     if norm == 0:
@@ -498,9 +593,28 @@ def _sha256(value: str) -> str:
 
 
 def _document_text(row: sqlite3.Row) -> str:
-    # The projection has already removed archive/catalog/path-only rows.  Keep
-    # the derived embedding input deliberately simple and reproducible.
-    return str(row["body"]).strip()
+    # The projection has already removed archive/catalog/path-only rows. Keep
+    # the derived embedding input deliberately simple, bounded, and
+    # reproducible. Some Ollama Metal embedding runners terminate a request
+    # when one input crosses a backend compute microbatch even though it remains
+    # below the advertised model context. Preserve both the opening context and
+    # the latest tail for long receipts/transcripts.
+    return _bounded_embedding_text(str(row["body"]).strip())
+
+
+def _bounded_embedding_text(text: str) -> str:
+    """Return deterministic valid UTF-8 below the local runner's safe token ceiling."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= DEFAULT_EMBED_DOCUMENT_BYTES:
+        return text
+    marker = "\n\n[... middle omitted for local embedding ...]\n\n"
+    marker_bytes = marker.encode("utf-8")
+    available = DEFAULT_EMBED_DOCUMENT_BYTES - len(marker_bytes)
+    head_bytes = (available * 3) // 4
+    tail_bytes = available - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+    return f"{head}{marker}{tail}"
 
 
 def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
@@ -525,8 +639,10 @@ def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
 __all__ = [
     "DEFAULT_EMBED_MODEL",
     "DEFAULT_EMBED_DIMENSIONS",
+    "DEFAULT_EMBED_DOCUMENT_BYTES",
     "DEFAULT_OLLAMA_URL",
     "LocalEmbeddingUnavailable",
+    "VECTOR_DOCUMENT_FORMAT",
     "build_vector_index",
     "embed_texts",
     "semantic_neighbors",

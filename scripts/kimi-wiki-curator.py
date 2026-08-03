@@ -2,10 +2,10 @@
 """Compile high-signal OCBrain evidence into a sparse, human-readable wiki.
 
 This is an explicit one-shot hosted operation. It sends only already-redacted,
-bounded evidence bodies from an allow-list of high-signal kinds to Moonshot's
-OpenAI-compatible API. Raw transcripts and confidential/prohibited evidence
-are never eligible. Internal local-only evidence requires an explicit egress
-acknowledgement in addition to ``--apply``.
+bounded evidence bodies and existing wiki facts that pass project, visibility,
+and egress gates. Raw transcripts, confidential/secret objects, and objects
+marked local-only or prohibited are never eligible. In addition to ``--apply``,
+an explicit egress acknowledgement may add approval-required objects.
 """
 
 from __future__ import annotations
@@ -101,14 +101,16 @@ def select_evidence(
     allow_hosted_egress: bool = False,
     project: str | None = None,
 ) -> list[dict[str, Any]]:
+    if not project:
+        raise ValueError("project is required for hosted evidence selection")
     placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
     egress_policies = (
-        ("hosted_ok", "approval_required", "local_only")
+        ("hosted_ok", "approval_required")
         if allow_hosted_egress
         else ("hosted_ok",)
     )
     egress_placeholders = ",".join("?" for _ in egress_policies)
-    scope_clause = " AND scope_id = ?" if project else ""
+    scope_clause = " AND scope_type = 'project' AND scope_id = ?"
     scope_params: tuple[str, ...] = (f"project:{project}",) if project else ()
     rows = [
         dict(row)
@@ -420,7 +422,7 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="KIMI_API_KEY")
     parser.add_argument("--base-url", default="https://api.moonshot.ai/v1")
     parser.add_argument("--model", default="moonshot-v1-32k")
-    parser.add_argument("--project", default="coframe")
+    parser.add_argument("--project", default="workspace")
     parser.add_argument("--max-evidence", type=int, default=260)
     parser.add_argument("--max-beliefs", type=int, default=24)
     parser.add_argument(
@@ -439,8 +441,9 @@ def main() -> int:
         "--allow-hosted-egress",
         action="store_true",
         help=(
-            "explicitly authorize bounded internal approval-required/local-only evidence "
-            "for this hosted compilation; confidential and prohibited evidence stay excluded"
+            "explicitly authorize bounded approval-required evidence and wiki facts "
+            "for this hosted compilation; local-only, prohibited, confidential, and "
+            "secret objects stay excluded"
         ),
     )
     parser.add_argument("--force", action="store_true")
@@ -459,11 +462,12 @@ def main() -> int:
             allow_hosted_egress=bool(args.allow_hosted_egress),
             project=args.project,
         )
-        existing = [
-            item
-            for item in current_wiki_beliefs(conn)
-            if item.get("scope_id") == f"project:{args.project}"
-        ]
+        existing = current_wiki_beliefs(
+            conn,
+            project=args.project,
+            hosted_egress=True,
+            allow_approval_required=bool(args.allow_hosted_egress),
+        )
         digest = input_digest(evidence, existing)
         prior = {}
         if state_path.is_file():

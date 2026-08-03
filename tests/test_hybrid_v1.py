@@ -14,7 +14,13 @@ from ocbrain.core_v1 import (
 )
 from ocbrain.curation import apply_curated_manifest
 from ocbrain.db import connect
-from ocbrain.hybrid import build_vector_index, vector_status
+from ocbrain.hybrid import (
+    DEFAULT_EMBED_DOCUMENT_BYTES,
+    _bounded_embedding_text,
+    _document_text,
+    build_vector_index,
+    vector_status,
+)
 from ocbrain.mcp import handle_request
 from ocbrain.mcp_v1 import (
     build_context_v1,
@@ -81,6 +87,43 @@ def _mcp_payload(response: dict) -> dict:
     return json.loads(response["result"]["content"][0]["text"])
 
 
+def test_dense_document_text_is_bounded_and_preserves_head_and_tail() -> None:
+    short = "short belief"
+    assert _document_text({"body": short}) == short
+
+    long = "HEAD-" + ("🧠" * 2_000) + "-TAIL"
+    bounded = _document_text({"body": long})
+    assert len(bounded.encode("utf-8")) <= DEFAULT_EMBED_DOCUMENT_BYTES
+    assert bounded.startswith("HEAD-")
+    assert bounded.endswith("-TAIL")
+    assert "middle omitted for local embedding" in bounded
+    bounded_query = _bounded_embedding_text("Instruct: retrieve\nQuery: " + ("漢" * 2_000))
+    assert len(bounded_query.encode("utf-8")) <= DEFAULT_EMBED_DOCUMENT_BYTES
+
+
+def test_vector_build_cleans_temporary_sidecar_when_interrupted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "core.sqlite"
+    conn = connect(path)
+    init_core_v1(conn)
+    _seed_belief(conn, belief_id="curated:test:interrupt", body="bounded belief")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        "ocbrain.hybrid._ollama_model_metadata",
+        lambda *_args, **_kwargs: {"digest": "sha256:test-model"},
+    )
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ocbrain.hybrid.embed_texts", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        build_vector_index(path, model="test-local")
+    assert not list(tmp_path.glob(".core-vectors.sqlite.*.tmp"))
+
+
 def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "core.sqlite"
     conn = connect(path)
@@ -89,7 +132,10 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     _seed_belief(conn, belief_id="curated:bountiful:tomato", body="Tomatoes are available.")
     conn.commit()
 
+    embedded_texts = []
+
     def fake_embed(texts, **_kwargs):
+        embedded_texts.extend(texts)
         result = []
         for text in texts:
             lowered = text.lower()
@@ -109,6 +155,8 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     )
     built = build_vector_index(path, model="test-local")
     assert built["rows"] == 2
+    assert built["embedded_rows"] == 2
+    assert built["reused_rows"] == 0
     assert vector_status(path)["healthy"] is True
 
     append_core_event(
@@ -170,6 +218,14 @@ def test_hybrid_dense_recall_and_stale_sidecar_fallback(tmp_path: Path, monkeypa
     assert stale["ranking"]["dense_fallback"] == "vector_sidecar_stale"
     assert stale["items"][0]["belief_id"] == "curated:bountiful:pear"
 
+    embedded_before = len(embedded_texts)
+    rebuilt = build_vector_index(path, model="test-local")
+    assert rebuilt["rows"] == 3
+    assert rebuilt["embedded_rows"] == 1
+    assert rebuilt["reused_rows"] == 2
+    assert len(embedded_texts) == embedded_before + 1
+    assert vector_status(path)["healthy"] is True
+
 
 def test_irrelevant_fresh_dense_candidate_cannot_outrank_exact_lexical_match(
     tmp_path: Path, monkeypatch
@@ -205,6 +261,90 @@ def test_irrelevant_fresh_dense_candidate_cannot_outrank_exact_lexical_match(
     )
     assert result["items"][0]["belief_id"] == relevant
     assert irrelevant not in [item["belief_id"] for item in result["items"]]
+
+
+def test_hybrid_relevance_gate_returns_empty_instead_of_same_scope_filler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    garden_noise = "curated:ocbrain:sparse-truth-hygiene"
+    upgrade_noise = "curated:bountiful:old-deploy"
+    _seed_belief(
+        conn,
+        belief_id=garden_noise,
+        project="ocbrain",
+        body=(
+            "Keep background history harvests in the evidence ledger with evidence-only imports."
+        ),
+    )
+    _seed_belief(
+        conn,
+        belief_id=upgrade_noise,
+        body="A July deployment completed and production probes passed.",
+    )
+    conn.commit()
+
+    similarities = {garden_noise: 0.22, upgrade_noise: 0.395}
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, candidate_ids=None, **_kwargs: (
+            [
+                {"belief_id": belief_id, "similarity": similarities[belief_id]}
+                for belief_id in sorted(candidate_ids or [])
+            ],
+            None,
+        ),
+    )
+
+    garden = search_core_v1(
+        conn,
+        "Which tomatoes and peppers in my garden are ready to harvest today?",
+        context=ScopeContext(project="ocbrain"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert garden["items"] == []
+    assert garden["ranking"]["lexical_candidates"] == 0
+    assert garden["ranking"]["dense_candidates"] == 0
+
+    upgrade = search_core_v1(
+        conn,
+        "How are OCBrain MCP tool schemas validated after an upgrade?",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert upgrade["items"] == []
+    assert upgrade["ranking"]["lexical_candidates"] == 0
+    assert upgrade["ranking"]["dense_candidates"] == 1
+    assert upgrade["ranking"]["min_dense_only_cosine"] == 0.45
+
+
+def test_hybrid_relevance_gate_keeps_strong_dense_only_recall(tmp_path: Path, monkeypatch) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    relevant = "curated:bountiful:semantic-recall"
+    _seed_belief(
+        conn,
+        belief_id=relevant,
+        body="Meyer lemons are ready for neighborhood pickup.",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([{"belief_id": relevant, "similarity": 0.72}], None),
+    )
+
+    result = search_core_v1(
+        conn,
+        "ripe citrus available nearby",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+    assert [item["belief_id"] for item in result["items"]] == [relevant]
+    assert result["items"][0]["ranking"]["dense_similarity"] == 0.72
 
 
 def test_curated_manifest_is_hash_verified_and_idempotent(tmp_path: Path) -> None:

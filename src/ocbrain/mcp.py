@@ -30,7 +30,9 @@ from ocbrain.db import (
 )
 from ocbrain.egress import egress_preview
 from ocbrain.events import (
+    SKILL_TELEMETRY_KINDS,
     approval_packet,
+    canonical_json,
     decide_compilation,
     event_core_digest,
     get_current_belief,
@@ -38,6 +40,7 @@ from ocbrain.events import (
     record_correction,
     record_evidence,
     record_tombstone,
+    validate_skill_telemetry,
 )
 from ocbrain.mcp_v1 import (
     bind_retrieval_id_v1,
@@ -516,6 +519,20 @@ def _log_context_and_issue_if_available(
         return None, "database_busy"
 
 
+def canonical_tool_name(name: str, allowed: Any) -> str:
+    """Accept the dot-free tool names some MCP clients substitute for ``brain.x``.
+
+    Cursor rewrites ``brain.context`` to ``brain_context`` when it advertises the
+    catalogue and sends that rewritten name back on tools/call, so the profile
+    gate below rejects every call from those clients as "not available".
+    """
+    allowed_names = {str(item) for item in allowed}
+    if name in allowed_names:
+        return name
+    matches = [item for item in allowed_names if item.replace(".", "_") == name]
+    return matches[0] if len(matches) == 1 else name
+
+
 def call_tool(
     conn,
     params: dict[str, Any],
@@ -526,6 +543,8 @@ def call_tool(
     profile = resolve_profile(profile=profile)
     delivery_target = normalize_delivery_target(delivery_target)
     name = params.get("name")
+    if isinstance(name, str):
+        name = canonical_tool_name(name, tools_for_profile(profile))
     if not isinstance(name, str) or name not in tools_for_profile(profile):
         raise PermissionError(f"tool is not available in {profile} profile: {name}")
     raw_arguments = params.get("arguments", {})
@@ -823,10 +842,17 @@ def call_tool(
             }
         )
     if name == "brain.ingest":
+        body = require_string(arguments, "body")
+        kind = optional_string(arguments, "kind") or "observation"
+        if kind in SKILL_TELEMETRY_KINDS:
+            envelope = validate_skill_telemetry(body)
+            if envelope["kind"] != kind:
+                raise ValueError("skill telemetry body kind must match brain.ingest kind")
+            body = canonical_json(envelope)
         event_id = record_evidence(
             conn,
-            body=require_string(arguments, "body"),
-            kind=optional_string(arguments, "kind") or "observation",
+            body=body,
+            kind=kind,
             context=context_from_arguments(arguments),
             scope=scope_from_arguments(arguments),
             writer=optional_string(arguments, "writer") or "mcp",
