@@ -35,6 +35,7 @@ from typing import Any
 from ocbrain.core_v1 import append_core_event, get_core_v1_belief
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
+from ocbrain.text import is_restatement
 
 CURATOR_VERSION = "wiki-curator-v2"
 WIKI_STATE_SCHEMA = "ocbrain.wiki-state.v1"
@@ -640,24 +641,43 @@ def apply_claims(
             continue
         equivalent = conn.execute(
             """
-            SELECT belief_id, evidence_ids
+            SELECT belief_id, body, evidence_ids
             FROM current_beliefs
-            WHERE belief_type='wiki_fact' AND status='current' AND serve=1 AND body=?
+            WHERE belief_type='wiki_fact' AND status='current' AND serve=1
+              AND scope_id=?
             ORDER BY belief_id
             """,
-            (claim["body"],),
+            (scope_id,),
         ).fetchall()
         equivalent_id = next(
             (
                 str(row["belief_id"])
                 for row in equivalent
-                if json.loads(row["evidence_ids"] or "[]") == claim["evidence_ids"]
+                if str(row["body"]) == claim["body"]
+                and json.loads(row["evidence_ids"] or "[]") == claim["evidence_ids"]
             ),
             None,
         )
         if equivalent_id is not None:
             unchanged.append(equivalent_id)
             continue
+        # A belief is keyed by the topic name the model happened to choose, so a
+        # later run that rewords the same fact under a new key used to mint a
+        # second belief. Exact-body dedup above never sees it. Left alone, every
+        # scheduled run adds another phrasing and each copy costs a result slot:
+        # one real brain reached 44 served beliefs carrying 33 distinct facts.
+        # Update the belief that already states this fact instead of adding to it.
+        restated_id = next(
+            (
+                str(row["belief_id"])
+                for row in equivalent
+                if is_restatement(str(row["body"]), claim["body"])
+            ),
+            None,
+        )
+        if restated_id is not None:
+            belief_id = restated_id
+            existing = get_core_v1_belief(conn, belief_id)
         if existing is not None and existing.get("status") in {"retracted", "tombstoned"}:
             blocked.append(belief_id)
             continue

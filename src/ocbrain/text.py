@@ -262,3 +262,34 @@ def title_from_text(text: str, fallback: str) -> str:
 
 def summarize_text(text: str, limit: int = 600) -> str:
     return compact_whitespace(text)[:limit]
+
+
+# Restatement detection. A compiler that mints one belief per phrasing turns a
+# repeated run into corpus bloat: three roundings of "Hermes runs as launchd
+# service ai.hermes.gateway" are one fact, not three, and every extra copy costs
+# a result slot at retrieval time. Token-set overlap is deliberately crude —
+# deterministic, dependency-free, and explainable — since the decision it feeds
+# (retire the older restatement) is soft and reversible.
+DEFAULT_RESTATEMENT_SIMILARITY = 0.80
+_SIGNIFICANT_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+
+
+def significant_tokens(text: str) -> set[str]:
+    """Lowercased tokens of three or more alphanumerics."""
+    return set(_SIGNIFICANT_TOKEN_RE.findall(text.lower()))
+
+
+def body_similarity(left: str, right: str) -> float:
+    """Jaccard overlap of significant tokens, in ``[0.0, 1.0]``."""
+    left_tokens = significant_tokens(left)
+    right_tokens = significant_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def is_restatement(
+    left: str, right: str, *, threshold: float = DEFAULT_RESTATEMENT_SIMILARITY
+) -> bool:
+    """True when two bodies say the same thing in different words."""
+    return body_similarity(left, right) >= threshold

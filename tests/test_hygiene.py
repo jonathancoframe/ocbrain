@@ -52,6 +52,7 @@ def _seed(
     belief_type: str = "curated_fact",
     compiled_at: str | None = None,
     pinned: bool = False,
+    scope: ScopeTag = SCOPE,
 ) -> None:
     proposal = append_core_event(
         conn,
@@ -61,7 +62,7 @@ def _seed(
             "belief_type": belief_type,
             "body": body,
             "evidence_ids": [],
-            "scope": SCOPE.to_dict(),
+            "scope": scope.to_dict(),
             "confidence": 0.9,
             "attributes": attributes or {},
         },
@@ -554,3 +555,124 @@ def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: 
         ).fetchone()[0]
         == 0
     )
+
+
+def test_redundant_class_keeps_the_newest_restatement(tmp_path: Path) -> None:
+    """A reworded fact under a new key is one fact, not two.
+
+    The compiler keys a belief by the topic name a model chose, so a later run
+    that rewords the same fact mints a second belief and exact-body dedup never
+    sees it. Unchecked, every scheduled run adds a phrasing and each copy costs a
+    retrieval slot.
+    """
+    conn = _core(tmp_path)
+    old = "curated:bountiful:hermes-runtime-config"
+    new = "curated:bountiful:hermes-runtime-service"
+    distinct = "curated:bountiful:unrelated"
+    _seed(
+        conn,
+        belief_id=old,
+        body="Hermes runs as the launchd service ai.hermes.gateway with auto-start and restart.",
+        belief_type="wiki_fact",
+        compiled_at="2026-08-01T00:00:00+00:00",
+    )
+    _seed(
+        conn,
+        belief_id=new,
+        body="Hermes runs as launchd service ai.hermes.gateway with auto-start and auto-restart.",
+        belief_type="wiki_fact",
+        compiled_at="2026-08-04T00:00:00+00:00",
+    )
+    _seed(
+        conn,
+        belief_id=distinct,
+        body="Meyer lemons ripen in winter near the coast and are picked by hand.",
+        belief_type="wiki_fact",
+        compiled_at="2026-08-04T00:00:00+00:00",
+    )
+    conn.commit()
+
+    plan = plan_retirements(conn, classes=("redundant",), now=NOW)
+    assert [target["belief_id"] for target in plan["targets"]] == [old]
+    assert plan["targets"][0]["detail"] == f"restates {new}"
+
+    apply_retirements(conn, plan)
+    statuses = {
+        str(row["belief_id"]): str(row["status"])
+        for row in conn.execute("SELECT belief_id, status FROM current_beliefs")
+    }
+    assert statuses[old] == "retracted"
+    assert statuses[new] == "current"
+    assert statuses[distinct] == "current"
+    # Idempotent: with the older copy gone there is nothing left to collapse.
+    assert plan_retirements(conn, classes=("redundant",), now=NOW)["targets"] == []
+
+
+def test_redundant_class_spares_pinned_beliefs_and_respects_the_threshold(
+    tmp_path: Path,
+) -> None:
+    conn = _core(tmp_path)
+    pinned_old = "curated:bountiful:pinned-phrasing"
+    newer = "curated:bountiful:newer-phrasing"
+    _seed(
+        conn,
+        belief_id=pinned_old,
+        body="Hermes runs as the launchd service ai.hermes.gateway with auto-start and restart.",
+        belief_type="wiki_fact",
+        compiled_at="2026-08-01T00:00:00+00:00",
+        pinned=True,
+    )
+    _seed(
+        conn,
+        belief_id=newer,
+        body="Hermes runs as launchd service ai.hermes.gateway with auto-start and auto-restart.",
+        belief_type="wiki_fact",
+        compiled_at="2026-08-04T00:00:00+00:00",
+    )
+    conn.commit()
+
+    # A pinned belief is an operator decision and is never collapsed away.
+    assert plan_retirements(conn, classes=("redundant",), now=NOW)["targets"] == []
+    # And a threshold above the pair's actual overlap finds nothing at all.
+    assert (
+        plan_retirements(
+            conn, classes=("redundant",), now=NOW, restatement_threshold=0.999
+        )["targets"]
+        == []
+    )
+
+
+def test_redundant_class_preserves_scope_and_belief_type_boundaries(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    body = "OCBrain runs as an on-demand local stdio MCP service with eight tools."
+    alpha = ScopeTag("project", "project:alpha", "internal", "local_only", "test")
+    beta = ScopeTag("project", "project:beta", "internal", "local_only", "test")
+
+    _seed(
+        conn,
+        belief_id="curated:alpha:runtime",
+        body=body,
+        belief_type="wiki_fact",
+        compiled_at="2026-08-01T00:00:00+00:00",
+        scope=alpha,
+    )
+    _seed(
+        conn,
+        belief_id="curated:beta:runtime",
+        body=body,
+        belief_type="wiki_fact",
+        compiled_at="2026-08-04T00:00:00+00:00",
+        scope=beta,
+    )
+    _seed(
+        conn,
+        belief_id="explicit:alpha:runtime",
+        body=body,
+        belief_type="curated_fact",
+        compiled_at="2026-07-01T00:00:00+00:00",
+        scope=alpha,
+    )
+    conn.commit()
+
+    # Matching text does not make separately scoped or non-wiki knowledge redundant.
+    assert plan_retirements(conn, classes=("redundant",), now=NOW)["targets"] == []
