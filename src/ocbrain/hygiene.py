@@ -5,11 +5,17 @@ accumulates facts that expired, were never once retrieved, or are consistently
 judged unhelpful when they are -- and precision decays until someone runs a
 one-off sweep by hand.
 
-Three independent classes, each separately counted so a run says *why* it acted:
+Four independent classes, each separately counted so a run says *why* it acted:
 
 ``expired``
     Past its ``valid_until``, or explicitly marked ``superseded_by`` another
     belief. Unambiguous, and the only class that may retire a curated wiki fact.
+
+``redundant``
+    An older restatement of a fact a newer belief already carries. The compiler
+    keys a belief by the topic name a model chose, so a later run that rewords the
+    same fact under a new key mints a second belief instead of updating the first
+    -- exact-body dedup never sees it, and every scheduled run adds a phrasing.
 
 ``unused``
     Never returned by any retrieval and older than a grace window. A fact nobody
@@ -48,6 +54,7 @@ from ocbrain.core_v1 import (
     now_iso,
     project_core_v1,
 )
+from ocbrain.text import DEFAULT_RESTATEMENT_SIMILARITY, is_restatement
 
 HYGIENE_VERSION = "belief-hygiene-v2"
 WRITER = f"maintenance:{HYGIENE_VERSION}"
@@ -59,8 +66,12 @@ DEFAULT_MIN_FEEDBACK_OBSERVATIONS = 5
 # Mean of the per-outcome signal used by retrieval ranking. Below this a belief
 # is being actively judged bad, not merely ignored.
 DEFAULT_UNHELPFUL_THRESHOLD = -0.5
+# Token overlap above which two served beliefs are treated as one fact restated.
+# Conservative on purpose: this runs unattended, and under-retiring leaves a
+# little redundancy while over-retiring loses knowledge.
+DEFAULT_RESTATEMENT_THRESHOLD = DEFAULT_RESTATEMENT_SIMILARITY
 
-CLASSES = ("expired", "unused", "unhelpful")
+CLASSES = ("expired", "redundant", "unused", "unhelpful")
 
 
 def get_feedback_watermark(conn: sqlite3.Connection) -> str | None:
@@ -195,6 +206,50 @@ def _unhelpful_targets(
     return targets
 
 
+def _redundant_targets(
+    conn: sqlite3.Connection, *, threshold: float
+) -> list[dict[str, str]]:
+    """Retire older restatements of a fact, keeping the newest of each cluster.
+
+    The compiler keys a belief by the topic name a model chose, so a later run
+    that rewords the same fact under a new key mints a second belief rather than
+    updating the first. Exact-body dedup never sees it. Left alone, every
+    scheduled run adds another phrasing and each copy costs a retrieval slot.
+    """
+    rows = list(
+        conn.execute(
+            """
+            SELECT belief_id, body, last_compiled_at
+            FROM current_beliefs
+            WHERE status='current' AND serve=1 AND pinned=0
+            ORDER BY last_compiled_at DESC, belief_id
+            """
+        )
+    )
+    targets: list[dict[str, str]] = []
+    kept: list[tuple[str, str]] = []
+    # Rows arrive newest-first, so the first member of a cluster is the keeper
+    # and everything matching it afterwards is an older restatement.
+    for row in rows:
+        belief_id = str(row["belief_id"])
+        body = str(row["body"])
+        keeper = next(
+            (kid for kid, kbody in kept if is_restatement(kbody, body, threshold=threshold)),
+            None,
+        )
+        if keeper is None:
+            kept.append((belief_id, body))
+            continue
+        targets.append(
+            {
+                "belief_id": belief_id,
+                "reason": "redundant",
+                "detail": f"restates {keeper}",
+            }
+        )
+    return targets
+
+
 def plan_retirements(
     conn: sqlite3.Connection,
     *,
@@ -203,6 +258,7 @@ def plan_retirements(
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
     min_feedback_observations: int = DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
     unhelpful_threshold: float = DEFAULT_UNHELPFUL_THRESHOLD,
+    restatement_threshold: float = DEFAULT_RESTATEMENT_THRESHOLD,
     batch_cap: int = DEFAULT_BATCH_CAP,
 ) -> dict[str, Any]:
     """Select what a run would retire, without writing anything."""
@@ -217,6 +273,8 @@ def plan_retirements(
     skipped: dict[str, str] = {}
     if "expired" in classes:
         candidates += _expired_targets(conn, now=resolved_now)
+    if "redundant" in classes:
+        candidates += _redundant_targets(conn, threshold=restatement_threshold)
     if "unused" in classes:
         candidates += _unused_targets(conn, now=resolved_now, min_age_days=min_age_days)
     if "unhelpful" in classes:
@@ -252,6 +310,7 @@ def plan_retirements(
         "classes": sorted(classes),
         "at": resolved_now.isoformat(timespec="seconds"),
         "min_age_days": min_age_days,
+        "restatement_threshold": restatement_threshold,
         "batch_cap": batch_cap,
         "eligible_total": len(ordered),
         "selected_total": len(capped),

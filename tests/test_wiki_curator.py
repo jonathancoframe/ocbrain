@@ -494,3 +494,101 @@ def test_curation_egress_is_audited_before_the_send(tmp_path: Path) -> None:
     # The body itself is not copied into the audit, only its identity and size.
     assert "AUDITED EVIDENCE BODY" not in audit["included_json"]
     assert audit["payload_hash"]
+
+
+def test_curator_updates_a_restated_fact_instead_of_minting_a_second(tmp_path: Path) -> None:
+    """A reworded claim must update the belief that already states the fact.
+
+    belief_id derives from the topic key the model chose, so a later run that
+    rewords the same fact under a new key used to create a second served belief.
+    Exact-body dedup never catches it, and every run added another phrasing.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+
+    first = [
+        {
+            "key": "hermes-runtime-config",
+            "title": "Hermes runtime",
+            "body": "Hermes runs as the launchd service ai.hermes.gateway with auto-start "
+            "and restart, delivering to Telegram.",
+            "category": "system",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+    ]
+    applied = apply_claims(conn, first, model="test", project="test")
+    assert len(applied["applied"]) == 1
+    original_id = applied["applied"][0]
+
+    # Same fact, different key and wording — the shape a later run produces.
+    second = [
+        {
+            "key": "hermes-runtime-service",
+            "title": "Hermes runtime",
+            "body": "Hermes runs as launchd service ai.hermes.gateway with auto-start and "
+            "auto-restart, delivering to Telegram.",
+            "category": "system",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+    ]
+    reapplied = apply_claims(conn, second, model="test", project="test")
+
+    # It updated the existing belief rather than adding a second one.
+    assert reapplied["applied"] == [original_id]
+    serving = conn.execute(
+        "SELECT belief_id, body FROM current_beliefs WHERE serve=1 AND status='current'"
+    ).fetchall()
+    assert len(serving) == 1
+    assert str(serving[0]["belief_id"]) == original_id
+    assert "auto-restart" in str(serving[0]["body"])
+    conn.close()
+
+
+def test_curator_still_adds_a_genuinely_different_fact(tmp_path: Path) -> None:
+    """Restatement collapsing must not swallow distinct knowledge."""
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+
+    def claim(key: str, body: str) -> dict:
+        return {
+            "key": key,
+            "title": key,
+            "body": body,
+            "category": "system",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+
+    apply_claims(
+        conn,
+        [claim("hermes-runtime", "Hermes runs as the launchd service ai.hermes.gateway.")],
+        model="test",
+        project="test",
+    )
+    apply_claims(
+        conn,
+        [
+            claim(
+                "clickhouse-access",
+                "Production ClickHouse access is SELECT-only and the live host rotates.",
+            )
+        ],
+        model="test",
+        project="test",
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM current_beliefs WHERE serve=1 AND status='current'"
+        ).fetchone()[0]
+        == 2
+    )
+    conn.close()

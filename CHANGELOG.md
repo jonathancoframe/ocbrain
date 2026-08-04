@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Stop the curator minting a second belief when a later run restates a fact it
+  already holds. A belief is keyed by the topic name the model chose, so a
+  reworded claim under a new key created a duplicate and exact-body dedup never
+  saw it — every scheduled run added another phrasing. One real brain reached 44
+  served beliefs carrying 33 distinct facts, and each copy costs a result slot.
+  A claim that restates a served fact now updates that belief instead.
+- Add a `redundant` hygiene class that retires older restatements, keeping the
+  newest of each cluster. Pinned beliefs are never collapsed, and the similarity
+  threshold is configurable (`--restatement-threshold`, default 0.80) because it
+  runs unattended: under-retiring leaves a little redundancy, over-retiring loses
+  knowledge.
+- Add `body_similarity` / `is_restatement` to `ocbrain.text`. Token-set overlap is
+  deliberately crude — deterministic, dependency-free, explainable — since the
+  decision it feeds is a soft, reversible retirement.
+
 - Resolve configuration from `~/.ocbrain/ocbrain.config.json` before the
   checkout-relative `data/ocbrain.config.json`. The old default made resolution
   depend on the working directory, let a `git clean -xfd` or fresh clone silently

@@ -67,6 +67,7 @@ from ocbrain.hygiene import (
     DEFAULT_BATCH_CAP,
     DEFAULT_MIN_AGE_DAYS,
     DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
+    DEFAULT_RESTATEMENT_THRESHOLD,
     DEFAULT_UNHELPFUL_THRESHOLD,
     apply_retirements,
     plan_retirements,
@@ -854,6 +855,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--unhelpful-threshold", type=float, default=DEFAULT_UNHELPFUL_THRESHOLD
     )
     hygiene_parser.add_argument(
+        "--restatement-threshold",
+        type=float,
+        default=DEFAULT_RESTATEMENT_THRESHOLD,
+        help=(
+            "token overlap above which two served beliefs count as one fact "
+            "restated; lower retires more aggressively"
+        ),
+    )
+    hygiene_parser.add_argument(
         "--set-watermark",
         action="store_true",
         help=(
@@ -1504,6 +1514,7 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
             batch_cap=args.batch_cap,
             min_feedback_observations=args.min_feedback_observations,
             unhelpful_threshold=args.unhelpful_threshold,
+            restatement_threshold=args.restatement_threshold,
         )
         if args.apply:
             plan = apply_retirements(conn, plan)
