@@ -64,6 +64,29 @@ def _page_text(wiki_dir, belief_id):
     return matches[0].name, matches[0].read_text(encoding="utf-8")
 
 
+def test_non_curator_rematerialization_preserves_only_the_curator_digest(tmp_path):
+    conn, wiki_dir = _materialize(tmp_path, [])
+    materialize_wiki(
+        conn,
+        wiki_dir,
+        run=RUN | {"input_digest": "digest-a", "accepted_count": 3},
+    )
+
+    materialize_wiki(
+        conn,
+        wiki_dir,
+        run={"at": NOW, "action": "scheduled-rematerialize"},
+    )
+
+    state = json.loads((wiki_dir / "state.json").read_text(encoding="utf-8"))
+    assert state == {
+        "at": NOW,
+        "action": "scheduled-rematerialize",
+        "input_digest": "digest-a",
+    }
+    conn.close()
+
+
 def test_fresh_page_has_valid_from_and_no_staleness_marker(tmp_path):
     conn, wiki_dir = _materialize(
         tmp_path,

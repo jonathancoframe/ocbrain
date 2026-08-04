@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve the last curator input digest when a non-curator wiki rematerialization
+  replaces `state.json`. The promote script rematerializes after every run; losing
+  that digest made an unchanged next cycle call the hosted model again instead of
+  taking the promised free no-op path.
 - Stop the curator minting a second belief when a later run restates a fact it
   already holds. A belief is keyed by the topic name the model chose, so a
   reworded claim under a new key created a duplicate and exact-body dedup never
