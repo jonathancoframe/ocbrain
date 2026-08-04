@@ -13,6 +13,9 @@ from ocbrain.scope import ScopeContext, ScopeTag, scope_match
 
 CONTEXT_SCHEMA_VERSION = "ocbrain.context.v1"
 SOURCE_SCHEMA_VERSION = "ocbrain.source.v1"
+# Most recent issuances returned inline by brain.source. The underlying table is
+# an append-only audit ledger that grows once per (handle, retrieval) forever.
+ISSUED_BY_WINDOW = 8
 MAX_SOURCE_FILE_BYTES = 512_000
 
 
@@ -166,6 +169,16 @@ def expand_source(
     if actual_hash != row["content_hash"]:
         raise ValueError("source changed after issuance; request a fresh brain.context handle")
     excerpt, truncated = _bounded_excerpt(content, locator.get("anchor"), max_chars=max_chars)
+    # One row accrues per (handle, retrieval), so a hot handle's issue history
+    # grows without bound. Return the most recent window plus a total, matching
+    # how the brain.source summary already reports it; the full audit trail stays
+    # queryable in context_source_handle_issues.
+    issued_by_total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM context_source_handle_issues WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()[0]
+    )
     issued_by = [
         str(issue["retrieval_use_id"])
         for issue in conn.execute(
@@ -173,11 +186,12 @@ def expand_source(
             SELECT retrieval_use_id
             FROM context_source_handle_issues
             WHERE source_id = ?
-            ORDER BY issued_at ASC, retrieval_use_id ASC
+            ORDER BY issued_at DESC, retrieval_use_id DESC
+            LIMIT ?
             """,
-            (source_id,),
+            (source_id, ISSUED_BY_WINDOW),
         )
-    ]
+    ][::-1]
     return {
         "schema_version": SOURCE_SCHEMA_VERSION,
         "id": row["id"],
@@ -193,6 +207,9 @@ def expand_source(
         "issued_at": row["issued_at"],
         "origin_retrieval_use_id": row["retrieval_use_id"],
         "issued_by_retrieval_use_ids": issued_by,
+        # Named to match the v1 expansion path, which already reported a count
+        # alongside its windowed list.
+        "issued_by_count": issued_by_total,
     }
 
 

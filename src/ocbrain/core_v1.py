@@ -1877,6 +1877,37 @@ def record_core_v1_evidence(
     return evidence_id, event_id
 
 
+# Runtimes self-report a free-text name, and the same client arrives spelled a
+# dozen ways ("codex-desktop", "Codex desktop", "Codex desktop local macOS").
+# Ungrouped, that makes per-client analytics and feedback aggregation useless.
+# Match the client where one is identifiable and keep the slug otherwise, so an
+# unrecognized runtime stays legible instead of collapsing into "unknown".
+_RUNTIME_CANONICAL_MARKERS: tuple[tuple[str, str], ...] = (
+    ("codex", "codex"),
+    ("cursor", "cursor"),
+    ("claude", "claude-code"),
+    ("hermes", "hermes"),
+    ("telegram", "telegram"),
+)
+
+
+def canonical_runtime(runtime: str | None) -> str | None:
+    """Collapse a self-reported runtime name to a stable slug.
+
+    Returns ``None`` unchanged so "not reported" stays distinct from "reported
+    but unrecognized". The raw value is preserved by callers alongside this.
+    """
+    if runtime is None:
+        return None
+    slug = "-".join(re.findall(r"[a-z0-9]+", runtime.lower()))
+    if not slug:
+        return None
+    for marker, canonical in _RUNTIME_CANONICAL_MARKERS:
+        if marker in slug:
+            return canonical
+    return slug[:64]
+
+
 def record_core_v1_retrieval(
     conn: sqlite3.Connection,
     *,
@@ -1890,6 +1921,10 @@ def record_core_v1_retrieval(
 ) -> str:
     rows = list(items)
     served_at = now_iso()
+    canonical = canonical_runtime(runtime)
+    if runtime is not None and runtime != canonical:
+        # Keep the operator's exact string; only the indexed column is collapsed.
+        context = {**context, "runtime_raw": runtime}
     retrieval_id = stable_id(
         "ret",
         served_at,
@@ -1908,7 +1943,7 @@ def record_core_v1_retrieval(
         """,
         (
             retrieval_id,
-            runtime,
+            canonical,
             task_ref,
             query,
             canonical_json(

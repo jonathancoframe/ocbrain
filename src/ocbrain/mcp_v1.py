@@ -1209,15 +1209,23 @@ def ingest_v1(
         "kind": "evidence_recorded",
     }
     if auto:
-        result["auto_compiled_belief_id"] = auto_compile_evidence(
-            conn,
-            evidence_id=evidence_id,
-            body=body,
-            scope=scope,
-            actor=writer,
-            source_kind=kind,
-        )
-        result["kind"] = "evidence_recorded_and_compiled"
+        try:
+            result["auto_compiled_belief_id"] = auto_compile_evidence(
+                conn,
+                evidence_id=evidence_id,
+                body=body,
+                scope=scope,
+                actor=writer,
+                source_kind=kind,
+            )
+        except PermissionError as exc:
+            # Auto-belief ids are content-addressed, so re-ingesting text that
+            # matches a retracted or tombstoned belief hits compilation_block_reason
+            # and raises. Recording the evidence is the caller's actual request;
+            # a blocked recompile must not fail the whole write.
+            result["auto_compile_blocked"] = str(exc)
+        else:
+            result["kind"] = "evidence_recorded_and_compiled"
     return result
 
 
@@ -1267,14 +1275,18 @@ def closeout_v1(
             writer=actor,
             artifact_ref=f"closeout:{receipt['id']}",
         )
-        receipt["auto_compiled_belief_id"] = auto_compile_evidence(
-            conn,
-            evidence_id=evidence_id,
-            body=summary,
-            scope=scope,
-            actor=actor,
-            source_kind="task_closeout_summary",
-        )
+        try:
+            receipt["auto_compiled_belief_id"] = auto_compile_evidence(
+                conn,
+                evidence_id=evidence_id,
+                body=summary,
+                scope=scope,
+                actor=actor,
+                source_kind="task_closeout_summary",
+            )
+        except PermissionError as exc:
+            # See ingest_v1: a blocked recompile must not lose the closeout.
+            receipt["auto_compile_blocked"] = str(exc)
     return receipt
 
 
