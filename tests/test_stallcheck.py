@@ -102,6 +102,19 @@ def _cfg(**overrides) -> stallcheck.StallCheckConfig:
     return stallcheck.StallCheckConfig(**base)
 
 
+def test_config_uses_the_shared_durable_path(tmp_path, monkeypatch):
+    config = tmp_path / ".ocbrain" / "ocbrain.config.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"stall_check": {"stale_threshold_minutes": 37}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OCBRAIN_CONFIG", raising=False)
+    monkeypatch.setattr(stallcheck, "default_config_path", lambda: config)
+
+    assert stallcheck.load_config().stale_threshold_minutes == 37
+
+
 def _make_runner_db(path, *, task_rows=(), ingress_rows=()) -> None:
     conn = sqlite3.connect(path)
     conn.execute(

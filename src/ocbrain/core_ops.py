@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ocbrain.config import default_config_path
 from ocbrain.core_v1 import (
     CORE_V1_TABLES,
     init_core_v1,
@@ -464,7 +465,7 @@ def local_control_file_security() -> dict[str, Any]:
         "active_db_pointer": Path(
             os.environ.get("OCBRAIN_ACTIVE_DB_FILE", "data/active-core.path")
         ).expanduser(),
-        "config": Path(os.environ.get("OCBRAIN_CONFIG", "data/ocbrain.config.json")).expanduser(),
+        "config": default_config_path(),
     }
     files: dict[str, dict[str, Any]] = {}
     healthy = True

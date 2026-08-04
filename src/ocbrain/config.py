@@ -4,7 +4,8 @@ One config module for every v0.2 tunable (spec §3, resolution R1). The public
 entry point is :func:`load_config`, which layers, in order:
 
 1. hard-coded defaults (the section dataclasses below),
-2. an optional JSON file at ``$OCBRAIN_CONFIG`` (default ``data/ocbrain.config.json``),
+2. an optional JSON file at ``$OCBRAIN_CONFIG`` (default
+   ``~/.ocbrain/ocbrain.config.json``, with legacy checkout fallback),
 3. ``OCBRAIN_<SECTION>_<FIELD>`` environment overrides.
 
 ``DatasetConfig`` is the ``dataset`` section here — there is deliberately no

@@ -59,6 +59,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ocbrain.config import default_config_path
 from ocbrain.ids import content_hash, stable_id
 
 from ocbrain_ops.store import DEFAULT_OPS_DB, connect_ops
@@ -167,9 +168,7 @@ def load_config(config_path: Path | str | None = None) -> StallCheckConfig:
     """Layer the ``stall_check`` / ``stall_pager`` sections of the ocbrain JSON
     config over the hard defaults. A missing file yields pure defaults (inert
     pager)."""
-    path = Path(
-        config_path or os.environ.get("OCBRAIN_CONFIG", "data/ocbrain.config.json")
-    ).expanduser()
+    path = Path(config_path).expanduser() if config_path is not None else default_config_path()
     raw: dict[str, Any] = {}
     if path.is_file():
         try:
