@@ -4,8 +4,14 @@
 An explicit operator-invoked hosted operation. Dry-run by default: without
 ``--apply`` it prints what it would send and makes no network call. Only
 already-redacted, bounded evidence bodies that pass project, visibility, and
-egress gates are eligible; raw transcripts, confidential/secret objects, and
-local-only or prohibited objects never are.
+egress gates are eligible, and raw transcripts never are (they are excluded by
+kind).
+
+Which egress policies qualify is the operator's declaration, set once in
+``curator.egress_policies`` or overridden with ``--egress-policy``. It ships as
+``hosted_ok`` only. ``prohibited`` egress and ``secret`` visibility are refused
+in code and cannot be enabled. Every applied run writes an ``egress_audits`` row
+naming exactly what was sent, before it is sent.
 
 Providers: ``anthropic`` (default), ``openai``, ``moonshot``. See
 ``ocbrain.curator`` for the provider backends and the local claim validation
@@ -18,6 +24,7 @@ import argparse
 import json
 from pathlib import Path
 
+from ocbrain.config import load_config
 from ocbrain.core_v1 import is_core_v1
 from ocbrain.curator import (
     PROVIDER_DEFAULTS,
@@ -26,7 +33,9 @@ from ocbrain.curator import (
     input_digest,
     load_env_value,
     now_iso,
+    record_curation_egress,
     request_claims,
+    resolve_selection_policy,
     select_evidence,
     validate_claims,
 )
@@ -78,6 +87,16 @@ def main() -> int:
     parser.add_argument("--wiki-dir", type=Path)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument(
+        "--egress-policy",
+        action="append",
+        choices=["hosted_ok", "approval_required", "local_only"],
+        help=(
+            "evidence egress policy the curator may read; repeatable. Overrides "
+            "curator.egress_policies from config. `prohibited` egress and `secret` "
+            "visibility are never eligible and cannot be enabled"
+        ),
+    )
+    parser.add_argument(
         "--allow-hosted-egress",
         action="store_true",
         help=(
@@ -105,11 +124,22 @@ def main() -> int:
     try:
         if not is_core_v1(conn):
             raise ValueError("database is not an OCBrain v1 core")
+        # The operator's standing declaration of what their curator may read,
+        # from config (OCBRAIN_CURATOR_EGRESS_POLICIES / the config file), with a
+        # CLI override. `prohibited` and `secret` are refused in code either way.
+        curator_cfg = load_config().curator
+        egress_policies = args.egress_policy or curator_cfg.egress_policies
+        resolved_egress, resolved_visibility = resolve_selection_policy(
+            egress_policies=egress_policies,
+            visibilities=curator_cfg.visibilities,
+            allow_hosted_egress=bool(args.allow_hosted_egress),
+        )
         evidence = select_evidence(
             conn,
             limit=max(1, args.max_evidence),
-            allow_hosted_egress=bool(args.allow_hosted_egress),
             project=args.project,
+            egress_policies=resolved_egress,
+            visibilities=resolved_visibility,
         )
         existing = current_wiki_beliefs(
             conn,
@@ -134,6 +164,8 @@ def main() -> int:
             "raw_transcripts_eligible": False,
             "confidential_or_prohibited_eligible": False,
             "hosted_egress_acknowledged": bool(args.allow_hosted_egress),
+            "egress_policies": list(resolved_egress),
+            "visibilities": list(resolved_visibility),
         }
         if not args.apply:
             print(json.dumps(preview, sort_keys=True))
@@ -151,6 +183,15 @@ def main() -> int:
         if not api_key:
             raise ValueError(f"{api_key_env} is not configured")
         max_beliefs = max(1, min(args.max_beliefs, 40))
+        # Record what is about to leave the machine before it leaves.
+        audit_id = record_curation_egress(
+            conn,
+            evidence=evidence,
+            provider=args.provider,
+            model=model,
+            project=args.project,
+            egress_policies=resolved_egress,
+        )
         response = request_claims(
             provider=args.provider,
             api_key=api_key,
@@ -182,6 +223,7 @@ def main() -> int:
             "action": "wiki-curate",
             "provider": args.provider,
             "model": model,
+            "egress_audit_id": audit_id,
             "input_digest": digest,
             "evidence_count": len(evidence),
             "accepted_count": len(claims),
@@ -196,6 +238,7 @@ def main() -> int:
                 preview
                 | {
                     "status": "completed",
+                    "egress_audit_id": audit_id,
                     "accepted": len(claims),
                     "rejected": len(rejected),
                     "applied": len(applied["applied"]),

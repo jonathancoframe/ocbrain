@@ -506,3 +506,51 @@ def test_cli_hygiene_reports_then_applies(tmp_path: Path, capsys) -> None:
 
     assert cli_main(["--db", str(db_path), "hygiene", "--set-watermark"]) == 0
     assert json.loads(capsys.readouterr().out)["feedback_watermark"]
+
+
+def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: Path) -> None:
+    """Recording evidence is not promotion, and must not be gated with it.
+
+    Both used to sit behind automatic_activation, so turning that flag off to stop
+    unattended promotion also stopped closeout summaries becoming evidence --
+    silently removing the largest supply of curator-eligible evidence.
+    """
+    from ocbrain.core_v1 import automatic_activation_enabled
+    from ocbrain.mcp_v1 import closeout_v1
+
+    conn = _core(tmp_path)
+    assert automatic_activation_enabled(conn) is False
+    receipt = closeout_v1(
+        conn,
+        task_ref="task-with-activation-off",
+        status="completed",
+        summary="The nightly export now finishes before the morning report runs.",
+        context=ScopeContext(project="bountiful"),
+        retrieval_use_ids=[],
+        decision_impact="changed",
+        decision_note="verified locally",
+        artifact_refs=[],
+        verifier_refs=[],
+        actions=[],
+        outcomes=[],
+        awaiting=None,
+        actor="test",
+    )
+    conn.commit()
+
+    # Evidence lands, and is the curator-eligible kind.
+    assert receipt["evidence_id"]
+    row = conn.execute(
+        "SELECT kind, scope_id, egress_policy FROM evidence_objects WHERE evidence_id=?",
+        (receipt["evidence_id"],),
+    ).fetchone()
+    assert row["kind"] == "task_closeout_summary"
+    assert row["scope_id"] == "project:bountiful"
+    # But nothing was promoted, because that half is still gated.
+    assert "auto_compiled_belief_id" not in receipt
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM current_beliefs WHERE serve=1 AND status='current'"
+        ).fetchone()[0]
+        == 0
+    )

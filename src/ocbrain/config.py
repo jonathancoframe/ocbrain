@@ -342,8 +342,32 @@ class RetrievalConfig:
 
 
 @dataclass(frozen=True)
+class CuratorConfig:
+    # Which evidence the wiki curator may send to a model, and which model.
+    #
+    # `egress_policies` is the operator's standing declaration of intent. It
+    # ships as `hosted_ok` only, so a fresh install sends nothing it was not
+    # explicitly given. An operator running a brain whose evidence is all
+    # `local_only` -- the default for anything written through a client -- can add
+    # that policy here to let their own curator read their own notes.
+    #
+    # Two things are NOT configurable and are enforced in code regardless:
+    # `prohibited` egress and `secret` visibility are never eligible. Those are
+    # the floor, not a default.
+    #
+    # Every applied run records an egress audit naming exactly what was sent.
+    egress_policies: list[str] = field(default_factory=lambda: ["hosted_ok"])
+    visibilities: list[str] = field(default_factory=lambda: ["public", "internal"])
+    provider: str = "anthropic"
+    model: str = ""  # empty means the provider's default
+    max_beliefs: int = 24
+    current_ttl_days: int = 90
+
+
+@dataclass(frozen=True)
 class OcbrainConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    curator: CuratorConfig = field(default_factory=CuratorConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     correction: CorrectionConfig = field(default_factory=CorrectionConfig)
