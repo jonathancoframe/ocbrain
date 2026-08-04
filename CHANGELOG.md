@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make `doctor` and the optional ops stall checker use the same durable config
+  resolver as the core, so the migrated user config is permission-checked and
+  optional operations do not silently fall back to the checkout path.
 - Resolve configuration from `~/.ocbrain/ocbrain.config.json` before the
   checkout-relative `data/ocbrain.config.json`. The old default made resolution
   depend on the working directory, let a `git clean -xfd` or fresh clone silently

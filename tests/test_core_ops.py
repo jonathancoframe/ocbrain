@@ -156,6 +156,24 @@ def test_local_control_files_must_be_owner_only(tmp_path, monkeypatch):
     assert secure["files"]["config"]["status"] == "owner_only"
 
 
+def test_local_control_files_check_the_resolved_user_config(tmp_path, monkeypatch):
+    config = tmp_path / ".ocbrain" / "ocbrain.config.json"
+    config.parent.mkdir()
+    config.write_text("{}\n", encoding="utf-8")
+    config.chmod(0o644)
+    monkeypatch.delenv("OCBRAIN_CONFIG", raising=False)
+    monkeypatch.setattr(core_ops, "default_config_path", lambda: config)
+
+    result = local_control_file_security()
+
+    assert result["healthy"] is False
+    assert result["files"]["config"] == {
+        "status": "permissions_too_open",
+        "secure": False,
+        "mode": "0644",
+    }
+
+
 def test_runtime_client_checks_probe_exact_registration_and_skip_absent_openclaw(
     monkeypatch,
 ):
