@@ -26,6 +26,49 @@ def _curator_module():
     return module
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_field", "unsupported_field"),
+    [
+        ("openai", "gpt-5-mini", "max_completion_tokens", "max_tokens"),
+        ("moonshot", "moonshot-v1-32k", "max_tokens", "max_completion_tokens"),
+    ],
+)
+def test_openai_compatible_provider_uses_supported_token_budget_field(
+    monkeypatch, provider, model, expected_field, unsupported_field
+):
+    captured: dict[str, bytes] = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["request"] = request.data
+        response = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": json.dumps({"beliefs": []})},
+                }
+            ]
+        }
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(ocbrain.curator.urllib.request, "urlopen", fake_urlopen)
+    result = ocbrain.curator.request_claims(
+        provider=provider,
+        api_key="test-key-never-sent",
+        base_url="https://provider.invalid/v1",
+        model=model,
+        evidence=[],
+        existing=[],
+        max_beliefs=1,
+        max_tokens=1_234,
+    )
+
+    assert result == {"beliefs": []}
+    payload = json.loads(captured["request"])
+    assert payload[expected_field] == 1_234
+    assert unsupported_field not in payload
+
+
 def _seed_wiki_belief(
     conn,
     *,

@@ -294,6 +294,7 @@ def request_claims(
             max_tokens=max_tokens,
         )
     return _request_openai_compatible(
+        provider=provider,
         api_key=api_key,
         base_url=base_url,
         model=model,
@@ -345,7 +346,13 @@ def _request_anthropic(
 
 
 def _request_openai_compatible(
-    *, api_key: str, base_url: str, model: str, user_prompt: str, max_tokens: int
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    user_prompt: str,
+    max_tokens: int,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -353,9 +360,14 @@ def _request_openai_compatible(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
+    # OpenAI's current Chat Completions models (including the default
+    # gpt-5-mini) reject the legacy max_tokens field. Moonshot's compatible
+    # endpoint still uses it, so keep the provider distinction explicit.
+    payload[
+        "max_completion_tokens" if provider == "openai" else "max_tokens"
+    ] = max_tokens
     if model.startswith("moonshot-"):
         # Non-thinking moonshot models benefit from a low temperature; the
         # thinking kimi-* models reject or waste it.
