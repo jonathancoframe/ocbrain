@@ -142,12 +142,25 @@ def materialize_wiki(conn, wiki_dir: Path, *, run: dict[str, Any]) -> int:
     """Rebuild the disposable wiki directory and swap it into place atomically."""
     wiki_dir = wiki_dir.expanduser().resolve()
     wiki_dir.parent.mkdir(parents=True, exist_ok=True)
+    effective_run = dict(run)
+    # A non-curator rebuild (for example after hygiene) must not erase the digest
+    # that makes the next unchanged curator cycle a no-op. Preserve only that
+    # cursor; the rest of state.json should continue to describe this run.
+    if "input_digest" not in effective_run:
+        prior_state_path = wiki_dir / "state.json"
+        try:
+            prior_state = json.loads(prior_state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            prior_state = {}
+        prior_digest = prior_state.get("input_digest") if isinstance(prior_state, dict) else None
+        if isinstance(prior_digest, str) and prior_digest:
+            effective_run["input_digest"] = prior_digest
     temp_dir = Path(
         tempfile.mkdtemp(prefix=f".{wiki_dir.name}-build-", dir=wiki_dir.parent)
     )
     backup_dir = wiki_dir.parent / f".{wiki_dir.name}-previous"
     try:
-        count = _build_wiki(conn, temp_dir, previous=wiki_dir, run=run)
+        count = _build_wiki(conn, temp_dir, previous=wiki_dir, run=effective_run)
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
         moved_previous = False
