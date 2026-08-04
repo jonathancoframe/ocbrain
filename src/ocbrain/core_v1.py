@@ -793,9 +793,22 @@ def _project_recorded_evidence(
         occurred_at=event["ts"],
         recorded_at=event["ts"],
         scope=scope,
-        metadata={"event_body": body},
+        # Keep the event body's metadata (bundle provenance and similar) but drop
+        # its `body` text: that text is already in this very row's `body` column
+        # and, authoritatively, in brain_events.body_json. Storing it a third time
+        # cost ~23% of one real 125MB core. `recorded_event_id` still points at
+        # the authoritative event for anything that needs the original.
+        metadata={"event_body": _metadata_event_body(body)},
         event_id=event["id"],
     )
+
+
+def _metadata_event_body(body: dict[str, Any]) -> dict[str, Any]:
+    """The event body as projected metadata, without the duplicated text."""
+    slimmed = {key: value for key, value in body.items() if key != "body"}
+    if "body" in body:
+        slimmed["body_omitted"] = "see evidence_objects.body / brain_events.body_json"
+    return slimmed
 
 
 def _project_compilation_decision(

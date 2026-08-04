@@ -238,3 +238,32 @@ def test_source_expansion_bounds_the_issue_history(tmp_path: Path) -> None:
     assert len(expanded["issued_by_retrieval_use_ids"]) == ISSUED_BY_WINDOW
     assert expanded["issued_by_count"] == issued_total
     assert issued_total > ISSUED_BY_WINDOW
+
+
+def test_projection_does_not_duplicate_the_evidence_body(tmp_path: Path) -> None:
+    """The body text belongs in one column, not three.
+
+    evidence_objects.metadata_json carried a full copy of the event body, which
+    already includes the text that sits in the same row's `body` column and in
+    brain_events.body_json. On a real core that third copy was ~23% of the file.
+    """
+    from ocbrain.core_v1 import get_core_v1_evidence, record_core_v1_evidence
+
+    conn = _core(tmp_path)
+    body = "A distinctive evidence body that must be stored exactly once here."
+    evidence_id, _event_id = record_core_v1_evidence(
+        conn, body=body, kind="analysis_result", scope=SCOPE, writer="test"
+    )
+    conn.commit()
+
+    stored = get_core_v1_evidence(conn, evidence_id)
+    assert stored["body"] == body
+    event_body = stored["metadata"]["event_body"]
+    # Metadata that is not the text survives; the text itself does not.
+    assert event_body["kind"] == "analysis_result"
+    assert "body" not in event_body
+    assert "body_omitted" in event_body
+    row = conn.execute(
+        "SELECT metadata_json FROM evidence_objects WHERE evidence_id=?", (evidence_id,)
+    ).fetchone()
+    assert body not in row["metadata_json"]

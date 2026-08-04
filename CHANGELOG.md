@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+- Give the lexical retrieval arm a relevance floor. The dense-quality gate was
+  guarded by "not already found lexically", so any FTS hit bypassed it entirely,
+  and the redundancy filter only ran when more than one lexical row came back. A
+  long, specific query sharing one generic token with an unrelated belief
+  therefore served that belief — and because the lexical arm scores by unweighted
+  RRF while the dense arm is scaled by similarity, the filler outranked
+  well-matched dense results. A lexical hit is now held to the same dense floor
+  when the dense arm is healthy, unless the query names the belief outright or
+  quotes its body; the multi-term bar applies to a lone row; and when nothing
+  clears that bar the rows are dropped only if dense retrieval can answer
+  instead, so a stale sidecar still degrades to lexical rather than to silence.
+- Make the retrieval gates configurable through the existing
+  `OCBRAIN_<SECTION>_<FIELD>` mechanism. They were hardcoded constants, so tuning
+  serving precision meant editing source. Defaults are unchanged.
+- Widen the retrieval-feedback boost from a range that could never reorder
+  adjacent results to a damped ±0.25, and attribute alias-recorded feedback to
+  the canonical belief instead of silently dropping it.
+- Add `ocbrain hygiene`: retire beliefs that expired, were never once retrieved,
+  or are consistently judged unhelpful. Retirement is a soft retraction, never
+  touches pinned or curated wiki facts outside the unambiguous class, is bounded
+  by a batch cap that reports its remainder, and refuses to act on feedback
+  gathered before a watermark — verdicts collected while a ranker was mis-serving
+  a belief describe the ranker, not the belief.
+- Add a `restore` correction op and `ocbrain hygiene --restore`, the inverse of a
+  soft retraction, so an unattended sweep is undoable. Tombstoned and
+  hard-corrected beliefs stay terminal: the projector refuses to honour a restore
+  for them even if the event is forged, under incremental folding and full
+  rebuild alike.
+- Make the wiki curator provider-pluggable (Anthropic by default, plus OpenAI and
+  Moonshot) with the same evidence gates and local verbatim-quote validation
+  whichever model runs. The Anthropic SDK is a lazy import behind a new `curator`
+  extra, so the core package stays dependency-free.
+  `scripts/kimi-wiki-curator.py` is now a forwarding shim.
+- Stamp `valid_until` on `current`-lifecycle wiki facts. The wiki's freshness
+  markers previously had readers and no writer, so nothing ever aged out and two
+  lint checks were unreachable against live data.
+- Give `wiki-lint.py` a `--rematerialize` actuator so a detector run can repair
+  drifted pages and orphans instead of only reporting them.
+- Add `scripts/brain-promote.sh` and `docs/SCHEDULED_MAINTENANCE.md`. The
+  harvester only records evidence, so a brain running it alone accumulates
+  knowledge no retrieval can return; this is the other half of the loop. Still
+  not installed by default — OCBrain ships no scheduler.
+- Canonicalize `served_to_runtime` at write time, keeping the operator's exact
+  string in the retrieval context. One deployment held over 100 spellings of
+  about eight clients, which made per-client analysis and feedback aggregation
+  impossible.
+- Stop `brain.ingest` and `brain.closeout` failing when an auto-recompile is
+  blocked. Auto-belief ids are content-addressed, so re-ingesting text matching a
+  hard-retracted belief raised out of the write and lost the evidence too.
+- Stop duplicating the evidence body into the projection's metadata. The text was
+  already in the same row and authoritatively in the event ledger; the third copy
+  was ~23% of one real 125MB core. Bundle provenance in that metadata is kept.
+- Bound the legacy source-expansion path's issuance list and report a total,
+  matching the v1 path; the underlying audit table grows once per retrieval
+  forever.
+- Count only genuine duplicates in `deduplicated_candidates`, which was folding
+  in `limit` truncation.
 - Treat exact-shaped but missing object IDs, SHA-256 hashes, and artifact URIs
   as terminal empty exact lookups instead of feeding them into semantic search;
   raise the dense-only relevance floor and suppress weak single-token FTS
