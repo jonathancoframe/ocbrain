@@ -126,9 +126,43 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="ISO-8601 reference time for valid_until checks (default: now, UTC)",
     )
+    parser.add_argument(
+        "--rematerialize",
+        action="store_true",
+        help=(
+            "rebuild the wiki from the ledger and re-lint, instead of only "
+            "reporting. Fixes pages that drifted from the ledger, including "
+            "orphans left by a retraction that happened outside a compile. "
+            "Requires --db"
+        ),
+    )
     args = parser.parse_args(argv)
     now = args.now or datetime.now(UTC).isoformat()
     findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db)
+
+    if findings and args.rematerialize:
+        if args.db is None:
+            print("--rematerialize requires --db", file=sys.stderr)
+            return 2
+        for finding in findings:
+            print(f"before: {finding}")
+        # A full rebuild + atomic swap is the sanctioned repair: the page set is a
+        # pure function of the ledger, so this both refreshes drifted pages and
+        # deletes orphans. Expired and superseded markers are ledger state and
+        # survive on purpose -- retiring those beliefs is `ocbrain hygiene`.
+        from ocbrain.db import connect
+        from ocbrain.wiki import materialize_wiki
+
+        conn = connect(args.db)
+        try:
+            count = materialize_wiki(
+                conn, args.wiki_dir, run={"action": "wiki-lint-rematerialize"}
+            )
+        finally:
+            conn.close()
+        print(f"rematerialized {count} page(s)")
+        findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db)
+
     for finding in findings:
         print(finding)
     if findings:

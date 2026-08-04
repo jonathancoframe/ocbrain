@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
+import ocbrain.curator
 from ocbrain.core_v1 import append_core_event, init_core_v1, record_core_v1_evidence
+from ocbrain.curator import select_evidence
 from ocbrain.db import connect
 from ocbrain.mcp_v1 import decide_proposal_v1
 from ocbrain.scope import ScopeTag
@@ -16,8 +18,8 @@ from ocbrain.wiki import current_wiki_beliefs
 
 
 def _curator_module():
-    path = Path(__file__).parents[1] / "scripts" / "kimi-wiki-curator.py"
-    spec = importlib.util.spec_from_file_location("kimi_wiki_curator", path)
+    path = Path(__file__).parents[1] / "scripts" / "wiki-curator.py"
+    spec = importlib.util.spec_from_file_location("wiki_curator", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -116,14 +118,12 @@ def test_selector_enforces_visibility_egress_and_kind_boundaries(tmp_path: Path)
         ids[body] = evidence_id
     conn.commit()
 
-    curator = _curator_module()
     default_ids = {
-        row["evidence_id"]
-        for row in curator.select_evidence(conn, limit=20, project="test")
+        row["evidence_id"] for row in select_evidence(conn, limit=20, project="test")
     }
     acknowledged_ids = {
         row["evidence_id"]
-        for row in curator.select_evidence(
+        for row in select_evidence(
             conn, limit=20, allow_hosted_egress=True, project="test"
         )
     }
@@ -140,7 +140,7 @@ def test_selector_enforces_visibility_egress_and_kind_boundaries(tmp_path: Path)
     assert ids["raw transcript"] not in acknowledged_ids
     assert ids["other project"] not in acknowledged_ids
     with pytest.raises(ValueError, match="project is required"):
-        curator.select_evidence(conn, limit=20)
+        select_evidence(conn, limit=20)
     conn.close()
 
 
@@ -313,13 +313,15 @@ def test_hosted_prompt_excludes_local_and_confidential_objects(
         return io.BytesIO(json.dumps(response).encode())
 
     curator = _curator_module()
-    monkeypatch.setattr(curator.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ocbrain.curator.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("KIMI_API_KEY", "test-key-never-sent")
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "kimi-wiki-curator.py",
+            "wiki-curator.py",
+            "--provider",
+            "moonshot",
             "--db",
             str(db_path),
             "--wiki-dir",

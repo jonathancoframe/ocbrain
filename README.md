@@ -105,7 +105,7 @@ source handles, and closeouts remain durable.
 
 ### Optional sparse wiki compiler
 
-`scripts/kimi-wiki-curator.py` can compile reviewed, high-signal evidence into
+`scripts/wiki-curator.py` can compile reviewed, high-signal evidence into
 concise `wiki_fact` beliefs and a human-readable wiki. It never selects raw
 transcript evidence, sends only bounded already-redacted evidence, rejects any
 claim whose supporting quote cannot be found verbatim in its named evidence,
@@ -115,19 +115,25 @@ construction. Local-only, prohibited, confidential, and secret objects are
 never eligible; `--allow-hosted-egress` may add only bounded
 `approval_required` objects.
 
+Providers are pluggable — `anthropic` (default), `openai`, `moonshot` — and the
+same gates and quote validation apply whichever model runs. The Anthropic
+backend needs the optional extra: `pip install -e '.[curator]'`. Only the API
+key's variable *name* is configured; the value is never persisted.
+
 ```bash
 # Keep background harvesting in the evidence ledger, not current truth.
 ocbrain --db /absolute/core.sqlite import-history /history/root \
   --project my-project --privacy-scope workspace --evidence-only
 
-# Preview locally, then explicitly authorize one Moonshot/Kimi compilation.
-.venv/bin/python scripts/kimi-wiki-curator.py \
-  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
-  --allow-hosted-egress
-.venv/bin/python scripts/kimi-wiki-curator.py \
-  --db /absolute/core.sqlite --model kimi-k2.5 --max-beliefs 12 \
-  --allow-hosted-egress --apply
+# Preview locally (no network call), then explicitly authorize one compilation.
+.venv/bin/python scripts/wiki-curator.py \
+  --db /absolute/core.sqlite --max-beliefs 12 --allow-hosted-egress
+.venv/bin/python scripts/wiki-curator.py \
+  --db /absolute/core.sqlite --max-beliefs 12 --allow-hosted-egress --apply
 ```
+
+`scripts/kimi-wiki-curator.py` remains as a shim forwarding to
+`--provider moonshot`.
 
 The generated `wiki/index.md`, `wiki/pages/`, and append-only `wiki/log.md`
 follow the raw-sources-plus-derived-wiki pattern. SQLite remains authoritative;
@@ -159,7 +165,42 @@ and conflicting pages that share a key:
 
 ```bash
 .venv/bin/python scripts/wiki-lint.py /path/to/wiki --db /absolute/core.sqlite
+
+# Repair drifted pages and orphans instead of only reporting them.
+.venv/bin/python scripts/wiki-lint.py /path/to/wiki --db /absolute/core.sqlite \
+  --rematerialize
 ```
+
+### Retiring knowledge
+
+Compilation only grows the corpus. `ocbrain hygiene` retires beliefs that
+expired (`valid_until` / `superseded_by`), were never once retrieved, or are
+consistently judged unhelpful. It reports by default and retires only with
+`--apply`; every retirement is a soft retraction, undoable with `--restore`.
+
+The `unhelpful` class refuses to act until you set a watermark, and then counts
+only feedback recorded after it — verdicts gathered while a ranker was serving a
+belief for unrelated queries describe the ranker, not the belief. Set the
+watermark after any ranking change.
+
+```bash
+ocbrain --db /absolute/core.sqlite hygiene                      # report
+ocbrain --db /absolute/core.sqlite hygiene --class expired --apply
+ocbrain --db /absolute/core.sqlite hygiene --set-watermark      # after a ranker change
+ocbrain --db /absolute/core.sqlite hygiene --restore belief_... # undo
+```
+
+Note `packages/ops` maintenance (`prune_knowledge`,
+`archive_unreferenced_catalog`) targets the **legacy** `knowledge` table and
+raises `no such table: knowledge` against a v1 core. Use `ocbrain hygiene`.
+
+### Running it continuously
+
+The core installs no scheduler. `scripts/brain-sync.sh` (harvest) and
+`scripts/brain-promote.sh` (promote and retire) exist for operators who want
+continuous operation — see [docs/SCHEDULED_MAINTENANCE.md](docs/SCHEDULED_MAINTENANCE.md).
+Running only the harvester is the trap: it records evidence but promotes nothing,
+so the serving corpus silently freezes.
 
 ## The runtime loop
 

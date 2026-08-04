@@ -1632,7 +1632,8 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                             "description": (
                                 "Portable action envelopes. Preserve mechanism, local semantic "
                                 "role, target, pre-action context, policy, cost, and versioned "
-                                "features."
+                                "features. Empty features objects are treated as omitted; "
+                                "non-empty features require a nonblank feature_schema."
                             ),
                             "items": {
                                 "type": "object",
@@ -1646,8 +1647,21 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                                     "policy": {"type": "object"},
                                     "cost": {"type": "object"},
                                     "provenance": {"type": "object"},
-                                    "feature_schema": {"type": "string"},
-                                    "features": {"type": "object"},
+                                    "feature_schema": {
+                                        "type": "string",
+                                        "description": (
+                                            "Required and nonblank when features has entries; "
+                                            "rejected when features is omitted or empty."
+                                        ),
+                                    },
+                                    "features": {
+                                        "type": "object",
+                                        "description": (
+                                            "Optional versioned feature map. An empty object is "
+                                            "normalized as absent; a non-empty object requires "
+                                            "feature_schema."
+                                        ),
+                                    },
                                 },
                                 "required": ["mechanism", "semantic_role", "target"],
                             },
@@ -1656,7 +1670,9 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                             "type": "array",
                             "description": (
                                 "Outcome vectors with local interpretation; do not collapse unlike "
-                                "sites or tasks into a universal scalar reward."
+                                "sites or tasks into a universal scalar reward. Empty features "
+                                "objects are treated as omitted; non-empty features require a "
+                                "nonblank feature_schema."
                             ),
                             "items": {
                                 "type": "object",
@@ -1672,8 +1688,21 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                                     "attribution": {},
                                     "uncertainty": {},
                                     "interpretation": {"type": "string"},
-                                    "feature_schema": {"type": "string"},
-                                    "features": {"type": "object"},
+                                    "feature_schema": {
+                                        "type": "string",
+                                        "description": (
+                                            "Required and nonblank when features has entries; "
+                                            "rejected when features is omitted or empty."
+                                        ),
+                                    },
+                                    "features": {
+                                        "type": "object",
+                                        "description": (
+                                            "Optional versioned feature map. An empty object is "
+                                            "normalized as absent; a non-empty object requires "
+                                            "feature_schema."
+                                        ),
+                                    },
                                 },
                                 "required": ["metric", "value", "interpretation"],
                             },
@@ -1708,7 +1737,15 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                         },
                         "op": {
                             "type": "string",
-                            "enum": ["mark_wrong", "edit", "pin", "demote", "reframe", "retract"],
+                            "enum": [
+                                "mark_wrong",
+                                "edit",
+                                "pin",
+                                "demote",
+                                "reframe",
+                                "retract",
+                                "restore",
+                            ],
                         },
                         "body": {"type": "string"},
                         "actor": {"type": "string"},

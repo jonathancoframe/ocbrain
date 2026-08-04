@@ -393,6 +393,23 @@ def expand_source_v1(
 EXACT_MATCH_LIMIT = 8
 EXACT_MATCH_MAX_QUERY_CHARS = 512
 _SHA256_TEXT_RE = re.compile(r"^[0-9a-f]{64}$")
+_STABLE_OBJECT_ID_RE = re.compile(r"^(?:evt|evd|belief|close|ret)_[0-9a-f]{16}$")
+_URI_REFERENCE_RE = re.compile(r"^[a-z][a-z0-9+.-]*:\S+$", re.IGNORECASE)
+_TERMINAL_ARTIFACT_URI_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://\S+|ocbrain-bundle:sha256:[0-9a-f]{64}|"
+    r"closeout:close_[0-9a-f]{16})$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_exact_locator(query: str) -> bool:
+    text = str(query).strip()
+    lowered = text.lower()
+    return bool(
+        _STABLE_OBJECT_ID_RE.fullmatch(lowered)
+        or _SHA256_TEXT_RE.fullmatch(lowered)
+        or _TERMINAL_ARTIFACT_URI_RE.fullmatch(text)
+    )
 
 
 def exact_lookup_v1(
@@ -626,8 +643,10 @@ def exact_lookup_v1(
         _add_closeout(row, "task_ref")
 
     # Artifact URI equality (evidence columns, then closeout artifact refs).
-    # The uri columns are unindexed, so only scan them for path-like queries.
-    if "/" in text:
+    # The uri columns are unindexed, so only scan them for path- or URI-like
+    # queries. The broader URI syntax permits exact matches for stored opaque
+    # references, while terminal-miss handling remains limited to known forms.
+    if "/" in text or _URI_REFERENCE_RE.fullmatch(text):
         for row in conn.execute(
             "SELECT evidence_id FROM evidence_objects "
             "WHERE artifact_uri=? OR source_uri=? LIMIT ?",
@@ -698,7 +717,7 @@ def search_v1(
         delivery_target=delivery_target,
         limit=min(limit, EXACT_MATCH_LIMIT),
     )
-    if exact_matches:
+    if exact_matches or _looks_like_exact_locator(query):
         payload = {
             "schema_version": "ocbrain.search.v1",
             "delivery_target": delivery_target,
@@ -711,7 +730,7 @@ def search_v1(
             "coverage": {
                 "requested_limit": limit,
                 "returned": len(exact_matches),
-                "feedback_needed": True,
+                "feedback_needed": bool(exact_matches),
             },
         }
         retrieval_id = record_core_v1_retrieval(
@@ -1190,15 +1209,23 @@ def ingest_v1(
         "kind": "evidence_recorded",
     }
     if auto:
-        result["auto_compiled_belief_id"] = auto_compile_evidence(
-            conn,
-            evidence_id=evidence_id,
-            body=body,
-            scope=scope,
-            actor=writer,
-            source_kind=kind,
-        )
-        result["kind"] = "evidence_recorded_and_compiled"
+        try:
+            result["auto_compiled_belief_id"] = auto_compile_evidence(
+                conn,
+                evidence_id=evidence_id,
+                body=body,
+                scope=scope,
+                actor=writer,
+                source_kind=kind,
+            )
+        except PermissionError as exc:
+            # Auto-belief ids are content-addressed, so re-ingesting text that
+            # matches a retracted or tombstoned belief hits compilation_block_reason
+            # and raises. Recording the evidence is the caller's actual request;
+            # a blocked recompile must not fail the whole write.
+            result["auto_compile_blocked"] = str(exc)
+        else:
+            result["kind"] = "evidence_recorded_and_compiled"
     return result
 
 
@@ -1248,14 +1275,18 @@ def closeout_v1(
             writer=actor,
             artifact_ref=f"closeout:{receipt['id']}",
         )
-        receipt["auto_compiled_belief_id"] = auto_compile_evidence(
-            conn,
-            evidence_id=evidence_id,
-            body=summary,
-            scope=scope,
-            actor=actor,
-            source_kind="task_closeout_summary",
-        )
+        try:
+            receipt["auto_compiled_belief_id"] = auto_compile_evidence(
+                conn,
+                evidence_id=evidence_id,
+                body=summary,
+                scope=scope,
+                actor=actor,
+                source_kind="task_closeout_summary",
+            )
+        except PermissionError as exc:
+            # See ingest_v1: a blocked recompile must not lose the closeout.
+            receipt["auto_compile_blocked"] = str(exc)
     return receipt
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -153,6 +154,51 @@ def test_local_control_files_must_be_owner_only(tmp_path, monkeypatch):
     secure = local_control_file_security()
     assert secure["healthy"] is True
     assert secure["files"]["config"]["status"] == "owner_only"
+
+
+def test_runtime_client_checks_probe_exact_registration_and_skip_absent_openclaw(
+    monkeypatch,
+):
+    executed: list[list[str]] = []
+
+    def fake_which(binary: str):
+        if binary == "openclaw":
+            return None
+        return f"/usr/bin/{binary}"
+
+    def fake_run(command, **_kwargs):
+        executed.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="configured\n", stderr="")
+
+    monkeypatch.setattr(core_ops.shutil, "which", fake_which)
+    monkeypatch.setattr(core_ops.subprocess, "run", fake_run)
+
+    checks = core_ops.runtime_client_checks(timeout_seconds=1)
+
+    assert executed == [
+        ["/usr/bin/codex", "mcp", "get", "ocbrain"],
+        ["/usr/bin/claude", "mcp", "get", "ocbrain"],
+    ]
+    assert checks[2]["status"] == checks[3]["status"] == "missing_optional"
+    assert all(check["healthy"] for check in checks)
+
+
+def test_installed_optional_client_still_fails_an_unhealthy_probe(monkeypatch):
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="probe failed")
+
+    monkeypatch.setattr(core_ops.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(core_ops.subprocess, "run", fake_run)
+
+    check = core_ops._run_client_check(
+        "openclaw-doctor",
+        ["openclaw", "mcp", "doctor", "ocbrain"],
+        1,
+        optional=True,
+    )
+
+    assert check["status"] == "failed"
+    assert check["healthy"] is False
 
 
 def test_backup_and_restore_are_verified_and_fresh_only(tmp_path):

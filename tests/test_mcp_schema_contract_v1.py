@@ -87,6 +87,22 @@ def test_closeout_schema_documents_conditional_requirements(tmp_path):
     task_ref_schema = properties["task_ref"]["anyOf"][0]
     assert "Required unless context.task" in task_ref_schema["description"]
 
+    for collection in ("actions", "outcomes"):
+        collection_schema = properties[collection]["anyOf"][0]
+        collection_description = collection_schema["description"]
+        assert "Empty features objects are treated as omitted" in collection_description
+        item_properties = collection_schema["items"]["properties"]
+        features_schema = item_properties["features"]["anyOf"][0]
+        feature_schema = item_properties["feature_schema"]["anyOf"][0]
+        features_description = features_schema["description"]
+        feature_schema_description = feature_schema["description"]
+        assert "empty object is normalized as absent" in features_description
+        assert "non-empty object requires feature_schema" in features_description
+        assert "Required and nonblank when features has entries" in (
+            feature_schema_description
+        )
+        assert "rejected when features is omitted or empty" in feature_schema_description
+
 
 def test_v1_core_does_not_publish_at_ts(tmp_path):
     tools = _tools_by_name(_seed_v1(tmp_path), allow_writes=True)

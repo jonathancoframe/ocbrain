@@ -115,11 +115,63 @@ def test_exact_lookup_by_artifact_uri_and_sha256(tmp_path):
     )
 
 
+def test_exact_lookup_by_stored_opaque_artifact_uri(tmp_path):
+    conn, _evidence_id, _event_id, receipt = _seed(tmp_path)
+    scope = ScopeTag("project", "project:ocbrain")
+    opaque_refs = (
+        "ocbrain-bundle:sha256:" + ("a" * 64),
+        f"closeout:{receipt['id']}",
+    )
+
+    for index, artifact_ref in enumerate(opaque_refs):
+        evidence_id, _event_id = record_core_v1_evidence(
+            conn,
+            body=f"Opaque artifact locator proof {index}.",
+            kind="observation",
+            scope=scope,
+            writer="test",
+            artifact_ref=artifact_ref,
+        )
+        conn.commit()
+        payload = _search(conn, artifact_ref)
+        assert payload["match_mode"] == "exact"
+        assert any(
+            match["kind"] == "evidence" and match["id"] == evidence_id
+            for match in payload["exact_matches"]
+        )
+
+
 def test_semantic_search_is_not_hijacked_by_plain_queries(tmp_path):
     conn, _evidence_id, _event_id, _receipt = _seed(tmp_path)
-    payload = _search(conn, "how does exact lookup work")
-    assert "match_mode" not in payload
-    assert "exact_matches" not in payload
+    for query in ("how does exact lookup work", "project:ocbrain", "status:ready"):
+        payload = _search(conn, query)
+        assert "match_mode" not in payload
+        assert "exact_matches" not in payload
+
+
+def test_missing_exact_shaped_locator_never_falls_through_to_semantic_search(
+    tmp_path, monkeypatch
+):
+    conn, _evidence_id, _event_id, _receipt = _seed(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("exact-shaped locator reached semantic retrieval")
+
+    monkeypatch.setattr("ocbrain.mcp_v1.build_context_v1", forbidden)
+
+    for locator in (
+        "belief_ffffffffffffffff",
+        "f" * 64,
+        "file:///tmp/does-not-exist.txt",
+        "ocbrain-bundle:sha256:" + ("f" * 64),
+        "closeout:close_ffffffffffffffff",
+    ):
+        payload = _search(conn, locator)
+        assert payload["match_mode"] == "exact"
+        assert payload["items"] == []
+        assert payload["exact_matches"] == []
+        assert payload["coverage"]["returned"] == 0
+        assert payload["coverage"]["feedback_needed"] is False
 
 
 def test_exact_lookup_does_not_match_retrieval_use_task_refs(tmp_path):

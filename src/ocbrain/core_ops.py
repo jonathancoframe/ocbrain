@@ -398,10 +398,21 @@ def stdio_mcp_smoke(
         }
 
 
-def _run_client_check(name: str, command: list[str], timeout_seconds: float) -> dict[str, Any]:
+def _run_client_check(
+    name: str,
+    command: list[str],
+    timeout_seconds: float,
+    *,
+    optional: bool = False,
+) -> dict[str, Any]:
     binary = shutil.which(command[0])
     if binary is None:
-        return {"name": name, "status": "missing", "healthy": False, "command": command}
+        return {
+            "name": name,
+            "status": "missing_optional" if optional else "missing",
+            "healthy": optional,
+            "command": command,
+        }
     env = dict(os.environ)
     env.setdefault("NO_COLOR", "1")
     try:
@@ -436,12 +447,15 @@ def _run_client_check(name: str, command: list[str], timeout_seconds: float) -> 
 def runtime_client_checks(*, timeout_seconds: float = 12.0) -> list[dict[str, Any]]:
     """Run the documented, read-only registration/probe commands."""
     commands = (
-        ("codex", ["codex", "mcp", "get", "ocbrain"]),
-        ("claude", ["claude", "mcp", "list"]),
-        ("openclaw-doctor", ["openclaw", "mcp", "doctor", "ocbrain"]),
-        ("openclaw-probe", ["openclaw", "mcp", "probe", "ocbrain"]),
+        ("codex", ["codex", "mcp", "get", "ocbrain"], False),
+        ("claude", ["claude", "mcp", "get", "ocbrain"], False),
+        ("openclaw-doctor", ["openclaw", "mcp", "doctor", "ocbrain"], True),
+        ("openclaw-probe", ["openclaw", "mcp", "probe", "ocbrain"], True),
     )
-    return [_run_client_check(name, command, timeout_seconds) for name, command in commands]
+    return [
+        _run_client_check(name, command, timeout_seconds, optional=optional)
+        for name, command, optional in commands
+    ]
 
 
 def local_control_file_security() -> dict[str, Any]:

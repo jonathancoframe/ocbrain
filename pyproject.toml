@@ -34,6 +34,12 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.8",
 ]
+# The wiki curator's Anthropic backend. Kept out of the core dependency set so
+# `pip install ocbrain` stays dependency-free; the import is lazy, so the module
+# is usable (and testable) without this extra installed.
+curator = [
+  "anthropic>=0.70",
+]
 
 [project.scripts]
 ocbrain = "ocbrain.cli:main"

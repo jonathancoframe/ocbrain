@@ -108,8 +108,10 @@ run_with_budget "$HARVEST_BUDGET_SECONDS" \
   "$HOME/.hermes/memories" \
   --project "$SYNC_PROJECT" --privacy-scope "$SYNC_PRIVACY_SCOPE" --evidence-only
 
-# 5. Reconcile core projections.
-"$PY" -m ocbrain.cli --db "$DB" sync
+# 5. Reconcile core projections. `sync` refuses past its --max-events bound
+# rather than doing partial work, and a cold or long-delayed harvest can enqueue
+# far more than the 1000 default, so raise the ceiling for the scheduled path.
+"$PY" -m ocbrain.cli --db "$DB" sync --max-events "${OCBRAIN_SYNC_MAX_EVENTS:-200000}"
 
 after="$(event_count)"
 echo "brain_events after: $after"
