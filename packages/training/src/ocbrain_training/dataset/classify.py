@@ -213,7 +213,7 @@ def classify_examples(
         params,
     ).fetchall()
     timestamp = (now or datetime.now(UTC)).isoformat(timespec="microseconds")
-    counts = {name: 0 for name in sorted(TRAIN_CLASSES)}
+    counts = dict.fromkeys(sorted(TRAIN_CLASSES), 0)
     for row in rows:
         train_class, reason = classify_record(row)
         if train_class not in TRAIN_CLASSES:  # pragma: no cover - internal invariant

@@ -141,7 +141,7 @@ def _messages(dataset: str, record: dict[str, Any]) -> list[dict[str, str]]:
             "dimensions": dimensions,
             "required_schema": {
                 "overall_score": "number 0..1",
-                "dimensions": {name: "number 0..1" for name in dimensions},
+                "dimensions": dict.fromkeys(dimensions, "number 0..1"),
                 "verdict": "pass|review|fail",
                 "flags": ["short_slug"],
                 "explanation": "short string",
@@ -179,7 +179,7 @@ def _ollama_transport(
                 "type": "object",
                 "additionalProperties": False,
                 "required": list(dimensions),
-                "properties": {name: score_schema for name in dimensions},
+                "properties": dict.fromkeys(dimensions, score_schema),
             },
             "verdict": {"type": "string", "enum": ["pass", "review", "fail"]},
             "flags": {"type": "array", "maxItems": 8, "items": {"type": "string"}},

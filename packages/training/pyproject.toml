@@ -43,4 +43,10 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# Gate, not aspiration: every category here is at zero across production code,
+# so a new finding is a regression rather than pre-existing debt. C90 (mccabe)
+# and S (bandit) are deliberately out — both carry a large standing count that
+# is not incrementally fixable, and a gate nobody can pass is a gate people
+# learn to skip. scripts/code-quality.sh reports those, plus complexity,
+# duplication, and slop patterns, as advice.
+select = ["E", "F", "I", "UP", "B", "C4", "RET", "PIE"]

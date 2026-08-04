@@ -95,7 +95,7 @@ def _rate(
     schema = {
         "winner": "a|b|tie",
         "scores": {
-            side: {dimension: "number 1..5" for dimension in dimensions} for side in ("a", "b")
+            side: dict.fromkeys(dimensions, "number 1..5") for side in ("a", "b")
         },
         "explanation": "short string",
     }

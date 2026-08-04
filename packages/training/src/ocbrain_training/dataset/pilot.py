@@ -680,8 +680,8 @@ def score_multiblind(
     if {str(row.get("eval_id")) for row in ratings} != set(mappings):
         raise ValueError("multiblind ratings do not match the frozen eval ids")
     sources = {source for mapping in mappings.values() for source in mapping.values()}
-    first_place = {source: 0 for source in sorted(sources)}
-    rank_sum = {source: 0.0 for source in sorted(sources)}
+    first_place = dict.fromkeys(sorted(sources), 0)
+    rank_sum = dict.fromkeys(sorted(sources), 0.0)
     score_sum: dict[str, dict[str, float]] = {source: {} for source in sorted(sources)}
     score_count: dict[str, dict[str, int]] = {source: {} for source in sorted(sources)}
     for rating in ratings:

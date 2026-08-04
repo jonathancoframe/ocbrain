@@ -1751,8 +1751,8 @@ def _require_v1(conn: sqlite3.Connection) -> None:
 __all__ = [
     "auto_compile_evidence",
     "auto_compile_scope",
-    "build_context_v1",
     "bind_retrieval_id_v1",
+    "build_context_v1",
     "closeout_v1",
     "correct_v1",
     "decide_proposal_v1",
@@ -1763,8 +1763,8 @@ __all__ = [
     "forget_v1",
     "get_v1",
     "ingest_v1",
-    "proposals_v1",
     "prepare_retrieval_packet_v1",
+    "proposals_v1",
     "record_context_v1",
     "search_v1",
 ]

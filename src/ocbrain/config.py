@@ -23,9 +23,35 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG_PATH = Path(
-    os.environ.get("OCBRAIN_CONFIG", "data/ocbrain.config.json")
-).expanduser()
+# Config lives beside the data it configures, not beside the code. The historical
+# default was the *relative* ``data/ocbrain.config.json``, which made three things
+# true at once: resolution depended on the working directory, a `git clean -xfd`
+# or fresh clone silently discarded operator settings, and a test suite run from a
+# checkout inherited whatever that checkout happened to have. A brain whose
+# curator settings vanished that way keeps exiting 0 while promoting nothing.
+#
+# ``~/.ocbrain/ocbrain.config.json`` is checked first and is the documented home.
+# The old checkout-relative path is still honored when it exists and the new one
+# does not, so an existing install keeps working until it moves.
+USER_CONFIG_PATH = Path("~/.ocbrain/ocbrain.config.json").expanduser()
+LEGACY_CONFIG_PATH = Path("data/ocbrain.config.json")
+
+
+def default_config_path() -> Path:
+    """Resolve the config path: ``$OCBRAIN_CONFIG``, then user, then legacy."""
+    if override := os.environ.get("OCBRAIN_CONFIG"):
+        return Path(override).expanduser()
+    if USER_CONFIG_PATH.exists():
+        return USER_CONFIG_PATH
+    if LEGACY_CONFIG_PATH.exists():
+        return LEGACY_CONFIG_PATH
+    return USER_CONFIG_PATH
+
+
+# Retained for compatibility. Previously this read $OCBRAIN_CONFIG at *import*
+# time, so it went stale the moment the environment changed; call
+# ``default_config_path()`` instead.
+DEFAULT_CONFIG_PATH = USER_CONFIG_PATH
 
 
 @dataclass(frozen=True)
@@ -431,8 +457,8 @@ def load_config(
 ) -> OcbrainConfig:
     """Load config from defaults + optional JSON file + env overrides.
 
-    ``path`` defaults to ``$OCBRAIN_CONFIG`` / ``data/ocbrain.config.json``. A
-    missing file is fine (defaults win). ``env`` defaults to ``os.environ``.
+    ``path`` defaults to :func:`default_config_path`. A missing file is fine
+    (defaults win). ``env`` defaults to ``os.environ``.
     """
     if env is not None:
         # Temporarily consult the provided mapping for env overrides.
@@ -448,11 +474,7 @@ def load_config(
 
 
 def _load_config_from_environ(path: Path | str | None) -> OcbrainConfig:
-    config_path = (
-        Path(path).expanduser()
-        if path is not None
-        else Path(os.environ.get("OCBRAIN_CONFIG", "data/ocbrain.config.json")).expanduser()
-    )
+    config_path = Path(path).expanduser() if path is not None else default_config_path()
     file_data: dict[str, Any] = {}
     if config_path.exists():
         loaded = json.loads(config_path.read_text(encoding="utf-8"))
@@ -473,6 +495,55 @@ def _load_config_from_environ(path: Path | str | None) -> OcbrainConfig:
         if overrides:
             section_changes[f.name] = _apply_section_overrides(section, overrides)
     return replace(cfg, **section_changes) if section_changes else cfg
+
+
+def describe_config(path: Path | str | None = None) -> dict[str, Any]:
+    """Report the effective config and where every value came from.
+
+    A layered config is only usable if an operator can see which layer won. This
+    labels each field ``default``, ``file``, or ``env`` and names the file it
+    resolved, so "why is the curator sending nothing" is one command rather than
+    an archaeology exercise.
+    """
+    config_path = Path(path).expanduser() if path is not None else default_config_path()
+    file_data: dict[str, Any] = {}
+    if config_path.exists():
+        loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            file_data = loaded
+    effective = load_config(config_path)
+    defaults = OcbrainConfig()
+
+    sections: dict[str, Any] = {}
+    for f in fields(effective):
+        section = getattr(effective, f.name)
+        if not is_dataclass(section):
+            continue
+        default_section = getattr(defaults, f.name)
+        from_file = file_data.get(f.name) if isinstance(file_data.get(f.name), dict) else {}
+        env_keys = set(_env_overrides(f.name, section))
+        entries: dict[str, Any] = {}
+        for field_def in fields(section):
+            if field_def.name in env_keys:
+                source = "env"
+            elif field_def.name in from_file:
+                source = "file"
+            else:
+                source = "default"
+            entries[field_def.name] = {
+                "value": getattr(section, field_def.name),
+                "source": source,
+                "default": getattr(default_section, field_def.name),
+            }
+        sections[f.name] = entries
+    return {
+        "config_path": str(config_path),
+        "config_path_exists": config_path.exists(),
+        "user_config_path": str(USER_CONFIG_PATH),
+        "legacy_config_path": str(LEGACY_CONFIG_PATH),
+        "env_override_pattern": "OCBRAIN_<SECTION>_<FIELD>",
+        "sections": sections,
+    }
 
 
 # --------------------------------------------------------------------------- #

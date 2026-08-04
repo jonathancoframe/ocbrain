@@ -308,8 +308,8 @@ def test_blind_randomization_and_scoring(tmp_path: Path):
                     "eval_id": eval_id,
                     "winner": mapping["candidate_side"],
                     "scores": {
-                        mapping["reference_side"]: {name: 3 for name in dimensions},
-                        mapping["candidate_side"]: {name: 4 for name in dimensions},
+                        mapping["reference_side"]: dict.fromkeys(dimensions, 3),
+                        mapping["candidate_side"]: dict.fromkeys(dimensions, 4),
                     },
                 }
             )

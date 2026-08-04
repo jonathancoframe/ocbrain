@@ -22,7 +22,12 @@ if [[ "$DB" != /* ]]; then
   echo "OCBrain DB path must be absolute: $DB" >&2
   exit 2
 fi
-export OCBRAIN_CONFIG="${OCBRAIN_CONFIG:-$REPO/data/ocbrain.config.json}"
+# Do NOT pin the config into the checkout. ocbrain resolves
+# ~/.ocbrain/ocbrain.config.json first, which survives a `git clean -xfd`, a
+# fresh clone, and a worktree switch; forcing $REPO/data here would reintroduce
+# the failure where operator settings vanish with the working tree and the loop
+# keeps exiting 0 while promoting nothing. Set OCBRAIN_CONFIG yourself to
+# override.
 
 SYNC_PROJECT="${OCBRAIN_SYNC_PROJECT:-workspace}"
 SYNC_PRIVACY_SCOPE="${OCBRAIN_SYNC_PRIVACY_SCOPE:-workspace}"

@@ -699,13 +699,17 @@ def get_current_belief(conn: sqlite3.Connection, belief_id: str) -> dict[str, An
     provenance = []
     for event in iter_events(conn):
         body = json.loads(event["body_json"])
-        if event["kind"] == "compilation_proposed" and body.get("belief_id") == belief_id:
-            provenance.append(event_summary(event, body))
-        elif event["kind"] == "compilation_decided" and row["approved_event_id"] == event["id"]:
-            provenance.append(event_summary(event, body))
-        elif event["kind"] in {"correction_recorded", "tombstone_recorded"} and (
-            body.get("target_id") == belief_id or body.get("target") == belief_id
-        ):
+        proposed_this_belief = (
+            event["kind"] == "compilation_proposed" and body.get("belief_id") == belief_id
+        )
+        approved_this_belief = (
+            event["kind"] == "compilation_decided" and row["approved_event_id"] == event["id"]
+        )
+        corrected_this_belief = event["kind"] in {
+            "correction_recorded",
+            "tombstone_recorded",
+        } and belief_id in {body.get("target_id"), body.get("target")}
+        if proposed_this_belief or approved_this_belief or corrected_this_belief:
             provenance.append(event_summary(event, body))
     return {
         "object_kind": "belief",

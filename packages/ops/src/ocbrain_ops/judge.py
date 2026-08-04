@@ -524,12 +524,7 @@ def _supports_custom_temperature(model: str) -> bool:
     ``unsupported_value``. For those we omit the field entirely.
     """
     name = model.lower()
-    return not (
-        name.startswith("gpt-5")
-        or name.startswith("o1")
-        or name.startswith("o3")
-        or name.startswith("o4")
-    )
+    return not name.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
 def _build_payload(cfg: Any, model: str, included: list[dict[str, Any]]) -> dict[str, Any]:

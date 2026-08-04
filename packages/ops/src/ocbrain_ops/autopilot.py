@@ -943,9 +943,9 @@ def _write_run_ledger(
 # contract; it is exercised inside ``auto_decide_compilations``. Re-exported so
 # ops scripts can force a rebuild without importing events directly.
 __all__ = [
-    "AutopilotContext",
     "STAGES",
     "STAGE_NAMES",
+    "AutopilotContext",
     "rebuild_projection",
     "run_autopilot",
 ]

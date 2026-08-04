@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -441,10 +442,12 @@ def _call_tool_with_lock_retry(
         except sqlite3.OperationalError as exc:
             if "database is locked" not in str(exc).lower() or attempt == WRITE_LOCK_RETRIES - 1:
                 raise
-            try:
+            # Best-effort rollback before retrying. A rollback that itself fails
+            # means the connection is already unusable for this attempt, and the
+            # retry loop is about to re-enter anyway -- masking it here is
+            # deliberate, not an oversight.
+            with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
-            except sqlite3.Error:
-                pass
             time.sleep(WRITE_LOCK_BACKOFF_SECONDS)
     raise AssertionError("unreachable")  # pragma: no cover
 

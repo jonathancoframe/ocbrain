@@ -99,7 +99,7 @@ def _transport(endpoint, model, messages, timeout):
     dataset = request["dataset"]
     return {
         "overall_score": 0.86,
-        "dimensions": {name: 0.84 for name in DATASET_RUBRICS[dataset]},
+        "dimensions": dict.fromkeys(DATASET_RUBRICS[dataset], 0.84),
         "verdict": "pass",
         "flags": [],
         "explanation": "Strong local-only training example.",
@@ -110,7 +110,7 @@ def _grade_response(dataset: str, verdict: str) -> dict:
     score = {"pass": 0.9, "review": 0.65, "fail": 0.2}[verdict]
     return {
         "overall_score": score,
-        "dimensions": {name: score for name in DATASET_RUBRICS[dataset]},
+        "dimensions": dict.fromkeys(DATASET_RUBRICS[dataset], score),
         "verdict": verdict,
         "flags": [],
         "explanation": "Calibration response.",
@@ -168,14 +168,14 @@ def test_loopback_boundary_rejects_remote_endpoints():
 def test_normalize_grade_accepts_validated_flat_local_model_dimensions():
     raw = {
         "overall_score": 0.82,
-        **{name: 0.8 for name in DATASET_RUBRICS["dpo"]},
+        **dict.fromkeys(DATASET_RUBRICS["dpo"], 0.8),
         "verdict": "pass",
         "flags": [],
         "explanation": "Valid flat structured response.",
     }
     grade = normalize_grade("dpo", raw)
     assert grade["overall_score"] == 0.82
-    assert grade["dimensions"] == {name: 0.8 for name in DATASET_RUBRICS["dpo"]}
+    assert grade["dimensions"] == dict.fromkeys(DATASET_RUBRICS["dpo"], 0.8)
 
 
 def test_prompt_version_and_dataset_specific_rubric_anchors():

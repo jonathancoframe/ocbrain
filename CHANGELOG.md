@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Resolve configuration from `~/.ocbrain/ocbrain.config.json` before the
+  checkout-relative `data/ocbrain.config.json`. The old default made resolution
+  depend on the working directory, let a `git clean -xfd` or fresh clone silently
+  discard operator settings, and let a test suite inherit whatever a checkout
+  happened to have — a curator egress-boundary test passed in CI, which has no
+  such file, and failed on a machine that did. A brain that loses its curator
+  policy that way keeps exiting 0 while promoting nothing. The legacy path is
+  still honored when it exists and the new one does not; `brain-sync.sh` and
+  `brain-promote.sh` no longer pin the config into the checkout.
+- Add `ocbrain config`, which prints the effective configuration, the file it
+  resolved, and whether each value came from a default, the file, or the
+  environment. `--section` and `--changed-only` narrow it. A layered config is
+  only usable if you can see which layer won.
+- Raise the enforced ruff selection to `E, F, I, UP, B, C4, RET, PIE`, all at zero
+  across the repository, and add `scripts/code-quality.sh` plus
+  `docs/CODE_QUALITY.md` for the advisory layer (complexity, maintainability,
+  duplication, slop patterns). `C90` and `S` stay out of the gate: both carry a
+  large standing count that is not incrementally fixable, and a gate nobody can
+  pass is a gate people learn to skip.
+- Replace a best-effort rollback's bare `except: pass` with
+  `contextlib.suppress` and a note on why masking it is deliberate; give the
+  tri-state bool-to-SQLite conversion a named helper instead of a nested
+  conditional; name the three branches of the belief-provenance filter.
+
 - Use OpenAI's `max_completion_tokens` field for curator requests while keeping
   Moonshot on its compatible endpoint's `max_tokens` field. The live
   `gpt-5-mini` endpoint rejects the legacy field.
