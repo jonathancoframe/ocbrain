@@ -69,8 +69,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         "vector-build",
         "vector-status",
     }
-    # Covered in tests/test_hygiene.py, including the CLI route.
-    hygiene_acceptance = {"hygiene"}
+    # Covered in tests/test_hygiene.py and tests/test_config_surface.py,
+    # including their CLI routes.
+    hygiene_acceptance = {"hygiene", "config"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance

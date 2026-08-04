@@ -637,12 +637,12 @@ def _corpus_fingerprint(rows: Iterable[sqlite3.Row]) -> str:
 
 
 __all__ = [
-    "DEFAULT_EMBED_MODEL",
     "DEFAULT_EMBED_DIMENSIONS",
     "DEFAULT_EMBED_DOCUMENT_BYTES",
+    "DEFAULT_EMBED_MODEL",
     "DEFAULT_OLLAMA_URL",
-    "LocalEmbeddingUnavailable",
     "VECTOR_DOCUMENT_FORMAT",
+    "LocalEmbeddingUnavailable",
     "build_vector_index",
     "embed_texts",
     "semantic_neighbors",

@@ -1031,6 +1031,17 @@ def _record_clobber_refused(conn: sqlite3.Connection, knowledge_id: str, *, acto
     return signal_id
 
 
+def _sqlite_tristate_bool(value: bool | None) -> int | None:
+    """Map a tri-state bool to SQLite's 1/0/NULL.
+
+    SQLite has no boolean type, and "unset" is a third state here: NULL means the
+    caller had no opinion, which is different from False.
+    """
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
 def upsert_knowledge(
     conn: sqlite3.Connection,
     *,
@@ -1133,7 +1144,7 @@ def upsert_knowledge(
             predicate,
             value_numeric,
             value_text,
-            1 if value_bool is True else 0 if value_bool is False else None,
+            _sqlite_tristate_bool(value_bool),
             unit,
             target_value,
             slug,

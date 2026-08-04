@@ -89,15 +89,15 @@ def _write_agent_jsonl(path, *, last_text: str, stop_reason: str = "end_turn") -
 
 
 def _cfg(**overrides) -> stallcheck.StallCheckConfig:
-    base = dict(
-        workflow_globs=(),
-        task_output_globs=(),
-        runner_db="/nonexistent",
-        stale_threshold_minutes=20,
-        terminal_backlog_hours=48,
-        ingress_window_hours=720,
-        flag_zero_byte_output=True,
-    )
+    base = {
+        "workflow_globs": (),
+        "task_output_globs": (),
+        "runner_db": "/nonexistent",
+        "stale_threshold_minutes": 20,
+        "terminal_backlog_hours": 48,
+        "ingress_window_hours": 720,
+        "flag_zero_byte_output": True,
+    }
     base.update(overrides)
     return stallcheck.StallCheckConfig(**base)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ocbrain import __version__
 from ocbrain.bundle import export_bundle, import_bundle
+from ocbrain.config import describe_config
 from ocbrain.core_ops import (
     backup_database,
     database_status,
@@ -873,6 +874,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hygiene_parser.set_defaults(func=cmd_hygiene)
 
+    config_parser = commands.add_parser(
+        "config",
+        help="Show the effective configuration and where each value came from",
+    )
+    config_parser.add_argument(
+        "--section",
+        help="restrict output to one section (e.g. curator, retrieval)",
+    )
+    config_parser.add_argument(
+        "--changed-only",
+        action="store_true",
+        help="show only values that differ from the shipped default",
+    )
+    config_parser.set_defaults(func=cmd_config)
+
     doctor_parser = commands.add_parser("doctor", help="Check the core and stdio MCP")
     doctor_parser.add_argument("--timeout", type=float, default=8.0)
     doctor_parser.add_argument("--launcher", type=Path)
@@ -1504,6 +1520,23 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    report = describe_config()
+    if args.section:
+        if args.section not in report["sections"]:
+            available = ", ".join(sorted(report["sections"]))
+            raise SystemExit(f"unknown section {args.section!r}; available: {available}")
+        report["sections"] = {args.section: report["sections"][args.section]}
+    if args.changed_only:
+        report["sections"] = {
+            name: {k: v for k, v in entries.items() if v["source"] != "default"}
+            for name, entries in report["sections"].items()
+        }
+        report["sections"] = {n: e for n, e in report["sections"].items() if e}
+    output(args, {"action": "config", **report})
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     result = doctor(
         args.db,
@@ -1632,7 +1665,7 @@ def cmd_knowledge(args: argparse.Namespace) -> int:
             clauses.append("visibility NOT IN ('confidential','secret')")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
-            f"SELECT * FROM current_beliefs {where} "  # noqa: S608 - local fixed clauses
+            f"SELECT * FROM current_beliefs {where} "
             "ORDER BY pinned DESC, last_compiled_at DESC, belief_id LIMIT ?",
             (*params, args.limit),
         )
