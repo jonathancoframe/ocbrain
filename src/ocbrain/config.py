@@ -316,7 +316,34 @@ class ExcerptRenderConfig:
 
 
 @dataclass(frozen=True)
+class RetrievalConfig:
+    # Hybrid ranking gates for ``search_core_v1``. These were module constants
+    # until an operator needed to tune serving precision without editing source.
+    # Defaults match the shipped constants in ``core_v1``; raising the floors
+    # trades recall for precision, lowering them does the reverse.
+    #
+    # ``min_dense_cosine`` is the floor for a candidate the lexical arm also
+    # found; ``min_dense_only_cosine`` is the stricter floor for a candidate only
+    # the dense arm found. ``require_dense_support`` additionally holds lexical
+    # hits to ``min_dense_cosine`` when the dense arm is healthy, which is what
+    # keeps a shared generic token from serving an unrelated belief.
+    hybrid_rrf_k: int = 60
+    min_dense_cosine: float = 0.30
+    min_dense_only_cosine: float = 0.55
+    min_lexical_query_term_matches: int = 2
+    min_redundant_lexical_strength_ratio: float = 0.50
+    require_dense_support: bool = True
+    # Retrieval feedback shifts a belief's score by ``1 + boost``. The boost is
+    # ``avg_signal * weight``, damped by observation count and clamped to
+    # +/-``feedback_clamp``. Set ``feedback_weight`` to 0 to ignore feedback.
+    feedback_weight: float = 0.125
+    feedback_clamp: float = 0.25
+    feedback_prior_observations: float = 3.0
+
+
+@dataclass(frozen=True)
 class OcbrainConfig:
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     correction: CorrectionConfig = field(default_factory=CorrectionConfig)

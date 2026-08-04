@@ -19,6 +19,7 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ocbrain.hybrid import semantic_neighbors
@@ -42,6 +43,36 @@ MIN_DENSE_ONLY_COSINE = 0.55
 # term coverage avoids dropping distinctive one-term results.
 MIN_LEXICAL_QUERY_TERM_MATCHES = 2
 MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO = 0.50
+# A lexical hit is held to MIN_DENSE_COSINE too, but only when the dense arm is
+# healthy enough to judge it. See ``_retrieval_tuning``.
+REQUIRE_DENSE_SUPPORT = True
+
+
+_RETRIEVAL_FALLBACK = SimpleNamespace(
+    hybrid_rrf_k=HYBRID_RRF_K,
+    min_dense_cosine=MIN_DENSE_COSINE,
+    min_dense_only_cosine=MIN_DENSE_ONLY_COSINE,
+    min_lexical_query_term_matches=MIN_LEXICAL_QUERY_TERM_MATCHES,
+    min_redundant_lexical_strength_ratio=MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO,
+    require_dense_support=REQUIRE_DENSE_SUPPORT,
+    feedback_weight=0.125,
+    feedback_clamp=0.25,
+    feedback_prior_observations=3.0,
+)
+
+
+def _retrieval_tuning() -> Any:
+    """Resolve the retrieval gates, honoring config-file and env overrides.
+
+    Falls back to the module constants when the config file is unreadable or
+    malformed: a broken config must not take retrieval down with it.
+    """
+    try:
+        from ocbrain.config import load_config
+
+        return load_config().retrieval
+    except Exception:  # noqa: BLE001 - config problems must not break serving
+        return _RETRIEVAL_FALLBACK
 
 LEGACY_IMPORT_KINDS = {
     "legacy_evidence_imported",
@@ -1553,8 +1584,16 @@ def search_core_v1(
         )
     )
     eligible = {str(row["belief_id"]): row for row in eligible_rows}
+    tuning = _retrieval_tuning()
+    rrf_k = int(tuning.hybrid_rrf_k)
+    min_dense_cosine = float(tuning.min_dense_cosine)
+    min_dense_only_cosine = float(tuning.min_dense_only_cosine)
+    min_lexical_matches = int(tuning.min_lexical_query_term_matches)
+    min_redundant_ratio = float(tuning.min_redundant_lexical_strength_ratio)
+    require_dense_support = bool(tuning.require_dense_support)
     candidate_limit = max(limit * 10, 120)
     lexical_rows: list[sqlite3.Row] = []
+    lexical_uncorroborated = False
     if fts:
         lexical_rows = list(
             conn.execute(
@@ -1576,8 +1615,15 @@ def search_core_v1(
             for term in re.findall(r"[a-z0-9]{2,}", fts.lower())
             if term != "or"
         }
-        if len(query_terms) >= MIN_LEXICAL_QUERY_TERM_MATCHES and len(lexical_rows) > 1:
+        # The multi-term bar applies even to a lone lexical row. Gating this on
+        # ``len(lexical_rows) > 1`` meant a single belief sharing one generic
+        # token with a long, specific query was served unconditionally — the
+        # peer comparison below is only needed for the *redundancy* rule, not for
+        # deciding whether a row cleared the bar at all.
+        if len(query_terms) >= min_lexical_matches and lexical_rows:
+            query_lower = query.lower()
             overlaps: list[set[str]] = []
+            protected: list[bool] = []
             for row in lexical_rows:
                 attributes = json.loads(row["attributes_json"] or "{}")
                 document = " ".join(
@@ -1588,10 +1634,13 @@ def search_core_v1(
                 )
                 document_terms = set(re.findall(r"[a-z0-9]{2,}", document.lower()))
                 overlaps.append(query_terms & document_terms)
+                # A query that names a belief outright is an exact lookup, not a
+                # topical search. Such a row is never filtered on term overlap.
+                protected.append(str(row["belief_id"]).lower() in query_lower)
             corroborated = [
                 (row, overlap)
-                for row, overlap in zip(lexical_rows, overlaps, strict=True)
-                if len(overlap) >= MIN_LEXICAL_QUERY_TERM_MATCHES
+                for row, overlap, keep in zip(lexical_rows, overlaps, protected, strict=True)
+                if keep or len(overlap) >= min_lexical_matches
             ]
             if corroborated:
                 covered_terms = set().union(*(overlap for _row, overlap in corroborated))
@@ -1601,18 +1650,25 @@ def search_core_v1(
                 )
                 lexical_rows = [
                     row
-                    for row, overlap in zip(lexical_rows, overlaps, strict=True)
+                    for row, overlap, keep in zip(
+                        lexical_rows, overlaps, protected, strict=True
+                    )
                     if (
-                        len(overlap) >= MIN_LEXICAL_QUERY_TERM_MATCHES
+                        keep
+                        or len(overlap) >= min_lexical_matches
                         or bool(overlap - covered_terms)
                         or strongest_corroborated <= 0.0
                         or max(0.0, -float(row["lexical_score"] or 0.0))
-                        >= (
-                            strongest_corroborated
-                            * MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
-                        )
+                        >= (strongest_corroborated * min_redundant_ratio)
                     )
                 ]
+            else:
+                # Nothing cleared the multi-term bar. This branch used to fall
+                # open and serve every row, so a long specific query sharing one
+                # generic token with unrelated beliefs returned those beliefs at
+                # lexical rank 1-2. Defer the decision: dropping them is only
+                # right if the dense arm is healthy enough to answer instead.
+                lexical_uncorroborated = True
     dense_rows, dense_fallback = semantic_neighbors(
         conn,
         query,
@@ -1620,8 +1676,19 @@ def search_core_v1(
         limit=candidate_limit,
     )
     dense_rows = [
-        row for row in dense_rows if float(row.get("similarity") or 0.0) >= MIN_DENSE_COSINE
+        row for row in dense_rows if float(row.get("similarity") or 0.0) >= min_dense_cosine
     ]
+    # A healthy dense arm is one that actually scored the corpus. When the
+    # sidecar is missing, stale, or the local embedder is down, ``dense_fallback``
+    # is set and every dense score is absent — holding lexical hits to a dense
+    # floor then would return nothing at all, so the extra gate stands down.
+    dense_arm_healthy = dense_fallback is None
+    if lexical_uncorroborated and dense_arm_healthy:
+        # No lexical row cleared the multi-term bar and dense retrieval is
+        # available to answer instead. Without a working dense arm these rows are
+        # the only candidates there are, and silence would be worse than a weak
+        # lexical match — degraded mode stays as permissive as it was before.
+        lexical_rows = []
     lexical_rank = {str(row["belief_id"]): rank for rank, row in enumerate(lexical_rows, 1)}
     dense_rank = {str(row["belief_id"]): rank for rank, row in enumerate(dense_rows, 1)}
     dense_similarity = {str(row["belief_id"]): float(row["similarity"]) for row in dense_rows}
@@ -1639,25 +1706,48 @@ def search_core_v1(
                 "eligible_count": visibility_counts["eligible_count"],
                 "lexical_candidates": 0,
                 "dense_candidates": 0,
-                "min_dense_cosine": MIN_DENSE_COSINE,
-                "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
-                "min_lexical_query_term_matches": MIN_LEXICAL_QUERY_TERM_MATCHES,
-                "min_redundant_lexical_strength_ratio": (
-                    MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
-                ),
+                "min_dense_cosine": min_dense_cosine,
+                "min_dense_only_cosine": min_dense_only_cosine,
+                "min_lexical_query_term_matches": min_lexical_matches,
+                "min_redundant_lexical_strength_ratio": min_redundant_ratio,
+                "require_dense_support": require_dense_support and dense_arm_healthy,
             },
         }
-    feedback = _retrieval_feedback_scores(conn, candidate_ids)
+    feedback = _retrieval_feedback_scores(
+        conn,
+        candidate_ids,
+        weight=float(tuning.feedback_weight),
+        clamp=float(tuning.feedback_clamp),
+        prior_observations=float(tuning.feedback_prior_observations),
+    )
     query_normalized = _dedupe_text(query)
     ranked: list[tuple[float, str, dict[str, Any]]] = []
     for belief_id in candidate_ids:
         row = eligible.get(belief_id)
         if row is None:
             continue
-        if (
-            belief_id not in lexical_rank
-            and dense_similarity.get(belief_id, 0.0) < MIN_DENSE_ONLY_COSINE
-        ):
+        exact_boost = 0.0
+        body_normalized = _dedupe_text(str(row["body"]))
+        if query_normalized and query_normalized in body_normalized:
+            exact_boost += 0.25
+        if belief_id.lower() in query.lower():
+            exact_boost += 1.0
+        similarity = dense_similarity.get(belief_id, 0.0)
+        if belief_id in lexical_rank:
+            # Lexical hits used to bypass every dense gate, so one shared generic
+            # token was enough to serve an unrelated belief — and because the
+            # lexical arm scores by unweighted RRF while dense is scaled by
+            # similarity, that filler outranked genuinely close dense matches.
+            # Hold a lexical hit to the same floor its dense score would need,
+            # unless the query names the belief outright or quotes its body.
+            if (
+                require_dense_support
+                and dense_arm_healthy
+                and exact_boost == 0.0
+                and similarity < min_dense_cosine
+            ):
+                continue
+        elif similarity < min_dense_only_cosine:
             continue
         scope = ScopeTag(
             str(row["scope_type"]),
@@ -1675,17 +1765,11 @@ def search_core_v1(
         recency = _recency_score(str(row["last_compiled_at"]))
         lexical_component = 0.0
         if belief_id in lexical_rank:
-            lexical_component = 1.0 / (HYBRID_RRF_K + lexical_rank[belief_id])
+            lexical_component = 1.0 / (rrf_k + lexical_rank[belief_id])
         dense_component = 0.0
         if belief_id in dense_rank:
-            dense_component = dense_similarity[belief_id] / (HYBRID_RRF_K + dense_rank[belief_id])
+            dense_component = dense_similarity[belief_id] / (rrf_k + dense_rank[belief_id])
         rrf = lexical_component + dense_component
-        exact_boost = 0.0
-        body_normalized = _dedupe_text(str(row["body"]))
-        if query_normalized and query_normalized in body_normalized:
-            exact_boost += 0.25
-        if belief_id.lower() in query.lower():
-            exact_boost += 1.0
         feedback_boost = feedback.get(belief_id, 0.0)
         ranking_prior = (
             scope_weight
@@ -1727,9 +1811,14 @@ def search_core_v1(
     ranked.sort(key=lambda item: (-item[0], item[1]))
     items: list[dict[str, Any]] = []
     seen_content: set[str] = set()
+    # Count only rows dropped for duplicate content. Deriving this as
+    # ``len(ranked) - len(items)`` conflated dedup with the ``limit`` truncation
+    # below, so any ranked-but-unserved row inflated it.
+    deduplicated = 0
     for _score, _belief_id, item in ranked:
         content_key = sha256_text(_dedupe_text(str(item["body"])))
         if content_key in seen_content:
+            deduplicated += 1
             continue
         seen_content.add(content_key)
         items.append(item)
@@ -1747,14 +1836,13 @@ def search_core_v1(
             "eligible_count": visibility_counts["eligible_count"],
             "lexical_candidates": len(lexical_rank),
             "dense_candidates": len(dense_rank),
-            "deduplicated_candidates": len(ranked) - len(items),
-            "rrf_k": HYBRID_RRF_K,
-            "min_dense_cosine": MIN_DENSE_COSINE,
-            "min_dense_only_cosine": MIN_DENSE_ONLY_COSINE,
-            "min_lexical_query_term_matches": MIN_LEXICAL_QUERY_TERM_MATCHES,
-            "min_redundant_lexical_strength_ratio": (
-                MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO
-            ),
+            "deduplicated_candidates": deduplicated,
+            "rrf_k": rrf_k,
+            "min_dense_cosine": min_dense_cosine,
+            "min_dense_only_cosine": min_dense_only_cosine,
+            "min_lexical_query_term_matches": min_lexical_matches,
+            "min_redundant_lexical_strength_ratio": min_redundant_ratio,
+            "require_dense_support": require_dense_support and dense_arm_healthy,
         },
     }
 
@@ -1975,31 +2063,53 @@ def _recency_score(value: str) -> float:
     return math.exp(-days / 365.0)
 
 
-def _retrieval_feedback_scores(conn: sqlite3.Connection, belief_ids: set[str]) -> dict[str, float]:
+def _retrieval_feedback_scores(
+    conn: sqlite3.Connection,
+    belief_ids: set[str],
+    *,
+    weight: float = 0.125,
+    clamp: float = 0.25,
+    prior_observations: float = 3.0,
+) -> dict[str, float]:
+    """Score each belief by how its retrievals were judged.
+
+    Applied multiplicatively as ``1 + boost`` at ranking time. The boost is
+    damped by ``n / (n + prior_observations)`` so a single verdict cannot swing a
+    belief's position; a belief needs a consistent record before it moves far.
+
+    Alias-recorded feedback is attributed to the canonical belief: retrieval rows
+    written before an alias was collapsed are stored under the old id, and
+    without the ``object_aliases`` join that history is silently dropped.
+    """
     if not belief_ids:
         return {}
     placeholders = ",".join("?" for _ in belief_ids)
     rows = conn.execute(
         f"""
-        SELECT ri.object_id,
+        SELECT COALESCE(oa.canonical_id, ri.object_id) AS object_id,
           SUM(CASE ru.outcome
                 WHEN 'helpful' THEN 2.0 WHEN 'used' THEN 1.0
                 WHEN 'irrelevant' THEN -1.5 WHEN 'ignored' THEN -0.5
                 WHEN 'harmful' THEN -4.0 ELSE 0.0 END) AS signal,
           SUM(CASE WHEN ru.outcome IN
                 ('helpful','used','irrelevant','ignored','harmful') THEN 1 ELSE 0 END) AS n
-        FROM retrieval_items ri JOIN retrieval_uses ru ON ru.id=ri.retrieval_use_id
-        WHERE ri.object_id IN ({placeholders})
-        GROUP BY ri.object_id
+        FROM retrieval_items ri
+        JOIN retrieval_uses ru ON ru.id=ri.retrieval_use_id
+        LEFT JOIN object_aliases oa ON oa.alias_id=ri.object_id
+        WHERE COALESCE(oa.canonical_id, ri.object_id) IN ({placeholders})
+        GROUP BY COALESCE(oa.canonical_id, ri.object_id)
         """,  # noqa: S608 - placeholder count derives only from selected belief ids
         tuple(sorted(belief_ids)),
     )
     result: dict[str, float] = {}
     for row in rows:
         count = int(row["n"] or 0)
-        if count:
-            average = float(row["signal"] or 0.0) / count
-            result[str(row["object_id"])] = min(max(average * 0.006, -0.03), 0.018)
+        if not count:
+            continue
+        average = float(row["signal"] or 0.0) / count
+        confidence = count / (count + prior_observations)
+        boost = average * weight * confidence
+        result[str(row["object_id"])] = min(max(boost, -clamp), clamp)
     return result
 
 

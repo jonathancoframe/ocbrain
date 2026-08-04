@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ocbrain.core_v1 import (
+    _retrieval_feedback_scores,
     append_core_event,
     get_core_v1_belief,
     init_core_v1,
@@ -929,3 +930,306 @@ def test_context_packages_only_explicit_contradictions(tmp_path: Path) -> None:
             "evidence_ids": [],
         }
     ]
+
+
+def _record_feedback(
+    conn,
+    *,
+    belief_id: str,
+    outcome: str,
+    count: int,
+    prefix: str,
+) -> None:
+    """Insert ``count`` judged retrievals for one belief."""
+    for index in range(count):
+        use_id = f"ret_{prefix}_{index}"
+        conn.execute(
+            "INSERT INTO retrieval_uses (id, served_to_runtime, outcome, served_at) "
+            "VALUES (?,?,?,?)",
+            (use_id, "test", outcome, "2026-08-04T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO retrieval_items (retrieval_use_id, object_id, object_kind, rank, score) "
+            "VALUES (?,?,?,?,?)",
+            (use_id, belief_id, "belief", 1, 0.5),
+        )
+
+
+def test_lexical_hit_below_dense_floor_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A shared generic token must not serve a belief the dense arm rejects.
+
+    Reproduces the live failure: a query with zero topical overlap returned two
+    unrelated beliefs at dense similarity ~0.33 purely because FTS matched one
+    generic token, and unweighted lexical RRF outranked every dense candidate.
+    """
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    filler_a = "curated:bountiful:orchestration-preference"
+    filler_b = "curated:bountiful:lake-root"
+    _seed_belief(
+        conn,
+        belief_id=filler_a,
+        body="Strategy work is advisory and execution stays with the local root agent.",
+    )
+    _seed_belief(
+        conn,
+        belief_id=filler_b,
+        body="The data lake is rooted on local disk with a storage budget.",
+    )
+    conn.commit()
+
+    similarities = {filler_a: 0.336, filler_b: 0.328}
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, candidate_ids=None, **_kwargs: (
+            [
+                {"belief_id": belief_id, "similarity": similarities[belief_id]}
+                for belief_id in sorted(candidate_ids or [])
+            ],
+            None,
+        ),
+    )
+
+    result = search_core_v1(
+        conn,
+        "recommender replication from analytics export data",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert result["items"] == []
+    assert result["ranking"]["require_dense_support"] is True
+
+
+def test_lexical_hit_below_dense_floor_survives_exact_locator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Naming a belief outright must still fetch it, whatever the dense score."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    target = "curated:bountiful:exact-locator"
+    _seed_belief(conn, belief_id=target, body="Deployment probes run after each release.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([{"belief_id": target, "similarity": 0.01}], None),
+    )
+
+    result = search_core_v1(
+        conn,
+        f"what does {target} say about probes",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert [item["belief_id"] for item in result["items"]] == [target]
+
+
+def test_lexical_hit_kept_when_dense_arm_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """A stale or missing sidecar must degrade to lexical, not to silence."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    target = "curated:bountiful:lexical-only"
+    _seed_belief(
+        conn,
+        belief_id=target,
+        body="Deployment probes run after each production release.",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], "vector_sidecar_missing"),
+    )
+
+    result = search_core_v1(
+        conn,
+        "production release deployment probes",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert [item["belief_id"] for item in result["items"]] == [target]
+    assert result["ranking"]["dense_fallback"] == "vector_sidecar_missing"
+    assert result["ranking"]["require_dense_support"] is False
+
+
+def test_uncorroborated_multi_term_query_drops_every_lexical_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When no row clears the multi-term bar, the filter must not fail open.
+
+    Previously the redundancy filter only ran when at least one row achieved
+    two-term overlap; with none, every one-generic-token row was served.
+    """
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    first = "curated:bountiful:one-token-a"
+    second = "curated:bountiful:one-token-b"
+    _seed_belief(conn, belief_id=first, body="Nightly deployment finished without incident.")
+    _seed_belief(conn, belief_id=second, body="A deployment window opens on Tuesday.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], None),
+    )
+
+    result = search_core_v1(
+        conn,
+        "deployment strategy for quarterly forecasting revenue attribution models",
+        context=ScopeContext(project="bountiful"),
+        limit=10,
+        delivery_target="hosted_model",
+    )
+
+    assert result["items"] == []
+    assert result["ranking"]["lexical_candidates"] == 0
+
+
+def test_retrieval_thresholds_honor_env_overrides(tmp_path: Path, monkeypatch) -> None:
+    """Operators must be able to tune the gates without editing source."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    target = "curated:bountiful:tunable"
+    _seed_belief(conn, belief_id=target, body="Meyer lemons are available nearby.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([{"belief_id": target, "similarity": 0.40}], None),
+    )
+    probe = "otherwise unmatched semantic probe"
+    context = ScopeContext(project="bountiful")
+
+    # 0.40 sits below the shipped dense-only floor of 0.55.
+    default_result = search_core_v1(
+        conn, probe, context=context, limit=10, delivery_target="hosted_model"
+    )
+    assert default_result["items"] == []
+
+    monkeypatch.setenv("OCBRAIN_RETRIEVAL_MIN_DENSE_ONLY_COSINE", "0.35")
+    lowered = search_core_v1(
+        conn, probe, context=context, limit=10, delivery_target="hosted_model"
+    )
+    assert [item["belief_id"] for item in lowered["items"]] == [target]
+    assert lowered["ranking"]["min_dense_only_cosine"] == 0.35
+
+
+def test_retrieval_feedback_can_reorder_results(tmp_path: Path, monkeypatch) -> None:
+    """Judged retrievals must be able to move a belief, not just decorate it."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    disliked = "curated:bountiful:aaa-disliked"
+    liked = "curated:bountiful:zzz-liked"
+    _seed_belief(conn, belief_id=disliked, body="Meyer lemons ripen in winter nearby.")
+    _seed_belief(conn, belief_id=liked, body="Meyer lemons ripen in winter locally.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: (
+            [
+                {"belief_id": disliked, "similarity": 0.70},
+                {"belief_id": liked, "similarity": 0.70},
+            ],
+            None,
+        ),
+    )
+    probe = "meyer lemons ripen winter"
+    context = ScopeContext(project="bountiful")
+
+    before = search_core_v1(conn, probe, context=context, limit=10, delivery_target="hosted_model")
+    baseline = [item["belief_id"] for item in before["items"]]
+    assert sorted(baseline) == sorted([disliked, liked])
+
+    # Reward whichever belief the ranker put second, and penalize the leader:
+    # feedback must be strong enough to overturn the baseline order.
+    leader, runner_up = baseline
+    _record_feedback(conn, belief_id=leader, outcome="irrelevant", count=8, prefix="bad")
+    _record_feedback(conn, belief_id=runner_up, outcome="helpful", count=8, prefix="good")
+    conn.commit()
+
+    after = search_core_v1(conn, probe, context=context, limit=10, delivery_target="hosted_model")
+    assert [item["belief_id"] for item in after["items"]] == [runner_up, leader]
+
+
+def test_feedback_boost_is_damped_by_observation_count(tmp_path: Path) -> None:
+    """One verdict must not swing a belief as far as a consistent record."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    single = "curated:bountiful:one-vote"
+    many = "curated:bountiful:many-votes"
+    _seed_belief(conn, belief_id=single, body="Single verdict belief.")
+    _seed_belief(conn, belief_id=many, body="Repeated verdict belief.")
+    _record_feedback(conn, belief_id=single, outcome="helpful", count=1, prefix="one")
+    _record_feedback(conn, belief_id=many, outcome="helpful", count=20, prefix="many")
+    conn.commit()
+
+    scores = _retrieval_feedback_scores(conn, {single, many})
+    assert 0 < scores[single] < scores[many]
+    assert scores[many] <= 0.25
+
+
+def test_deduplicated_candidates_counts_only_duplicates(tmp_path: Path, monkeypatch) -> None:
+    """The counter must not fold `limit` truncation into the dedup total."""
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    ids = [f"curated:bountiful:distinct-{index}" for index in range(4)]
+    for index, belief_id in enumerate(ids):
+        _seed_belief(conn, belief_id=belief_id, body=f"Distinct harvest note number {index}.")
+    conn.commit()
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, candidate_ids=None, **_kwargs: (
+            [
+                {"belief_id": belief_id, "similarity": 0.80}
+                for belief_id in sorted(candidate_ids or [])
+            ],
+            None,
+        ),
+    )
+
+    result = search_core_v1(
+        conn,
+        "unmatched semantic probe",
+        context=ScopeContext(project="bountiful"),
+        limit=2,
+        delivery_target="hosted_model",
+    )
+
+    # Four distinct bodies, two served: the two unserved were truncated, not deduped.
+    assert len(result["items"]) == 2
+    assert result["ranking"]["deduplicated_candidates"] == 0
+
+
+def test_uncorroborated_lexical_rows_survive_when_dense_arm_is_down(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Degraded mode must not be stricter than hybrid mode.
+
+    With no dense arm to answer instead, dropping uncorroborated lexical rows
+    would turn a sidecar outage into total silence.
+    """
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    target = "curated:bountiful:degraded-only"
+    _seed_belief(conn, belief_id=target, body="Nightly deployment finished without incident.")
+    conn.commit()
+    probe = "deployment strategy for quarterly forecasting revenue attribution"
+    context = ScopeContext(project="bountiful")
+
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], None),
+    )
+    healthy = search_core_v1(conn, probe, context=context, limit=10, delivery_target="hosted_model")
+    assert healthy["items"] == []
+
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], "vector_sidecar_missing"),
+    )
+    degraded = search_core_v1(
+        conn, probe, context=context, limit=10, delivery_target="hosted_model"
+    )
+    assert [item["belief_id"] for item in degraded["items"]] == [target]
