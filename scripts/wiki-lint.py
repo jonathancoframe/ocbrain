@@ -14,8 +14,12 @@ honest. It reports, per page:
   after the page's ``updated_at``, so the page serves an older body;
 - ``conflicting-key`` — two current pages share a ``key`` with different
   bodies, i.e. one of them is an unmarked supersession;
-- ``slop`` — the page body trips a mechanical ``ocbrain deslop`` rule, so the
+- ``slop`` — the page body trips an *enforced* ``ocbrain deslop`` rule, so the
   fact is stored badly rather than stale. Repair it with ``ocbrain deslop``.
+
+Advisory deslop rules are printed under ``advisory:`` and do **not** affect the
+exit code. They are judgement calls, and a gate that fails on judgement calls is
+a gate people learn to skip.
 
 Exit code is 1 when any finding is reported, 0 otherwise.
 """
@@ -29,7 +33,7 @@ from pathlib import Path
 
 from ocbrain.core_v1 import get_core_v1_belief, is_core_v1
 from ocbrain.db import connect
-from ocbrain.deslop import find_slop
+from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.wiki import page_staleness_markers, parse_page_frontmatter
 
 
@@ -43,11 +47,33 @@ def _read_body(text: str) -> str:
     return text.strip()
 
 
+def _belief_paragraph(body: str) -> str:
+    """The rendered belief body alone: after the H1, before the first section.
+
+    A page also carries a caveat and a sources list, and linting the whole page
+    counts those sentences against the belief. That made every multi-section page
+    look fused even when `ocbrain deslop` reported the belief itself as clean.
+    """
+    lines: list[str] = []
+    seen_title = False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# ") and not seen_title:
+            seen_title = True
+            continue
+        if stripped.startswith("## "):
+            break
+        if stripped:
+            lines.append(stripped)
+    return " ".join(lines).strip()
+
+
 def lint_wiki(
     wiki_dir: Path,
     *,
     now: str,
     db_path: Path | None = None,
+    advisory: list[str] | None = None,
 ) -> list[str]:
     wiki_dir = wiki_dir.expanduser().resolve()
     pages_dir = wiki_dir / "pages"
@@ -77,9 +103,15 @@ def lint_wiki(
 
             # The wiki is the human-readable view, so this is where a badly
             # packaged fact is most visible. Same rules as `ocbrain deslop`, read
-            # from the page's own frontmatter so `lifecycle` is honoured.
-            for finding in find_slop(bodies[page.name], frontmatter):
-                findings.append(f"{page.name}: slop ({finding.rule}: {finding.detail})")
+            # from the page's own frontmatter so `lifecycle` is honoured, and split
+            # the same way: enforced rules are findings, advisory rules are notes.
+            paragraph = _belief_paragraph(bodies[page.name])
+            for finding in find_slop(paragraph, frontmatter):
+                line = f"{page.name}: slop ({finding.rule}: {finding.detail})"
+                if finding.rule in ENFORCED_RULE_IDS:
+                    findings.append(line)
+                elif advisory is not None:
+                    advisory.append(line)
 
             for marker in page_staleness_markers(frontmatter, now=now):
                 kind = "superseded" if marker.startswith("superseded by") else "expired"
@@ -147,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     now = args.now or datetime.now(UTC).isoformat()
-    findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db)
+    advisory: list[str] = []
+    findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db, advisory=advisory)
 
     if findings and args.rematerialize:
         if args.db is None:
@@ -170,10 +203,13 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             conn.close()
         print(f"rematerialized {count} page(s)")
-        findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db)
+        advisory = []
+        findings = lint_wiki(args.wiki_dir, now=now, db_path=args.db, advisory=advisory)
 
     for finding in findings:
         print(finding)
+    for note in advisory:
+        print(f"advisory: {note}")
     if findings:
         print(f"wiki-lint: {len(findings)} finding(s)", file=sys.stderr)
         return 1

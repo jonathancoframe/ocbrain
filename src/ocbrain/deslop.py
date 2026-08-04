@@ -170,7 +170,10 @@ RULES: tuple[SlopRule, ...] = (
     ),
     SlopRule(
         id="current-without-expiry",
-        repair="rewrite",
+        # Metadata, not prose: the body is fine, the lifecycle bookkeeping is
+        # missing. Sending it to a model to be rewritten would spend a hosted call
+        # to change the one thing that is not wrong.
+        repair="stamp",
         description=(
             "A belief declared `current` with no valid_until can never age out, "
             "so a present-state claim silently becomes a permanent one."
@@ -488,18 +491,26 @@ def _propose_wiki_belief(
     key: str,
     body: str,
     attributes: dict[str, Any],
+    belief_id: str | None = None,
 ) -> str:
-    """Re-propose a wiki belief from an existing one, changing only key and body.
+    """Re-propose a belief from an existing one, changing only key and body.
 
     Scope, provenance, evidence, and confidence are inherited verbatim, so a
     repaired belief keeps the trail back to the evidence the original cited.
+
+    ``belief_id`` must be passed for an in-place repair. Deriving the id from the
+    key only works for beliefs the wiki curator minted; anything compiled by
+    another path has an id that formula does not reproduce, so re-deriving it
+    silently forks a duplicate and leaves the original serving. That happened on
+    a live corpus: five of thirteen stamps forked instead of updating.
     """
     from ocbrain.core_v1 import append_core_event
     from ocbrain.ids import stable_id
     from ocbrain.mcp_v1 import decide_proposal_v1
 
     scope = dict(source.get("scope") or {})
-    belief_id = stable_id("belief", "wiki", key, str(scope.get("scope_id") or ""))
+    if belief_id is None:
+        belief_id = stable_id("belief", "wiki", key, str(scope.get("scope_id") or ""))
     proposal_id = append_core_event(
         conn,
         "compilation_proposed",
@@ -534,6 +545,7 @@ def apply_repair(
     action: str,
     bodies: list[str],
     reason: str,
+    current_ttl_days: int | None = None,
 ) -> dict[str, Any]:
     """Apply one validated repair.
 
@@ -559,6 +571,37 @@ def apply_repair(
     attributes["deslop"] = DESLOP_VERSION
     key = str(attributes.get("key") or belief_id)
 
+    # Splitting a `current` belief that carries no expiry would otherwise mint N
+    # children that each also lack one, so repairing one finding multiplies
+    # another. Measured on a live corpus: nine splits turned nine
+    # `current-without-expiry` findings into thirteen. The expiry is metadata,
+    # not body text, so stamping it does not touch the subtractive gate.
+    if (
+        attributes.get("lifecycle") == "current"
+        and not str(attributes.get("valid_until") or "").strip()
+        and current_ttl_days
+        and current_ttl_days > 0
+    ):
+        from datetime import UTC, datetime, timedelta
+
+        attributes["valid_until"] = (
+            datetime.now(UTC) + timedelta(days=current_ttl_days)
+        ).isoformat(timespec="seconds")
+
+    if action == "stamp":
+        if not str(attributes.get("valid_until") or "").strip():
+            raise ValueError(f"stamp produced no expiry for {belief_id}")
+        stamped = _propose_wiki_belief(
+            conn,
+            source=source,
+            key=key,
+            body=str(source["body"]),
+            attributes=attributes,
+            belief_id=str(source["canonical_id"]),
+        )
+        conn.commit()
+        return {"action": "stamp", "created": [stamped], "retired": []}
+
     if action == "drop":
         outcome = apply_retirements(
             conn,
@@ -568,7 +611,12 @@ def apply_repair(
 
     if action == "rewrite":
         rewritten = _propose_wiki_belief(
-            conn, source=source, key=key, body=bodies[0], attributes=attributes
+            conn,
+            source=source,
+            key=key,
+            body=bodies[0],
+            attributes=attributes,
+            belief_id=str(source["canonical_id"]),
         )
         conn.commit()
         return {"action": "rewrite", "created": [rewritten], "retired": []}

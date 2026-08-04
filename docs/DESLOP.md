@@ -36,7 +36,7 @@ Two beliefs, both receipt-shaped, illustrate it:
 |---|---|---|---|
 | `fused-claims` | >1 semicolon, or >3 sentences | split | yes |
 | `temporal-in-durable` | "now"/"currently"/"is implemented" with `lifecycle: durable` | rewrite | yes |
-| `current-without-expiry` | `lifecycle: current` with no `valid_until` | rewrite | yes |
+| `current-without-expiry` | `lifecycle: current` with no `valid_until` | **stamp** | yes |
 | `no-checkable-content` | no path, identifier, flag, figure, or named entity | drop | **no** |
 | `unactionable` | model judgement: would a reader act differently? | drop | judged |
 
@@ -82,7 +82,25 @@ semantics and every outcome is reversible:
   `evidence_ids`, so `brain.source` keeps working — then supersedes the original.
   The existing `expired` hygiene class retires it on the next sweep, so a bad
   split is visible next to its source before the original goes away.
+- **stamp** writes the missing expiry and leaves the body untouched. This repair
+  never reaches a model: the prose is fine, only the lifecycle bookkeeping is
+  missing, so sending it to be rewritten would spend a hosted call to change the
+  one thing that is not wrong.
 - **drop** soft-retracts, exactly as hygiene does.
+
+Two failures found by running this against the live corpus rather than reasoning
+about it:
+
+- **A split of a `current` belief with no expiry minted N children that each also
+  lacked one**, so repairing nine `fused-claims` findings turned nine
+  `current-without-expiry` findings into thirteen. Repairs now stamp the expiry on
+  a `current` belief that has none. The expiry is metadata, not body text, so this
+  does not touch the subtractive gate.
+- **An in-place repair re-derived the belief id from the key**, which only works
+  for beliefs the wiki curator minted. Anything compiled by another path has an id
+  that formula does not reproduce, so five of thirteen stamps forked a duplicate
+  and left the original serving. In-place repairs now reuse the belief's own
+  canonical id.
 
 `ocbrain hygiene --restore <belief_id>` undoes any of them.
 
@@ -102,7 +120,11 @@ enforced it. A rule that lives only in a prompt is a suggestion.
   `deslop.reject_closeout_slop=true` once the rules are calibrated against your
   own corpus.
 - **Wiki:** `scripts/wiki-lint.py` reports `slop` per page, alongside its
-  staleness checks.
+  staleness checks. It lints the belief paragraph alone — a page also carries a
+  caveat and a sources list, and counting those sentences against the belief made
+  every multi-section page look fused. Enforced rules are findings and set the
+  exit code; advisory rules print under `advisory:` and do not, because a gate
+  that fails on judgement calls is a gate people learn to skip.
 
 ## Volume slop
 

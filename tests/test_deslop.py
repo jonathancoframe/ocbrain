@@ -724,3 +724,107 @@ def test_the_scan_never_flags_the_doctrine(tmp_path: Path) -> None:
     install_doctrine(conn, project="bountiful")
     assert scan_beliefs(conn) == []
     conn.close()
+
+
+def test_splitting_a_current_belief_gives_each_child_an_expiry(tmp_path: Path) -> None:
+    """Otherwise repairing one finding multiplies another.
+
+    Measured on a live corpus: nine splits turned nine `current-without-expiry`
+    findings into thirteen, because each child inherited the parent's missing
+    expiry.
+    """
+    conn = _core(tmp_path)
+    body = "The runner holds 42 leases; the queue holds 7 tasks in /tmp/queue."
+    _seed(
+        conn,
+        belief_id="belief_current",
+        body=body,
+        attributes={"lifecycle": "current", "key": "runner-state"},
+    )
+    conn.commit()
+    outcome = apply_repair(
+        conn,
+        belief_id="belief_current",
+        action="split",
+        bodies=["The runner holds 42 leases.", "The queue holds 7 tasks in /tmp/queue."],
+        reason="two independent facts",
+        current_ttl_days=90,
+    )
+    for created_id in outcome["created"]:
+        created = get_core_v1_belief(conn, created_id)
+        assert created is not None
+        assert created["attributes"]["valid_until"]
+        assert find_slop(created["body"], created["attributes"]) == []
+    conn.close()
+
+
+def test_a_missing_expiry_is_stamped_without_a_hosted_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The body is fine; only the lifecycle bookkeeping is missing.
+
+    Routing this through a model would spend a hosted call to change the one
+    thing that is not wrong, so `--apply` must fix it locally. An unresolvable
+    API key would surface as a SystemExit if it reached the credential path.
+    """
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    body = "The runner ai.hermes.gateway holds 42 leases."
+    _seed(
+        conn,
+        belief_id="belief_current",
+        body=body,
+        attributes={"lifecycle": "current", "key": "runner-state"},
+    )
+    conn.commit()
+    conn.close()
+
+    assert cli_main(["--db", str(db_path), "deslop", "--mechanical-only", "--apply"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [r["action"] for r in payload["repairs"]] == ["stamp"]
+
+    conn = connect(db_path)
+    stamped = get_core_v1_belief(conn, payload["repairs"][0]["created"][0])
+    assert stamped is not None
+    # The body is untouched and the finding is gone.
+    assert stamped["body"] == body
+    assert find_slop(stamped["body"], stamped["attributes"]) == []
+    conn.close()
+
+
+def test_an_in_place_repair_updates_a_belief_whose_id_is_not_key_derived(
+    tmp_path: Path,
+) -> None:
+    """Re-deriving the id from the key forks a duplicate and leaves the original.
+
+    Only the wiki curator mints ids as `stable_id("belief", "wiki", key, scope)`.
+    A belief compiled by any other path has an id that formula does not reproduce,
+    and on a live corpus five of thirteen stamps forked instead of updating.
+    """
+    conn = _core(tmp_path)
+    _seed(
+        conn,
+        belief_id="belief_from_another_pipeline",
+        body="The runner ai.hermes.gateway holds 42 leases.",
+        attributes={"lifecycle": "current", "key": "runner-state"},
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT COUNT(*) FROM current_beliefs WHERE status='current' AND serve=1"
+    ).fetchone()[0]
+
+    outcome = apply_repair(
+        conn,
+        belief_id="belief_from_another_pipeline",
+        action="stamp",
+        bodies=[],
+        reason="lifecycle is current but no valid_until is set",
+        current_ttl_days=90,
+    )
+    assert outcome["created"] == ["belief_from_another_pipeline"]
+    after = conn.execute(
+        "SELECT COUNT(*) FROM current_beliefs WHERE status='current' AND serve=1"
+    ).fetchone()[0]
+    assert after == before
+    conn.close()

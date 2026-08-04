@@ -1727,9 +1727,8 @@ def cmd_deslop(args: argparse.Namespace) -> int:
         ]
         from ocbrain.config import load_config
 
-        limit = (
-            args.limit if args.limit is not None else load_config().deslop.max_repairs_per_run
-        )
+        config = load_config()
+        limit = args.limit if args.limit is not None else config.deslop.max_repairs_per_run
         repairs: list[dict[str, Any]] = []
         if args.apply and actionable:
             api_key, base_url, model = _deslop_credentials(args)
@@ -1741,6 +1740,7 @@ def cmd_deslop(args: argparse.Namespace) -> int:
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
+                    current_ttl_days=config.curator.current_ttl_days,
                 ))
 
         payload = {
@@ -1772,11 +1772,22 @@ def _apply_one_repair(
     api_key: str,
     base_url: str,
     model: str,
+    current_ttl_days: int,
 ) -> dict[str, Any]:
     """Request one repair, then apply it only if it passes the subtractive gate."""
-    # A drop verdict needs no model call to carry out: the finding already said
-    # there is nothing worth keeping, and inventing a rewrite for it would be the
-    # exact failure the subtractive gate exists to catch.
+    # Two repairs need no model call at all. A `drop` finding already said there
+    # is nothing worth keeping, and inventing a rewrite for it would be the exact
+    # failure the subtractive gate exists to catch. A `stamp` finding is missing
+    # metadata, not bad prose, so the body must not change.
+    if all(finding["repair"] == "stamp" for finding in item["findings"]):
+        return {"belief_id": item["belief_id"]} | apply_repair(
+            conn,
+            belief_id=item["belief_id"],
+            action="stamp",
+            bodies=[],
+            reason="; ".join(finding["detail"] for finding in item["findings"]),
+            current_ttl_days=current_ttl_days,
+        )
     drop_only = all(
         finding["repair"] == "drop"
         and (finding["rule"] in DESLOP_ENFORCED_RULE_IDS or finding["rule"] == JUDGED_RULE)
@@ -1803,7 +1814,12 @@ def _apply_one_repair(
             "created": [],
         }
     return {"belief_id": item["belief_id"], "reason": reason} | apply_repair(
-        conn, belief_id=item["belief_id"], action=action, bodies=bodies, reason=reason
+        conn,
+        belief_id=item["belief_id"],
+        action=action,
+        bodies=bodies,
+        reason=reason,
+        current_ttl_days=current_ttl_days,
     )
 
 

@@ -269,3 +269,42 @@ def test_wiki_lint_flags_conflicting_keys(tmp_path, capsys):
     conn.close()
     assert wiki_lint.main([str(wiki_dir), "--now", NOW]) == 1
     assert "conflicting-key" in capsys.readouterr().out
+
+
+def test_the_slop_check_reads_the_belief_paragraph_not_the_whole_page(
+    tmp_path: Path,
+) -> None:
+    """A page also carries a caveat and a sources list.
+
+    Linting the whole page counted those sentences against the belief, so every
+    multi-section page looked fused even when `ocbrain deslop` reported the belief
+    itself as clean -- seven false positives on a live wiki.
+    """
+    pages = tmp_path / "pages"
+    pages.mkdir(parents=True)
+    (pages / "clean.md").write_text(
+        "\n".join(
+            [
+                "---",
+                'id: "belief_clean"',
+                'key: "clean"',
+                "status: current",
+                "---",
+                "",
+                "# A clean fact",
+                "",
+                "The gateway runs as the launchd service ai.hermes.gateway.",
+                "",
+                "## Caveat",
+                "",
+                "It has not been checked since the last restart. Verify first.",
+                "",
+                "## Sources",
+                "",
+                "- `ocbrain://evidence/evd_abc`",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    findings = wiki_lint.lint_wiki(tmp_path, now="2026-08-04T00:00:00+00:00")
+    assert [f for f in findings if "slop" in f] == []
