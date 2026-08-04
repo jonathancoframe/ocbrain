@@ -9,10 +9,11 @@
   served beliefs carrying 33 distinct facts, and each copy costs a result slot.
   A claim that restates a served fact now updates that belief instead.
 - Add a `redundant` hygiene class that retires older restatements, keeping the
-  newest of each cluster. Pinned beliefs are never collapsed, and the similarity
-  threshold is configurable (`--restatement-threshold`, default 0.80) because it
-  runs unattended: under-retiring leaves a little redundancy, over-retiring loses
-  knowledge.
+  newest wiki fact in each exact delivery scope. Pinned beliefs, non-wiki facts,
+  and equivalent text in different scope/visibility/egress boundaries are never
+  collapsed. The similarity threshold is configurable (`--restatement-threshold`,
+  default 0.80) because it runs unattended: under-retiring leaves a little
+  redundancy, over-retiring loses knowledge.
 - Add `body_similarity` / `is_restatement` to `ocbrain.text`. Token-set overlap is
   deliberately crude — deterministic, dependency-free, explainable — since the
   decision it feeds is a soft, reversible retirement.

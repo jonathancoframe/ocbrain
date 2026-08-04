@@ -12,10 +12,11 @@ Four independent classes, each separately counted so a run says *why* it acted:
     belief. Unambiguous, and the only class that may retire a curated wiki fact.
 
 ``redundant``
-    An older restatement of a fact a newer belief already carries. The compiler
-    keys a belief by the topic name a model chose, so a later run that rewords the
-    same fact under a new key mints a second belief instead of updating the first
-    -- exact-body dedup never sees it, and every scheduled run adds a phrasing.
+    An older curator restatement of a fact a newer wiki belief already carries in
+    the same delivery scope. The compiler keys a belief by the topic name a model
+    chose, so a later run that rewords the same fact under a new key mints a second
+    belief instead of updating the first -- exact-body dedup never sees it, and
+    every scheduled run adds a phrasing.
 
 ``unused``
     Never returned by any retrieval and older than a grace window. A fact nobody
@@ -209,7 +210,7 @@ def _unhelpful_targets(
 def _redundant_targets(
     conn: sqlite3.Connection, *, threshold: float
 ) -> list[dict[str, str]]:
-    """Retire older restatements of a fact, keeping the newest of each cluster.
+    """Retire older wiki restatements within one exact delivery scope.
 
     The compiler keys a belief by the topic name a model chose, so a later run
     that rewords the same fact under a new key mints a second belief rather than
@@ -219,20 +220,32 @@ def _redundant_targets(
     rows = list(
         conn.execute(
             """
-            SELECT belief_id, body, last_compiled_at
+            SELECT belief_id, body, last_compiled_at,
+                   scope_type, scope_id, visibility, egress_policy
             FROM current_beliefs
             WHERE status='current' AND serve=1 AND pinned=0
-            ORDER BY last_compiled_at DESC, belief_id
+              AND belief_type='wiki_fact'
+            ORDER BY scope_type, scope_id, visibility, egress_policy,
+                     last_compiled_at DESC, belief_id
             """
         )
     )
     targets: list[dict[str, str]] = []
-    kept: list[tuple[str, str]] = []
+    kept_by_scope: dict[tuple[str, str, str, str], list[tuple[str, str]]] = {}
     # Rows arrive newest-first, so the first member of a cluster is the keeper
-    # and everything matching it afterwards is an older restatement.
+    # and everything matching it afterwards is an older restatement. Scope and
+    # delivery policy are part of the cluster identity: equivalent text in two
+    # projects, or under two visibility/egress policies, remains two beliefs.
     for row in rows:
         belief_id = str(row["belief_id"])
         body = str(row["body"])
+        scope_key = (
+            str(row["scope_type"]),
+            str(row["scope_id"]),
+            str(row["visibility"]),
+            str(row["egress_policy"]),
+        )
+        kept = kept_by_scope.setdefault(scope_key, [])
         keeper = next(
             (kid for kid, kbody in kept if is_restatement(kbody, body, threshold=threshold)),
             None,

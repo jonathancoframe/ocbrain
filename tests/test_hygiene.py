@@ -52,6 +52,7 @@ def _seed(
     belief_type: str = "curated_fact",
     compiled_at: str | None = None,
     pinned: bool = False,
+    scope: ScopeTag = SCOPE,
 ) -> None:
     proposal = append_core_event(
         conn,
@@ -61,7 +62,7 @@ def _seed(
             "belief_type": belief_type,
             "body": body,
             "evidence_ids": [],
-            "scope": SCOPE.to_dict(),
+            "scope": scope.to_dict(),
             "confidence": 0.9,
             "attributes": attributes or {},
         },
@@ -572,18 +573,21 @@ def test_redundant_class_keeps_the_newest_restatement(tmp_path: Path) -> None:
         conn,
         belief_id=old,
         body="Hermes runs as the launchd service ai.hermes.gateway with auto-start and restart.",
+        belief_type="wiki_fact",
         compiled_at="2026-08-01T00:00:00+00:00",
     )
     _seed(
         conn,
         belief_id=new,
         body="Hermes runs as launchd service ai.hermes.gateway with auto-start and auto-restart.",
+        belief_type="wiki_fact",
         compiled_at="2026-08-04T00:00:00+00:00",
     )
     _seed(
         conn,
         belief_id=distinct,
         body="Meyer lemons ripen in winter near the coast and are picked by hand.",
+        belief_type="wiki_fact",
         compiled_at="2026-08-04T00:00:00+00:00",
     )
     conn.commit()
@@ -614,6 +618,7 @@ def test_redundant_class_spares_pinned_beliefs_and_respects_the_threshold(
         conn,
         belief_id=pinned_old,
         body="Hermes runs as the launchd service ai.hermes.gateway with auto-start and restart.",
+        belief_type="wiki_fact",
         compiled_at="2026-08-01T00:00:00+00:00",
         pinned=True,
     )
@@ -621,6 +626,7 @@ def test_redundant_class_spares_pinned_beliefs_and_respects_the_threshold(
         conn,
         belief_id=newer,
         body="Hermes runs as launchd service ai.hermes.gateway with auto-start and auto-restart.",
+        belief_type="wiki_fact",
         compiled_at="2026-08-04T00:00:00+00:00",
     )
     conn.commit()
@@ -634,3 +640,39 @@ def test_redundant_class_spares_pinned_beliefs_and_respects_the_threshold(
         )["targets"]
         == []
     )
+
+
+def test_redundant_class_preserves_scope_and_belief_type_boundaries(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    body = "OCBrain runs as an on-demand local stdio MCP service with eight tools."
+    alpha = ScopeTag("project", "project:alpha", "internal", "local_only", "test")
+    beta = ScopeTag("project", "project:beta", "internal", "local_only", "test")
+
+    _seed(
+        conn,
+        belief_id="curated:alpha:runtime",
+        body=body,
+        belief_type="wiki_fact",
+        compiled_at="2026-08-01T00:00:00+00:00",
+        scope=alpha,
+    )
+    _seed(
+        conn,
+        belief_id="curated:beta:runtime",
+        body=body,
+        belief_type="wiki_fact",
+        compiled_at="2026-08-04T00:00:00+00:00",
+        scope=beta,
+    )
+    _seed(
+        conn,
+        belief_id="explicit:alpha:runtime",
+        body=body,
+        belief_type="curated_fact",
+        compiled_at="2026-07-01T00:00:00+00:00",
+        scope=alpha,
+    )
+    conn.commit()
+
+    # Matching text does not make separately scoped or non-wiki knowledge redundant.
+    assert plan_retirements(conn, classes=("redundant",), now=NOW)["targets"] == []
