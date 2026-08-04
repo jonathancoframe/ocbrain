@@ -5,6 +5,14 @@
 - Use OpenAI's `max_completion_tokens` field for curator requests while keeping
   Moonshot on its compatible endpoint's `max_tokens` field. The live
   `gpt-5-mini` endpoint rejects the legacy field.
+- Always record a closeout summary as evidence, and gate only the promotion step
+  on `automatic_activation`. Both used to sit behind that flag, which conflated
+  *recording evidence* with *promoting it to a served belief* — so turning the
+  flag off to stop unattended promotion also stopped closeout summaries becoming
+  evidence at all. Closeout summaries are the single largest supply of
+  curator-eligible evidence; one real brain silently lost 567 of 799 closeouts
+  (71%) this way over two weeks, which no amount of fixing the curator would have
+  recovered. The receipt now returns `evidence_id`.
 - Give the lexical retrieval arm a relevance floor. The dense-quality gate was
   guarded by "not already found lexically", so any FTS hit bypassed it entirely,
   and the redundancy filter only ran when more than one lexical row came back. A

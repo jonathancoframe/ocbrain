@@ -1262,19 +1262,28 @@ def closeout_v1(
         awaiting=awaiting,
         actor=actor,
     )
+    # Always record the summary as scoped evidence, under the shared continuity
+    # scope so a closeout written while one client worked is curatable and
+    # recallable by the others.
+    #
+    # This used to sit inside the automatic_activation check, which conflated two
+    # different things: *recording evidence* and *promoting it to a served
+    # belief*. Turning the flag off to stop unattended promotion therefore also
+    # stopped closeout summaries becoming evidence at all -- and closeout
+    # summaries are the single largest supply of curator-eligible evidence. One
+    # real brain lost 567 of 799 closeouts (71%) that way, silently, for weeks.
+    # Recording evidence is not promotion; only the compile step is gated.
+    scope = auto_compile_scope(context)
+    evidence_id, _event_id = record_core_v1_evidence(
+        conn,
+        body=summary,
+        kind="task_closeout_summary",
+        scope=scope,
+        writer=actor,
+        artifact_ref=f"closeout:{receipt['id']}",
+    )
+    receipt["evidence_id"] = evidence_id
     if automatic_activation_enabled(conn):
-        # Make the closeout summary recallable by a later retrieval on the same
-        # project: record it as scoped evidence and promote it under the shared
-        # continuity scope.
-        scope = auto_compile_scope(context)
-        evidence_id, _event_id = record_core_v1_evidence(
-            conn,
-            body=summary,
-            kind="task_closeout_summary",
-            scope=scope,
-            writer=actor,
-            artifact_ref=f"closeout:{receipt['id']}",
-        )
         try:
             receipt["auto_compiled_belief_id"] = auto_compile_evidence(
                 conn,
