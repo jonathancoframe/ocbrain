@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use OpenAI's `max_completion_tokens` field for curator requests while keeping
+  Moonshot on its compatible endpoint's `max_tokens` field. The live
+  `gpt-5-mini` endpoint rejects the legacy field.
 - Give the lexical retrieval arm a relevance floor. The dense-quality gate was
   guarded by "not already found lexically", so any FTS hit bypassed it entirely,
   and the redundancy filter only ran when more than one lexical row came back. A
