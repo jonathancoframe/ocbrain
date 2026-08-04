@@ -13,7 +13,9 @@ honest. It reports, per page:
 - ``ledger-newer-than-page`` — with ``--db``: the ledger recompiled the belief
   after the page's ``updated_at``, so the page serves an older body;
 - ``conflicting-key`` — two current pages share a ``key`` with different
-  bodies, i.e. one of them is an unmarked supersession.
+  bodies, i.e. one of them is an unmarked supersession;
+- ``slop`` — the page body trips a mechanical ``ocbrain deslop`` rule, so the
+  fact is stored badly rather than stale. Repair it with ``ocbrain deslop``.
 
 Exit code is 1 when any finding is reported, 0 otherwise.
 """
@@ -27,6 +29,7 @@ from pathlib import Path
 
 from ocbrain.core_v1 import get_core_v1_belief, is_core_v1
 from ocbrain.db import connect
+from ocbrain.deslop import find_slop
 from ocbrain.wiki import page_staleness_markers, parse_page_frontmatter
 
 
@@ -71,6 +74,12 @@ def lint_wiki(
                 continue
             pages[page.name] = frontmatter
             bodies[page.name] = _read_body(text)
+
+            # The wiki is the human-readable view, so this is where a badly
+            # packaged fact is most visible. Same rules as `ocbrain deslop`, read
+            # from the page's own frontmatter so `lifecycle` is honoured.
+            for finding in find_slop(bodies[page.name], frontmatter):
+                findings.append(f"{page.name}: slop ({finding.rule}: {finding.detail})")
 
             for marker in page_staleness_markers(frontmatter, now=now):
                 kind = "superseded" if marker.startswith("superseded by") else "expired"

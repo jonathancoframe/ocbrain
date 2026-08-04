@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ocbrain.core_v1 import append_core_event, get_core_v1_belief
+from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
 from ocbrain.text import is_restatement
@@ -338,14 +339,43 @@ def request_claims(
     max_tokens: int = 8_000,
 ) -> dict[str, Any]:
     """Ask the configured provider for candidate claims and parse the JSON body."""
-    user_prompt = build_user_prompt(
-        evidence=evidence, existing=existing, max_beliefs=max_beliefs
+    return request_structured(
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        system=SYSTEM_PROMPT,
+        user_prompt=build_user_prompt(
+            evidence=evidence, existing=existing, max_beliefs=max_beliefs
+        ),
+        schema=CLAIMS_SCHEMA,
+        max_tokens=max_tokens,
     )
+
+
+def request_structured(
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    system: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+    max_tokens: int = 8_000,
+) -> dict[str, Any]:
+    """One structured-JSON request, routed to the configured provider backend.
+
+    Shared by curation and by the deslop judge/repair passes so both inherit the
+    same refusal handling, budget diagnosis, and provider quirks.
+    """
     if provider == "anthropic":
         return _request_anthropic(
             api_key=api_key,
             model=model,
+            system=system,
             user_prompt=user_prompt,
+            schema=schema,
             max_tokens=max_tokens,
         )
     return _request_openai_compatible(
@@ -353,13 +383,20 @@ def request_claims(
         api_key=api_key,
         base_url=base_url,
         model=model,
+        system=system,
         user_prompt=user_prompt,
         max_tokens=max_tokens,
     )
 
 
 def _request_anthropic(
-    *, api_key: str, model: str, user_prompt: str, max_tokens: int
+    *,
+    api_key: str,
+    model: str,
+    user_prompt: str,
+    max_tokens: int,
+    system: str = SYSTEM_PROMPT,
+    schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         import anthropic
@@ -377,11 +414,11 @@ def _request_anthropic(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=[{"role": "user", "content": user_prompt}],
         output_config={
             "effort": "medium",
-            "format": {"type": "json_schema", "schema": CLAIMS_SCHEMA},
+            "format": {"type": "json_schema", "schema": schema or CLAIMS_SCHEMA},
         },
     )
     # Check why generation stopped before reading content: a refusal returns
@@ -408,11 +445,12 @@ def _request_openai_compatible(
     model: str,
     user_prompt: str,
     max_tokens: int,
+    system: str = SYSTEM_PROMPT,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
@@ -474,13 +512,29 @@ def _parse_claims_json(text: str) -> dict[str, Any]:
     return parsed
 
 
+# Every enforced rule that is checkable before `apply_claims` assigns metadata.
+# `current-without-expiry` is excluded because the expiry does not exist yet.
+CLAIM_SLOP_RULES: tuple[str, ...] = tuple(
+    rule for rule in ENFORCED_RULE_IDS if rule != "current-without-expiry"
+)
+
+
 def validate_claims(
     response: dict[str, Any],
     *,
     evidence: list[dict[str, Any]],
     max_beliefs: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Range-check every claim and verify each quote appears in its evidence."""
+    """Range-check every claim, verify each quote, and reject slop.
+
+    The prompt already forbids fusing several facts into one belief and already
+    forbids turning a completion receipt into eternal truth. A rule that only
+    lives in a prompt is a suggestion; running the mechanical deslop rules here
+    makes it a gate, and the existing ``rejected`` census reports which rule
+    fired. ``current-without-expiry`` is deliberately excluded: the expiry is
+    assigned later by :func:`claim_valid_until`, so checking it now would reject
+    every well-formed ``current`` claim.
+    """
     by_id = {str(row["evidence_id"]): row for row in evidence}
     accepted: dict[str, dict[str, Any]] = {}
     rejected: list[dict[str, str]] = []
@@ -534,6 +588,10 @@ def validate_claims(
                         reason = "unverified_quote"
                         break
                     support_ids.append(evidence_id)
+                if reason is None and (
+                    slop := find_slop(body, {"lifecycle": lifecycle}, rules=CLAIM_SLOP_RULES)
+                ):
+                    reason = f"slop:{slop[0].rule}"
                 if reason is None:
                     accepted[key] = {
                         "key": key,
@@ -734,6 +792,7 @@ __all__ = [
     "ALLOWED_CATEGORIES",
     "ALLOWED_LIFECYCLES",
     "CLAIMS_SCHEMA",
+    "CLAIM_SLOP_RULES",
     "CURATOR_VERSION",
     "DEFAULT_CURRENT_TTL_DAYS",
     "ELIGIBLE_KINDS",
@@ -750,6 +809,7 @@ __all__ = [
     "now_iso",
     "record_curation_egress",
     "request_claims",
+    "request_structured",
     "resolve_selection_policy",
     "select_evidence",
     "validate_claims",

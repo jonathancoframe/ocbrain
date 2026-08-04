@@ -173,6 +173,10 @@ CREATE TABLE IF NOT EXISTS evidence_objects (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_objects_scope
   ON evidence_objects(scope_type, scope_id);
+-- Import asks "have I already recorded this file under this kind?" on every
+-- harvest; without this it is a full scan of the largest table in the database.
+CREATE INDEX IF NOT EXISTS idx_evidence_objects_source
+  ON evidence_objects(source_uri, kind, recorded_at DESC);
 
 CREATE TABLE IF NOT EXISTS current_beliefs (
   belief_id TEXT PRIMARY KEY,

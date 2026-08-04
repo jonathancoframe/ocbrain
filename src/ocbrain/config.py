@@ -392,9 +392,24 @@ class CuratorConfig:
 
 
 @dataclass(frozen=True)
+class DeslopConfig:
+    # Whether a client's closeout is refused when its summary trips an enforced
+    # slop rule. Off by default, and the default is the point: a rejected
+    # closeout loses the client's work, and the closeout-to-evidence path is the
+    # single largest supply of curator-eligible evidence. Findings ride along in
+    # the receipt as `slop_findings` so the writer sees them either way; turn
+    # this on once you trust the rules against your own corpus.
+    reject_closeout_slop: bool = False
+    # Repairs applied per unattended `ocbrain deslop --apply` run. A cap means a
+    # rule that starts over-firing damages a handful of beliefs, not the corpus.
+    max_repairs_per_run: int = 8
+
+
+@dataclass(frozen=True)
 class OcbrainConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     curator: CuratorConfig = field(default_factory=CuratorConfig)
+    deslop: DeslopConfig = field(default_factory=DeslopConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     correction: CorrectionConfig = field(default_factory=CorrectionConfig)

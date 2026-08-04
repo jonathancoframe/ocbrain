@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ocbrain.closeout import record_closeout
+from ocbrain.config import load_config
 from ocbrain.core_v1 import (
     CORE_V1_SCHEMA_VERSION,
     append_core_event,
@@ -29,6 +30,7 @@ from ocbrain.core_v1 import (
     search_core_v1,
     sha256_text,
 )
+from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
 from ocbrain.ids import stable_id
 from ocbrain.scope import (
@@ -1246,6 +1248,22 @@ def closeout_v1(
     awaiting: str | None,
     actor: str,
 ) -> dict[str, Any]:
+    # Report the writing standard back to whoever wrote the summary. Reporting
+    # rather than refusing is the default: the curator gate already stops slop
+    # from becoming a served belief, and refusing a closeout throws away the
+    # client's work over a style rule. `deslop.reject_closeout_slop` hardens it
+    # for an operator who has calibrated the rules against their own corpus --
+    # and it is checked here, before anything is written, because a refusal after
+    # the receipt exists would leave the closeout recorded and the caller told it
+    # failed.
+    slop = find_slop(summary, {"lifecycle": "durable"}, rules=ENFORCED_RULE_IDS)
+    if slop and load_config().deslop.reject_closeout_slop:
+        raise ValueError(
+            "closeout summary trips "
+            + ", ".join(finding.rule for finding in slop)
+            + "; state one durable fact per closeout, or set "
+            "deslop.reject_closeout_slop=false to report instead of refuse"
+        )
     receipt = record_closeout(
         conn,
         task_ref=task_ref,
@@ -1283,6 +1301,8 @@ def closeout_v1(
         artifact_ref=f"closeout:{receipt['id']}",
     )
     receipt["evidence_id"] = evidence_id
+    if slop:
+        receipt["slop_findings"] = [finding.to_dict() for finding in slop]
     if automatic_activation_enabled(conn):
         try:
             receipt["auto_compiled_belief_id"] = auto_compile_evidence(

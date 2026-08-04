@@ -41,12 +41,15 @@ A 15-minute interval suits a machine in daily use.
 
 ## brain-promote.sh — promote and retire
 
-Five ordered stages: curate → hygiene → rematerialize wiki → lint → rebuild
-vectors. Each continues on failure so one bad stage cannot strand the rest.
+Six ordered stages: curate → hygiene → deslop → rematerialize wiki → lint →
+rebuild vectors. Each continues on failure so one bad stage cannot strand the
+rest.
 
-**Step 1 is the only hosted call**, and it is digest-gated: if no eligible
-evidence changed since the last run, it exits without contacting the provider. A
-quiet cycle is therefore free, which is what makes an hourly schedule reasonable.
+**Step 1 is the only hosted call by default**, and it is digest-gated: if no
+eligible evidence changed since the last run, it exits without contacting the
+provider. A quiet cycle is therefore free, which is what makes an hourly schedule
+reasonable. Deslop runs mechanical-only unless you opt in, so it stays free and
+its findings are reproducible across runs.
 
 Environment:
 
@@ -57,6 +60,8 @@ Environment:
 | `OCBRAIN_PROMOTE_MAX_BELIEFS` | `24` | Upper bound per run; fewer is better |
 | `OCBRAIN_HYGIENE_CLASSES` | all three | e.g. `--class expired` to restrict |
 | `OCBRAIN_HYGIENE_APPLY` | `0` (report only) | `1` lets the sweep retire beliefs |
+| `OCBRAIN_DESLOP_JUDGE` | `0` | `1` adds the actionability pass — one hosted call per cycle |
+| `OCBRAIN_DESLOP_APPLY` | `0` (report only) | `1` lets it repair — one hosted call per repaired belief |
 | `OCBRAIN_PROMOTE_BUDGET_SECONDS` | `1800` | Ceiling on the curate stage |
 
 The API key is read from the environment, falling back to `~/.common`. Only the
@@ -90,6 +95,27 @@ Three classes, each separately counted so a run reports *why* it acted:
   belief for unrelated queries describe the ranker, not the belief; acting on
   them retires good facts for the ranker's mistakes. Set the watermark after any
   ranking change.
+
+### What deslop reports
+
+Two things, and neither is a deletion:
+
+- **Belief findings.** The mechanical rules (`fused-claims`,
+  `temporal-in-durable`, `current-without-expiry`, `no-checkable-content`) plus,
+  with `OCBRAIN_DESLOP_JUDGE=1`, the model-judged `unactionable` rule. With
+  `OCBRAIN_DESLOP_APPLY=1` findings are repaired by rewriting or splitting; a
+  repair may only subtract or reorganize the original's own words, and one that
+  adds a token is rejected before anything is written.
+  `deslop.max_repairs_per_run` caps an unattended run.
+- **Volume.** Session transcripts are imported as a sliding window, so an append
+  mints a fresh evidence row for the same transcript. The report names how many
+  projection rows and megabytes that costs. `deslop --volume --apply` evicts
+  them, and `ocbrain sync --full` refolds every row from the ledger — a cache
+  eviction, not a deletion. See [DESLOP.md](DESLOP.md).
+
+Only *enforced* rules and the judged verdict may act unattended. Advisory
+findings report and wait for a human, because a rule that cannot distinguish a
+defect from a judgement call must not retire a belief on its own.
 
 Retirement is always a **soft** retraction, undoable with
 `ocbrain hygiene --restore <belief_id>`. A hard retraction would permanently

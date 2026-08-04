@@ -9,14 +9,15 @@
 #
 #   1. curate   — compile eligible evidence into wiki facts (hosted model call)
 #   2. hygiene  — retire expired / never-retrieved / badly-judged beliefs
-#   3. wiki     — rematerialize the wiki, which is also what deletes orphan pages
-#   4. lint     — post-condition check on the materialized tree
-#   5. vectors  — rebuild the dense sidecar so new facts are semantically findable
+#   3. deslop   — report badly-written beliefs and re-windowed evidence volume
+#   4. wiki     — rematerialize the wiki, which is also what deletes orphan pages
+#   5. lint     — post-condition check on the materialized tree
+#   6. vectors  — rebuild the dense sidecar so new facts are semantically findable
 #
 # NOT installed by default. OCBrain ships no scheduler; an operator opts in by
 # loading a launchd agent (see docs/SCHEDULED_MAINTENANCE.md). Step 1 is the only
-# one that leaves the machine, and it is digest-gated: an unchanged corpus makes
-# no API call, so a quiet cycle is free.
+# one that leaves the machine by default, and it is digest-gated: an unchanged
+# corpus makes no API call, so a quiet cycle is free.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +53,13 @@ HYGIENE_CLASSES="${OCBRAIN_HYGIENE_CLASSES:---class expired --class unused --cla
 # Report-only by default. Set OCBRAIN_HYGIENE_APPLY=1 to let it retire beliefs;
 # every retraction is soft and undoable with `ocbrain hygiene --restore`.
 HYGIENE_APPLY="${OCBRAIN_HYGIENE_APPLY:-0}"
+
+# Deslop runs mechanical-only here, so the scheduled loop stays free and
+# deterministic: no hosted call, same findings for the same corpus. Set
+# OCBRAIN_DESLOP_APPLY=1 to let it repair (that DOES make hosted calls, one per
+# repaired belief), and OCBRAIN_DESLOP_JUDGE=1 to add the actionability pass.
+DESLOP_APPLY="${OCBRAIN_DESLOP_APPLY:-0}"
+DESLOP_JUDGE="${OCBRAIN_DESLOP_JUDGE:-0}"
 
 echo "== $(date -u +%FT%TZ) brain-promote start =="
 
@@ -119,7 +127,22 @@ fi
 "$PY" -m ocbrain.cli "${hygiene_args[@]}" \
   || echo "hygiene step failed; continuing"
 
-# 3. Rematerialize the wiki. A full rebuild + atomic swap is what removes pages
+# 3. Report knowledge-slop, and the projection volume spent on re-windowed
+# transcripts. Mechanical-only unless the operator opts into the judged pass, so
+# by default this step is free and its findings are reproducible.
+deslop_args=(--db "$DB" deslop)
+if [[ "$DESLOP_JUDGE" != "1" ]]; then
+  deslop_args+=(--mechanical-only)
+fi
+if [[ "$DESLOP_APPLY" == "1" ]]; then
+  deslop_args+=(--apply)
+fi
+"$PY" -m ocbrain.cli "${deslop_args[@]}" \
+  || echo "deslop step failed; continuing"
+"$PY" -m ocbrain.cli --db "$DB" deslop --volume \
+  || echo "deslop volume report failed; continuing"
+
+# 4. Rematerialize the wiki. A full rebuild + atomic swap is what removes pages
 # for beliefs retired above; retirements outside a curate run leave orphans until
 # this happens.
 "$PY" - "$DB" "$WIKI_DIR" <<'PYEOF' || echo "wiki rematerialize failed; continuing"
@@ -138,12 +161,12 @@ finally:
     conn.close()
 PYEOF
 
-# 4. Post-condition check on the tree we just wrote. Non-zero means findings, so
+# 5. Post-condition check on the tree we just wrote. Non-zero means findings, so
 # surface them in the log rather than swallowing the exit code.
 "$PY" "$REPO/scripts/wiki-lint.py" "$WIKI_DIR" --db "$DB" \
   || echo "wiki-lint reported findings (see above)"
 
-# 5. Rebuild the dense sidecar so newly promoted facts are semantically findable.
+# 6. Rebuild the dense sidecar so newly promoted facts are semantically findable.
 # Retrieval degrades to lexical-only against a stale sidecar, so a promote that
 # skipped this would leave new knowledge half-reachable.
 "$PY" -m ocbrain.cli --db "$DB" vector-build \
