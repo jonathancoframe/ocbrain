@@ -61,6 +61,19 @@ from ocbrain.events import (
 )
 from ocbrain.fsutil import file_fingerprint, history_runtime
 from ocbrain.hybrid import build_vector_index, vector_status
+from ocbrain.hygiene import CLASSES as HYGIENE_CLASSES
+from ocbrain.hygiene import (
+    DEFAULT_BATCH_CAP,
+    DEFAULT_MIN_AGE_DAYS,
+    DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
+    DEFAULT_UNHELPFUL_THRESHOLD,
+    apply_retirements,
+    plan_retirements,
+    restore,
+    set_feedback_watermark,
+    supersede,
+    verify_serving_invariants,
+)
 from ocbrain.ids import content_hash, stable_id
 from ocbrain.mcp import serve
 from ocbrain.mcp_v1 import (
@@ -251,7 +264,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     correct_parser.add_argument("--target-id", required=True)
     correct_parser.add_argument(
         "--op",
-        choices=["mark_wrong", "edit", "pin", "demote", "reframe", "retract"],
+        choices=["mark_wrong", "edit", "pin", "demote", "reframe", "retract", "restore"],
         required=True,
     )
     correct_parser.add_argument("--body")
@@ -813,6 +826,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     curated_apply.set_defaults(func=cmd_curated_apply)
 
+    hygiene_parser = commands.add_parser(
+        "hygiene",
+        help="Retire expired, never-retrieved, or badly-judged beliefs",
+    )
+    hygiene_parser.add_argument(
+        "--class",
+        dest="classes",
+        action="append",
+        choices=list(HYGIENE_CLASSES),
+        help="restrict to one class; repeatable (default: all)",
+    )
+    hygiene_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="soft-retract the selected beliefs (default: report only)",
+    )
+    hygiene_parser.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS)
+    hygiene_parser.add_argument("--batch-cap", type=int, default=DEFAULT_BATCH_CAP)
+    hygiene_parser.add_argument(
+        "--min-feedback-observations",
+        type=int,
+        default=DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
+    )
+    hygiene_parser.add_argument(
+        "--unhelpful-threshold", type=float, default=DEFAULT_UNHELPFUL_THRESHOLD
+    )
+    hygiene_parser.add_argument(
+        "--set-watermark",
+        action="store_true",
+        help=(
+            "stamp now as the point from which retrieval feedback counts, then exit; "
+            "run this after a ranking change so stale verdicts do not retire good facts"
+        ),
+    )
+    hygiene_parser.add_argument(
+        "--restore",
+        metavar="BELIEF_ID",
+        help="put a soft-retracted belief back into service, then exit",
+    )
+    hygiene_parser.add_argument(
+        "--supersede",
+        nargs=2,
+        metavar=("BELIEF_ID", "SUCCESSOR_ID"),
+        help="mark one belief superseded by another, then exit",
+    )
+    hygiene_parser.set_defaults(func=cmd_hygiene)
+
     doctor_parser = commands.add_parser("doctor", help="Check the core and stdio MCP")
     doctor_parser.add_argument("--timeout", type=float, default=8.0)
     doctor_parser.add_argument("--launcher", type=Path)
@@ -939,7 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
     correct.add_argument("--target-id", required=True)
     correct.add_argument(
         "--op",
-        choices=["mark_wrong", "edit", "pin", "demote", "reframe", "retract"],
+        choices=["mark_wrong", "edit", "pin", "demote", "reframe", "retract", "restore"],
         required=True,
     )
     correct.add_argument("--body")
@@ -1399,6 +1459,48 @@ def cmd_curated_apply(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     output(args, {"action": "curated-apply", **result})
+    return 0
+
+
+def cmd_hygiene(args: argparse.Namespace) -> int:
+    conn = open_existing_core_v1(args.db)
+    try:
+        if args.set_watermark:
+            stamp = set_feedback_watermark(conn)
+            conn.commit()
+            output(args, {"action": "hygiene", "feedback_watermark": stamp})
+            return 0
+        if args.supersede:
+            belief_id, successor_id = args.supersede
+            result = supersede(conn, belief_id=belief_id, successor_id=successor_id)
+            output(args, {"action": "hygiene", "superseded": result})
+            return 0
+        if args.restore:
+            output(
+                args,
+                {"action": "hygiene", "restored": restore(conn, belief_id=args.restore)},
+            )
+            return 0
+        plan = plan_retirements(
+            conn,
+            classes=tuple(args.classes) if args.classes else HYGIENE_CLASSES,
+            min_age_days=args.min_age_days,
+            batch_cap=args.batch_cap,
+            min_feedback_observations=args.min_feedback_observations,
+            unhelpful_threshold=args.unhelpful_threshold,
+        )
+        if args.apply:
+            plan = apply_retirements(conn, plan)
+        # Report the sample, not every id: a capped run can still name hundreds.
+        verbose_keys = {"targets", "applied_belief_ids"}
+        payload = {key: value for key, value in plan.items() if key not in verbose_keys}
+        payload["target_sample"] = plan.get("targets", [])[:12]
+        payload["invariants"] = verify_serving_invariants(conn)
+        # Distinct from the plan's `applied` count, which only exists after a run.
+        payload["apply_requested"] = bool(args.apply)
+    finally:
+        conn.close()
+    output(args, {"action": "hygiene", **payload})
     return 0
 
 

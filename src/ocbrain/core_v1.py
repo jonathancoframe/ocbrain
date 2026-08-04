@@ -880,8 +880,39 @@ def _project_correction(conn: sqlite3.Connection, event: sqlite3.Row, body: dict
     elif op in {"mark_wrong", "retract"}:
         updated["status"] = "retracted"
         updated["serve"] = 0
+    elif op == "restore":
+        # The inverse of a soft retraction, and the reason a soft retraction is
+        # worth distinguishing from a hard one at all. Refused for anything
+        # tombstoned or hard-corrected so those stay terminal under both
+        # incremental folding and a full rebuild; a restore event that loses this
+        # check is ignored rather than honoured.
+        if _restore_blocked(conn, belief_id):
+            return
+        updated["status"] = "current"
+        updated["serve"] = 1
     updated["last_event_id"] = event["id"]
     _replace_belief_row(conn, updated)
+
+
+def _restore_blocked(conn: sqlite3.Connection, belief_id: str) -> str | None:
+    """Return why a belief may not be restored, or ``None`` when it may."""
+    tombstone = conn.execute(
+        "SELECT 1 FROM brain_events WHERE kind='tombstone_recorded' "
+        "AND json_extract(body_json, '$.target')=? LIMIT 1",
+        (belief_id,),
+    ).fetchone()
+    if tombstone is not None:
+        return "tombstoned"
+    hard = conn.execute(
+        "SELECT 1 FROM brain_events WHERE kind='correction_recorded' "
+        "AND json_extract(body_json, '$.target_id')=? "
+        "AND json_extract(body_json, '$.hard')=1 "
+        "AND json_extract(body_json, '$.op') IN ('mark_wrong','retract','demote') LIMIT 1",
+        (belief_id,),
+    ).fetchone()
+    if hard is not None:
+        return "hard-corrected"
+    return None
 
 
 def _project_tombstone(conn: sqlite3.Connection, event: sqlite3.Row, body: dict[str, Any]) -> None:

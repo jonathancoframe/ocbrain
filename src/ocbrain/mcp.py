@@ -1737,7 +1737,15 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
                         },
                         "op": {
                             "type": "string",
-                            "enum": ["mark_wrong", "edit", "pin", "demote", "reframe", "retract"],
+                            "enum": [
+                                "mark_wrong",
+                                "edit",
+                                "pin",
+                                "demote",
+                                "reframe",
+                                "retract",
+                                "restore",
+                            ],
                         },
                         "body": {"type": "string"},
                         "actor": {"type": "string"},
