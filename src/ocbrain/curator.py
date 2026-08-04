@@ -2,8 +2,12 @@
 
 This is an explicit, operator-invoked hosted operation. Only already-redacted,
 bounded evidence bodies that pass project, visibility, and egress gates are sent.
-Raw transcripts, confidential/secret objects, and objects marked local-only or
-prohibited are never eligible.
+Raw transcripts are never eligible -- they are excluded by kind.
+
+Which egress policies qualify is configurable, because the default that clients
+write is ``local_only`` and a brain full of it would otherwise have nothing to
+curate. ``prohibited`` egress and ``secret`` visibility are refused in code
+regardless of configuration, and every applied run records an egress audit.
 
 Every claim the model returns is verified locally before it can become a belief:
 the key, title, body, category, lifecycle, and confidence are range-checked, and
@@ -23,6 +27,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -172,27 +177,71 @@ def load_env_value(path: Path | None, name: str) -> str | None:
     return None
 
 
+# Never eligible for curation, whatever the operator configures. `prohibited` and
+# `secret` are the floor: an operator can widen what their own curator may read,
+# but not past the two markers that mean "this must not leave".
+FORBIDDEN_EGRESS_POLICIES = frozenset({"prohibited"})
+FORBIDDEN_VISIBILITIES = frozenset({"secret"})
+
+
+def resolve_selection_policy(
+    *,
+    egress_policies: Iterable[str] | None = None,
+    visibilities: Iterable[str] | None = None,
+    allow_hosted_egress: bool = False,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolve the effective egress/visibility allow-lists, enforcing the floor."""
+    if egress_policies is None:
+        egress_policies = (
+            ("hosted_ok", "approval_required") if allow_hosted_egress else ("hosted_ok",)
+        )
+    elif allow_hosted_egress and "approval_required" not in egress_policies:
+        egress_policies = (*egress_policies, "approval_required")
+    if visibilities is None:
+        visibilities = ("public", "internal")
+    resolved_egress = tuple(
+        sorted({str(p) for p in egress_policies} - FORBIDDEN_EGRESS_POLICIES)
+    )
+    resolved_visibility = tuple(
+        sorted({str(v) for v in visibilities} - FORBIDDEN_VISIBILITIES)
+    )
+    if not resolved_egress or not resolved_visibility:
+        raise ValueError(
+            "curator selection policy admits nothing; prohibited egress and secret "
+            "visibility are never eligible"
+        )
+    return resolved_egress, resolved_visibility
+
+
 def select_evidence(
     conn,
     *,
     limit: int,
     allow_hosted_egress: bool = False,
     project: str | None = None,
+    egress_policies: Iterable[str] | None = None,
+    visibilities: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Select hosted-eligible evidence for one project.
+    """Select curation-eligible evidence for one project.
 
-    The egress gate is the load-bearing part: only ``public``/``internal``
-    visibility and ``hosted_ok`` policy qualify by default, so raw transcripts
-    and anything local-only, prohibited, confidential, or secret is structurally
-    ineligible rather than merely filtered.
+    The egress gate is the load-bearing part. By default only ``public``/
+    ``internal`` visibility and ``hosted_ok`` policy qualify, so a fresh install
+    sends nothing it was not explicitly given. An operator may widen the
+    allow-lists via ``curator.egress_policies`` -- necessary on any brain whose
+    evidence is written as ``local_only``, which is the default for client
+    writes -- but ``prohibited`` egress and ``secret`` visibility are refused in
+    code regardless. Raw transcripts stay ineligible by kind either way.
     """
     if not project:
-        raise ValueError("project is required for hosted evidence selection")
-    placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
-    egress_policies = (
-        ("hosted_ok", "approval_required") if allow_hosted_egress else ("hosted_ok",)
+        raise ValueError("project is required for evidence selection")
+    resolved_egress, resolved_visibility = resolve_selection_policy(
+        egress_policies=egress_policies,
+        visibilities=visibilities,
+        allow_hosted_egress=allow_hosted_egress,
     )
-    egress_placeholders = ",".join("?" for _ in egress_policies)
+    placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
+    egress_placeholders = ",".join("?" for _ in resolved_egress)
+    visibility_placeholders = ",".join("?" for _ in resolved_visibility)
     rows = [
         dict(row)
         for row in conn.execute(
@@ -201,12 +250,17 @@ def select_evidence(
                    scope_type, scope_id, visibility, egress_policy
             FROM evidence_objects
             WHERE kind IN ({placeholders})
-              AND visibility IN ('public', 'internal')
+              AND visibility IN ({visibility_placeholders})
               AND egress_policy IN ({egress_placeholders})
               AND scope_type = 'project' AND scope_id = ?
             ORDER BY recorded_at DESC, evidence_id DESC
             """,  # noqa: S608 - placeholders derive only from fixed local constants
-            (*tuple(sorted(ELIGIBLE_KINDS)), *egress_policies, f"project:{project}"),
+            (
+                *tuple(sorted(ELIGIBLE_KINDS)),
+                *resolved_visibility,
+                *resolved_egress,
+                f"project:{project}",
+            ),
         )
     ]
 
@@ -496,6 +550,55 @@ def validate_claims(
     return list(accepted.values()), rejected
 
 
+def record_curation_egress(
+    conn,
+    *,
+    evidence: list[dict[str, Any]],
+    provider: str,
+    model: str,
+    project: str,
+    egress_policies: tuple[str, ...],
+) -> str:
+    """Record exactly what this run sent, before it is sent.
+
+    Widening the curator's allow-list is only defensible if every send is
+    accountable afterwards. ``egress_audits`` existed for this and had never been
+    written to; a hosted curation run is precisely the event it is for.
+    """
+    from ocbrain.egress import record_egress_audit
+
+    payload_text = "\n\n".join(str(row["body"]) for row in evidence)
+    included = [
+        {
+            "evidence_id": str(row["evidence_id"]),
+            "kind": str(row["kind"]),
+            "scope_id": str(row["scope_id"]),
+            "visibility": str(row["visibility"]),
+            "egress_policy": str(row["egress_policy"]),
+            "characters": len(str(row["body"])),
+        }
+        for row in evidence
+    ]
+    audit_id = record_egress_audit(
+        conn,
+        {
+            "target": f"{provider}:{model}",
+            "context": {
+                "project": project,
+                "purpose": "wiki_curation",
+                "curator": CURATOR_VERSION,
+                "egress_policies": list(egress_policies),
+            },
+            "query": None,
+            "included": included,
+            "rejected": [],
+            "payload_hash": hashlib.sha256(payload_text.encode("utf-8")).hexdigest(),
+        },
+    )
+    conn.commit()
+    return audit_id
+
+
 def claim_valid_until(claim: dict[str, Any], *, current_ttl_days: int, now: datetime) -> str | None:
     """Expiry for a claim, or ``None`` for one that does not age out.
 
@@ -614,6 +717,8 @@ __all__ = [
     "CURATOR_VERSION",
     "DEFAULT_CURRENT_TTL_DAYS",
     "ELIGIBLE_KINDS",
+    "FORBIDDEN_EGRESS_POLICIES",
+    "FORBIDDEN_VISIBILITIES",
     "PROVIDER_DEFAULTS",
     "SYSTEM_PROMPT",
     "WIKI_STATE_SCHEMA",
@@ -623,7 +728,9 @@ __all__ = [
     "input_digest",
     "load_env_value",
     "now_iso",
+    "record_curation_egress",
     "request_claims",
+    "resolve_selection_policy",
     "select_evidence",
     "validate_claims",
 ]

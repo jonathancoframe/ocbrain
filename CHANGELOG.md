@@ -5,6 +5,20 @@
 - Use OpenAI's `max_completion_tokens` field for curator requests while keeping
   Moonshot on its compatible endpoint's `max_tokens` field. The live
   `gpt-5-mini` endpoint rejects the legacy field.
+- Make the curator's evidence eligibility an operator declaration instead of a
+  hardcoded rule. `curator.egress_policies` ships as `hosted_ok` only, so a fresh
+  install still sends nothing it was not given, but a brain whose evidence is all
+  `local_only` — the default for anything written through a client — can now let
+  its own curator read its own notes. `prohibited` egress and `secret` visibility
+  are refused in code and cannot be configured on; a policy admitting nothing is
+  an error rather than a silent empty selection.
+  Without this the curator was unrunnable on a real brain: 0 of 2,545 evidence
+  objects qualified, so the promote loop reported success while promoting nothing.
+- Record an `egress_audits` row on every applied curation run, before the send,
+  naming each evidence id, kind, scope, policy and size plus a payload hash. That
+  table existed and had never been written to. Widening what the curator may read
+  is only defensible if every send is accountable afterwards, and the audit
+  deliberately stores identity and size rather than the bodies themselves.
 - Always record a closeout summary as evidence, and gate only the promotion step
   on `automatic_activation`. Both used to sit behind that flag, which conflated
   *recording evidence* with *promoting it to a served belief* — so turning the
