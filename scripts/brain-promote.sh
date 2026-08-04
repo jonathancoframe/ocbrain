@@ -119,10 +119,12 @@ fi
 # this happens.
 "$PY" - "$DB" "$WIKI_DIR" <<'PYEOF' || echo "wiki rematerialize failed; continuing"
 import sys
+from pathlib import Path
+
 from ocbrain.db import connect
 from ocbrain.wiki import materialize_wiki
 
-db_path, wiki_dir = sys.argv[1], sys.argv[2]
+db_path, wiki_dir = Path(sys.argv[1]), Path(sys.argv[2])
 conn = connect(db_path)
 try:
     count = materialize_wiki(conn, wiki_dir, run={"action": "scheduled-rematerialize"})
