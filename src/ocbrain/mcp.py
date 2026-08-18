@@ -144,6 +144,32 @@ def strip_explicit_nulls(value: Any) -> Any:
     return value
 
 
+def nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Mark one property schema nullable without hiding its type.
+
+    Optionality must be spelled as a ``["<type>", "null"]`` union rather than an
+    ``{"anyOf": [<schema>, {"type": "null"}]}`` wrapper: strict providers accept
+    both, but some client harnesses flatten an ``anyOf`` property to an untyped
+    parameter, and their models then guess at the wire shape — JSON-encoded
+    arrays, ``"false"`` strings — which the dispatcher used to reject.
+    """
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        type_union: list[Any] = [type_value, "null"]
+    elif isinstance(type_value, list):
+        if "null" in type_value:
+            return schema
+        type_union = [*type_value, "null"]
+    else:
+        return {"anyOf": [schema, {"type": "null"}]}
+    nullable = dict(schema)
+    nullable["type"] = type_union
+    enum_value = nullable.get("enum")
+    if isinstance(enum_value, list) and None not in enum_value:
+        nullable["enum"] = [*enum_value, None]
+    return nullable
+
+
 def provider_safe_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Make omission explicit for providers that populate every schema field."""
     transformed = dict(schema)
@@ -154,8 +180,8 @@ def provider_safe_schema(schema: dict[str, Any]) -> dict[str, Any]:
             safe_properties: dict[str, Any] = {}
             for name, value in properties.items():
                 safe_value = provider_safe_schema(value) if isinstance(value, dict) else value
-                if name not in originally_required:
-                    safe_value = {"anyOf": [safe_value, {"type": "null"}]}
+                if name not in originally_required and isinstance(safe_value, dict):
+                    safe_value = nullable_schema(safe_value)
                 safe_properties[name] = safe_value
             transformed["properties"] = safe_properties
             transformed["required"] = list(properties)
@@ -570,14 +596,14 @@ def call_tool(
         )
     if name == "brain.context":
         query = require_string(arguments, "query")
-        limit = min(max(int(arguments.get("limit", 12)), 1), 50)
+        limit = min(max(int_arg(arguments, "limit", 12), 1), 50)
         context = context_from_arguments(arguments)
         payload, handles = build_context(
             conn,
             query,
             context=context,
             limit=limit,
-            cross_scope=bool(arguments.get("cross_scope")),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             at_ts=optional_string(arguments, "at_ts"),
         )
         retrieval_use_id, retrieval_use_status = _log_context_and_issue_if_available(
@@ -595,7 +621,7 @@ def call_tool(
             conn,
             require_string(arguments, "id"),
             context=context,
-            max_chars=min(max(int(arguments.get("max_chars", 8_000)), 256), 20_000),
+            max_chars=min(max(int_arg(arguments, "max_chars", 8_000), 256), 20_000),
         )
         retrieval_use_id, retrieval_use_status = _log_retrieval_if_available(
             conn,
@@ -610,7 +636,7 @@ def call_tool(
         return text_result(payload)
     if name == "brain.search":
         query = require_string(arguments, "query")
-        limit = min(max(int(arguments.get("limit", 10)), 1), 50)
+        limit = min(max(int_arg(arguments, "limit", 10), 1), 50)
         filters = checked_filters(arguments.get("filters", {}))
         context = context_from_arguments(arguments)
         if context.to_dict() or arguments.get("cross_scope"):
@@ -619,7 +645,7 @@ def call_tool(
                 query,
                 context=context,
                 limit=limit,
-                cross_scope=bool(arguments.get("cross_scope")),
+                cross_scope=bool_arg(arguments, "cross_scope"),
                 at_ts=optional_string(arguments, "at_ts"),
             )
             retrieval_use_id, retrieval_use_status = _log_retrieval_if_available(
@@ -653,13 +679,13 @@ def call_tool(
         return text_result(result_rows)
     if name == "brain.preview":
         query = require_string(arguments, "query")
-        limit = min(max(int(arguments.get("limit", 12)), 1), 50)
+        limit = min(max(int_arg(arguments, "limit", 12), 1), 50)
         payload = retrieve(
             conn,
             query,
             context=context_from_arguments(arguments),
             limit=limit,
-            cross_scope=bool(arguments.get("cross_scope")),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             at_ts=optional_string(arguments, "at_ts"),
         )
         retrieval_use_id, retrieval_use_status = _log_retrieval_if_available(
@@ -681,14 +707,14 @@ def call_tool(
             context=context_from_arguments(arguments),
             target=target,
             query=optional_string(arguments, "query"),
-            record=bool(arguments.get("record")),
+            record=bool_arg(arguments, "record"),
         )
         if arguments.get("record"):
             conn.commit()
         return text_result(payload)
     if name == "brain.digest":
         project = optional_string(arguments, "project")
-        limit = min(max(int(arguments.get("limit", 12)), 1), 50)
+        limit = min(max(int_arg(arguments, "limit", 12), 1), 50)
         context = context_from_arguments(arguments)
         since_ts = optional_string(arguments, "since")
         retrieval_use_id, retrieval_use_status = _log_retrieval_if_available(
@@ -776,7 +802,7 @@ def call_tool(
                 op=require_string(arguments, "op"),
                 body=optional_string(arguments, "body"),
                 author=optional_string(arguments, "actor") or "human",
-                hard=bool(arguments.get("hard")),
+                hard=bool_arg(arguments, "hard"),
             )
             conn.commit()
             return text_result({"event_id": event_id, "kind": "correction_recorded"})
@@ -822,7 +848,7 @@ def call_tool(
             op=require_string(arguments, "op"),
             body=optional_string(arguments, "body"),
             author=optional_string(arguments, "actor") or "human",
-            hard=bool(arguments.get("hard")),
+            hard=bool_arg(arguments, "hard"),
         )
         conn.commit()
         return text_result({"event_id": event_id, "kind": "correction_recorded"})
@@ -888,12 +914,12 @@ def call_tool(
         conn.commit()
         return text_result(receipt)
     if name == "brain.proposals":
-        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        limit = min(max(int_arg(arguments, "limit", 50), 1), 100)
         context = context_from_arguments(arguments)
         proposals = list_compilation_proposals(
             conn,
             context=context,
-            include_decided=bool(arguments.get("include_decided")),
+            include_decided=bool_arg(arguments, "include_decided"),
             limit=limit,
         )
         payload = {"proposals": proposals}
@@ -938,19 +964,17 @@ def call_tool_v1(
     if name in {"brain.context", "brain.search", "brain.preview"} and (
         at_ts is not None and (not isinstance(at_ts, str) or bool(at_ts.strip()))
     ):
-        raise ValueError(
-            "at_ts (as-of time travel) is not supported by ocbrain.core.v1; omit it"
-        )
+        raise ValueError("at_ts (as-of time travel) is not supported by ocbrain.core.v1; omit it")
     if name == "brain.context":
         query = require_string(arguments, "query")
         context = context_from_arguments(arguments)
-        limit = min(max(int(arguments.get("limit", 12)), 1), 50)
+        limit = min(max(int_arg(arguments, "limit", 12), 1), 50)
         packet, handles = build_context_v1(
             conn,
             query,
             context=context,
             limit=limit,
-            cross_scope=bool(arguments.get("cross_scope")),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
         )
         packet, handles = prepare_retrieval_packet_v1(packet, handles)
@@ -970,7 +994,7 @@ def call_tool_v1(
             conn,
             require_string(arguments, "id"),
             context=context,
-            max_chars=min(max(int(arguments.get("max_chars", 8_000)), 256), 20_000),
+            max_chars=min(max(int_arg(arguments, "max_chars", 8_000), 256), 20_000),
             delivery_target=delivery_target,
         )
         retrieval_id = record_core_v1_retrieval(
@@ -992,8 +1016,8 @@ def call_tool_v1(
             conn,
             require_string(arguments, "query"),
             context=context_from_arguments(arguments),
-            limit=min(max(int(arguments.get("limit", 10)), 1), 50),
-            cross_scope=bool(arguments.get("cross_scope")),
+            limit=min(max(int_arg(arguments, "limit", 10), 1), 50),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
         )
         conn.commit()
@@ -1005,8 +1029,8 @@ def call_tool_v1(
             conn,
             query,
             context=context,
-            limit=min(max(int(arguments.get("limit", 12)), 1), 50),
-            cross_scope=bool(arguments.get("cross_scope")),
+            limit=min(max(int_arg(arguments, "limit", 12), 1), 50),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
         )
         packet, handles = prepare_retrieval_packet_v1(packet, handles, preview=True)
@@ -1029,7 +1053,7 @@ def call_tool_v1(
             context=context_from_arguments(arguments),
             target=target,
             query=optional_string(arguments, "query"),
-            record=bool(arguments.get("record")),
+            record=bool_arg(arguments, "record"),
         )
         if arguments.get("record"):
             conn.commit()
@@ -1041,7 +1065,7 @@ def call_tool_v1(
         payload = digest_v1(
             conn,
             context=context,
-            limit=min(max(int(arguments.get("limit", 12)), 1), 50),
+            limit=min(max(int_arg(arguments, "limit", 12), 1), 50),
             since=optional_string(arguments, "since"),
             delivery_target=delivery_target,
         )
@@ -1068,9 +1092,9 @@ def call_tool_v1(
             conn,
             object_id,
             context=context,
-            include_candidate=bool(arguments.get("include_candidate")),
-            include_private=bool(arguments.get("include_private")),
-            cross_scope=bool(arguments.get("cross_scope")),
+            include_candidate=bool_arg(arguments, "include_candidate"),
+            include_private=bool_arg(arguments, "include_private"),
+            cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
         )
         retrieval_id = record_core_v1_retrieval(
@@ -1146,7 +1170,7 @@ def call_tool_v1(
             op=require_string(arguments, "op"),
             body=optional_string(arguments, "body"),
             actor=optional_string(arguments, "actor") or "human",
-            hard=bool(arguments.get("hard")),
+            hard=bool_arg(arguments, "hard"),
         )
         conn.commit()
         return text_result(payload)
@@ -1167,8 +1191,8 @@ def call_tool_v1(
         return text_result(
             proposals_v1(
                 conn,
-                limit=min(max(int(arguments.get("limit", 50)), 1), 100),
-                include_decided=bool(arguments.get("include_decided")),
+                limit=min(max(int_arg(arguments, "limit", 50), 1), 100),
+                include_decided=bool_arg(arguments, "include_decided"),
             )
         )
     if name == "brain.forget":
@@ -1948,9 +1972,30 @@ def scope_from_arguments(arguments: dict[str, Any]) -> ScopeTag | None:
     return ScopeTag.from_dict(value)
 
 
+def decoded_array_arg(value: Any) -> Any:
+    """Decode an array argument a client double-encoded as a JSON string.
+
+    The same seam ``coerce_object_arg`` provides for objects: a harness that
+    renders array parameters as untyped strings sends ``"[\\"id\\"]"``, and the
+    call should not fail when the entries themselves are correct.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
 def string_list(value: Any, name: str) -> list[str]:
     if value is None:
         return []
+    value = decoded_array_arg(value)
+    if isinstance(value, str):
+        # A bare id where an array was expected is unambiguous; blank means omitted.
+        value = [value] if value.strip() else []
     if not isinstance(value, list):
         raise ValueError(f"{name} must be an array")
     if any(not isinstance(item, str) or not item.strip() for item in value):
@@ -1961,6 +2006,9 @@ def string_list(value: Any, name: str) -> list[str]:
 def object_list(value: Any, name: str) -> list[dict[str, Any]]:
     if value is None:
         return []
+    value = decoded_array_arg(value)
+    if isinstance(value, str) and not value.strip():
+        return []
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
         raise ValueError(f"{name} must be an array of objects")
     return [dict(item) for item in value]
@@ -1970,9 +2018,39 @@ def optional_string(arguments: dict[str, Any], name: str) -> str | None:
     value = arguments.get(name)
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"{name} must be a non-empty string when provided")
+    if not value.strip():
+        # Strict-schema clients must populate every parameter; once nulls are
+        # stripped, an empty string is their only remaining spelling of "none".
+        return None
     return value
+
+
+def bool_arg(arguments: dict[str, Any], name: str) -> bool:
+    """Parse a boolean argument, tolerating the string spellings loose harnesses send."""
+    value = arguments.get(name)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "false", "no", "0", "null", "none"}:
+            return False
+        if text in {"true", "yes", "1"}:
+            return True
+        raise ValueError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
+    value = arguments.get(name, default)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        value = text
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
 
 
 def require_string(arguments: dict[str, Any], name: str) -> str:

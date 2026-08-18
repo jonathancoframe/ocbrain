@@ -63,15 +63,12 @@ def test_mcp_tools_are_knowledge_first(tmp_path):
     search_schema = by_name["brain.search"]["inputSchema"]
     assert search_schema["additionalProperties"] is False
     assert set(search_schema["required"]) == set(search_schema["properties"])
-    assert {branch.get("type") for branch in search_schema["properties"]["limit"]["anyOf"]} == {
-        "integer",
-        "null",
-    }
-    context_object = next(
-        branch
-        for branch in search_schema["properties"]["context"]["anyOf"]
-        if branch.get("type") == "object"
-    )
+    # Optional fields carry nullability on the type union itself, never as an
+    # anyOf wrapper: wrapped properties lose their type in some client
+    # harnesses, whose models then guess at the wire shape.
+    assert set(search_schema["properties"]["limit"]["type"]) == {"integer", "null"}
+    context_object = search_schema["properties"]["context"]
+    assert set(context_object["type"]) == {"object", "null"}
     assert context_object["additionalProperties"] is False
     assert set(context_object["required"]) == set(context_object["properties"])
 
