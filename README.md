@@ -194,6 +194,27 @@ Note `packages/ops` maintenance (`prune_knowledge`,
 `archive_unreferenced_catalog`) targets the **legacy** `knowledge` table and
 raises `no such table: knowledge` against a v1 core. Use `ocbrain hygiene`.
 
+### Repairing knowledge
+
+Hygiene retires beliefs that stopped earning their place. `ocbrain deslop`
+handles the other failure: a belief that is well-formed, sourced, schema-valid,
+and still fails to function as knowledge — several facts fused into one body, a
+durable claim written in the present tense, a present-state claim that can never
+age out. It **repairs rather than deletes**, and a repair may only subtract or
+reorganize the original's own words, never add to them.
+
+```bash
+ocbrain --db /absolute/core.sqlite deslop --mechanical-only   # free, deterministic
+ocbrain --db /absolute/core.sqlite deslop                     # adds the judged rule
+ocbrain --db /absolute/core.sqlite deslop --apply             # repair
+ocbrain --db /absolute/core.sqlite deslop --volume            # re-windowed evidence
+ocbrain --db /absolute/core.sqlite deslop --install-doctrine  # teach the standard
+```
+
+The same rules run at write time, so the curator rejects a slop claim before it
+becomes a belief and a closeout receipt reports findings back to whoever wrote
+it. See [docs/DESLOP.md](docs/DESLOP.md).
+
 ### Running it continuously
 
 The core installs no scheduler. `scripts/brain-sync.sh` (harvest) and
@@ -471,6 +492,8 @@ stratified audit, and explicit operator closeout remain separate gates.
 - [Agent use guide](docs/AGENT_USE_GUIDE.md)
 - [Runtime integration](docs/RUNTIME_INTEGRATION.md)
 - [Core operations and migration](docs/CORE_OPERATIONS.md)
+- [Deslop: knowledge quality](docs/DESLOP.md)
+- [Code quality](docs/CODE_QUALITY.md)
 - [Execution ledger](docs/CORE_ROADMAP_EXECUTION.md)
 - [Release history](docs/releases/)
 

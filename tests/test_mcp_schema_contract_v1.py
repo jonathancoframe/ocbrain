@@ -50,20 +50,25 @@ def _tools_by_name(conn, *, allow_writes=False):
     return {tool["name"]: tool for tool in response["result"]["tools"]}
 
 
+def _is_nullable(value):
+    if not isinstance(value, dict):
+        return False
+    type_value = value.get("type")
+    if isinstance(type_value, list) and "null" in type_value:
+        return True
+    branches = value.get("anyOf")
+    return isinstance(branches, list) and {"type": "null"} in branches
+
+
 def _non_nullable_properties(schema):
     """Top-level properties the schema advertises as required (not …|null).
 
-    ``provider_safe_schema`` wraps every optional field as
-    ``{"anyOf": [<schema>, {"type": "null"}]}`` and leaves required fields
-    unwrapped, so the unwrapped set is the real required signal on the wire.
+    ``provider_safe_schema`` marks every optional field nullable — a
+    ``["<type>", "null"]`` union, or an ``anyOf`` wrapper when the field has no
+    simple type — and leaves required fields alone, so the non-nullable set is
+    the real required signal on the wire.
     """
-    required = set()
-    for name, value in schema["properties"].items():
-        branches = value.get("anyOf") if isinstance(value, dict) else None
-        nullable = isinstance(branches, list) and {"type": "null"} in branches
-        if not nullable:
-            required.add(name)
-    return required
+    return {name for name, value in schema["properties"].items() if not _is_nullable(value)}
 
 
 def test_v1_schema_required_matches_dispatcher_for_every_tool(tmp_path):
@@ -80,27 +85,32 @@ def test_v1_schema_required_matches_dispatcher_for_every_tool(tmp_path):
         assert _non_nullable_properties(schema) == expected, name
 
 
+def _denulled(value):
+    """The informative half of a nullable property schema, whichever spelling."""
+    if isinstance(value, dict) and isinstance(value.get("anyOf"), list):
+        return value["anyOf"][0]
+    return value
+
+
 def test_closeout_schema_documents_conditional_requirements(tmp_path):
     tools = _tools_by_name(_seed_v1(tmp_path))
     properties = tools["brain.closeout"]["inputSchema"]["properties"]
     assert "Required" in properties["summary"]["description"]
-    task_ref_schema = properties["task_ref"]["anyOf"][0]
+    task_ref_schema = _denulled(properties["task_ref"])
     assert "Required unless context.task" in task_ref_schema["description"]
 
     for collection in ("actions", "outcomes"):
-        collection_schema = properties[collection]["anyOf"][0]
+        collection_schema = _denulled(properties[collection])
         collection_description = collection_schema["description"]
         assert "Empty features objects are treated as omitted" in collection_description
         item_properties = collection_schema["items"]["properties"]
-        features_schema = item_properties["features"]["anyOf"][0]
-        feature_schema = item_properties["feature_schema"]["anyOf"][0]
+        features_schema = _denulled(item_properties["features"])
+        feature_schema = _denulled(item_properties["feature_schema"])
         features_description = features_schema["description"]
         feature_schema_description = feature_schema["description"]
         assert "empty object is normalized as absent" in features_description
         assert "non-empty object requires feature_schema" in features_description
-        assert "Required and nonblank when features has entries" in (
-            feature_schema_description
-        )
+        assert "Required and nonblank when features has entries" in (feature_schema_description)
         assert "rejected when features is omitted or empty" in feature_schema_description
 
 
@@ -212,6 +222,143 @@ def test_double_encoded_scope_and_filters_use_shared_object_seam():
     )
     assert scope is not None
     assert scope.scope_id == "project:ocbrain"
+
+
+def test_v1_schema_optional_fields_keep_type_visible(tmp_path):
+    """Optional fields must stay typed on the wire.
+
+    A ``{"anyOf": [<schema>, {"type": "null"}]}`` wrapper is flattened to an
+    untyped parameter by some client harnesses (observed in Claude Code), whose
+    models then send JSON-encoded arrays and ``"false"`` strings. Nullability
+    must ride the ``type`` union so every property keeps a visible type.
+    """
+    conn = _seed_v1(tmp_path)
+    for name, tool in _tools_by_name(conn, allow_writes=True).items():
+        for prop, value in tool["inputSchema"]["properties"].items():
+            assert "type" in value, (name, prop, value)
+            if _is_nullable(value):
+                enum_values = value.get("enum")
+                if isinstance(enum_values, list):
+                    assert None in enum_values, (name, prop)
+
+
+def test_v1_closeout_accepts_double_encoded_arrays(tmp_path):
+    conn = _seed_v1(tmp_path)
+    served = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.context",
+                {"query": "Shared Context", "context": {"project": "ocbrain"}},
+            ),
+        )
+    )
+    response = handle_request(
+        conn,
+        _tool_call(
+            "brain.closeout",
+            {
+                "task_ref": "task:double-encoded",
+                "status": "completed",
+                "summary": "Closed out with stringified array arguments.",
+                "retrieval_use_ids": json.dumps([served["retrieval_use_id"]]),
+                "artifact_refs": json.dumps([{"uri": "file:///tmp/x", "kind": "file"}]),
+                "verifier_refs": json.dumps([]),
+                "decision_impact": "",
+                "decision_note": "",
+            },
+            request_id=2,
+        ),
+    )
+    assert "error" not in response, response
+    assert _payload(response)["task_ref"] == "task:double-encoded"
+
+
+def test_v1_closeout_accepts_bare_string_retrieval_use_id(tmp_path):
+    conn = _seed_v1(tmp_path)
+    served = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.context",
+                {"query": "Shared Context", "context": {"project": "ocbrain"}},
+            ),
+        )
+    )
+    response = handle_request(
+        conn,
+        _tool_call(
+            "brain.closeout",
+            {
+                "task_ref": "task:bare-string",
+                "status": "completed",
+                "summary": "Closed out with a single id where an array belongs.",
+                "retrieval_use_ids": served["retrieval_use_id"],
+            },
+            request_id=2,
+        ),
+    )
+    assert "error" not in response, response
+
+
+def test_v1_feedback_treats_blank_note_as_absent(tmp_path):
+    conn = _seed_v1(tmp_path)
+    served = _payload(
+        handle_request(
+            conn,
+            _tool_call(
+                "brain.context",
+                {"query": "Shared Context", "context": {"project": "ocbrain"}},
+            ),
+        )
+    )
+    response = handle_request(
+        conn,
+        _tool_call(
+            "brain.feedback",
+            {
+                "retrieval_use_id": served["retrieval_use_id"],
+                "outcome": "used",
+                "note": "   ",
+            },
+            request_id=2,
+        ),
+    )
+    assert "error" not in response, response
+
+
+def test_v1_context_accepts_stringly_booleans(tmp_path):
+    conn = _seed_v1(tmp_path)
+    for request_id, (sent, expected) in enumerate(
+        [("false", False), ("true", True), ("", False)], start=1
+    ):
+        served = _payload(
+            handle_request(
+                conn,
+                _tool_call(
+                    "brain.context",
+                    {
+                        "query": "Shared Context",
+                        "context": {"project": "ocbrain"},
+                        "cross_scope": sent,
+                    },
+                    request_id=request_id,
+                ),
+            )
+        )
+        assert served["cross_scope"] is expected, (sent, served["cross_scope"])
+
+
+def test_v1_context_accepts_stringly_limit(tmp_path):
+    conn = _seed_v1(tmp_path)
+    response = handle_request(
+        conn,
+        _tool_call(
+            "brain.context",
+            {"query": "Shared Context", "context": {"project": "ocbrain"}, "limit": "3"},
+        ),
+    )
+    assert "error" not in response, response
 
 
 def test_v1_context_reports_feedback_needed(tmp_path):

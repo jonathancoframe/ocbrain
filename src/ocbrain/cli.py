@@ -7,6 +7,7 @@ import re
 import sys
 from importlib.metadata import entry_points
 from pathlib import Path
+from typing import Any
 
 from ocbrain import __version__
 from ocbrain.bundle import export_bundle, import_bundle
@@ -29,6 +30,7 @@ from ocbrain.core_v1 import (
     set_automatic_activation,
 )
 from ocbrain.curation import apply_curated_manifest
+from ocbrain.curator import PROVIDER_DEFAULTS
 from ocbrain.db import (
     DEFAULT_DB_PATH,
     PUBLIC_SCOPES,
@@ -44,6 +46,24 @@ from ocbrain.db import (
     upsert_evidence,
     upsert_knowledge,
     upsert_search_index,
+)
+from ocbrain.deslop import (
+    ENFORCED_RULE_IDS as DESLOP_ENFORCED_RULE_IDS,
+)
+from ocbrain.deslop import (
+    JUDGED_RULE,
+    apply_repair,
+    apply_volume_eviction,
+    install_doctrine,
+    judge_beliefs,
+    plan_volume_eviction,
+    request_repair,
+    rewindowed_evidence_id,
+    scan_beliefs,
+    served_beliefs,
+)
+from ocbrain.deslop import (
+    RULE_IDS as DESLOP_RULE_IDS,
 )
 from ocbrain.egress import egress_preview
 from ocbrain.events import (
@@ -123,6 +143,14 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     )
     sync_parser.add_argument("--max-events", type=int, default=1_000)
     sync_parser.add_argument("--time-budget", type=float, default=10.0)
+    sync_parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "discard every projected row and refold the whole ledger; the recovery "
+            "path after `deslop --volume --apply`. Ignores --max-events"
+        ),
+    )
     sync_parser.set_defaults(func=cmd_sync)
 
     doctor_parser = subparsers.add_parser(
@@ -799,6 +827,14 @@ def build_parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync", help="Boundedly reconcile local core projections")
     sync.add_argument("--max-events", type=int, default=1_000)
     sync.add_argument("--time-budget", type=float, default=10.0)
+    sync.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "discard every projected row and refold the whole ledger; the recovery "
+            "path after `deslop --volume --apply`. Ignores --max-events"
+        ),
+    )
     sync.set_defaults(func=cmd_sync)
 
     vector_build = commands.add_parser(
@@ -883,6 +919,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="mark one belief superseded by another, then exit",
     )
     hygiene_parser.set_defaults(func=cmd_hygiene)
+
+    deslop_parser = commands.add_parser(
+        "deslop",
+        help="Find and repair badly-written beliefs, and evict re-windowed evidence",
+        description=(
+            "Two layers. The mechanical rules are deterministic and free, so they "
+            "run everywhere including inside the curator's own validation. The "
+            "judged rule asks a model the one question no pattern can answer: "
+            "would a future reader act differently for knowing this? Nothing is "
+            "deleted -- repairs rewrite or split, and every outcome is reversible "
+            "through `ocbrain hygiene --restore`."
+        ),
+    )
+    deslop_parser.add_argument(
+        "--class",
+        dest="classes",
+        action="append",
+        choices=[*DESLOP_RULE_IDS, JUDGED_RULE],
+        help="restrict to one rule; repeatable (default: all mechanical rules)",
+    )
+    deslop_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="repair the findings (default: report only)",
+    )
+    deslop_parser.add_argument(
+        "--mechanical-only",
+        action="store_true",
+        help="skip the judged rule, so the run makes no hosted call and is deterministic",
+    )
+    deslop_parser.add_argument(
+        "--volume",
+        action="store_true",
+        help=(
+            "report re-windowed evidence rows instead of belief findings. With "
+            "--apply this evicts them from the projection; `ocbrain sync --full` "
+            "rebuilds every row from the ledger"
+        ),
+    )
+    deslop_parser.add_argument(
+        "--provider",
+        default="anthropic",
+        choices=sorted(PROVIDER_DEFAULTS),
+        help="hosted model provider for the judged rule and for repairs",
+    )
+    deslop_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path.home() / ".common",
+        help="dotenv file consulted when the API key env var is unset",
+    )
+    deslop_parser.add_argument("--api-key-env", help="defaults to the provider's usual variable")
+    deslop_parser.add_argument("--base-url", help="defaults to the provider's endpoint")
+    deslop_parser.add_argument("--model", help="defaults to the provider's mid-tier model")
+    deslop_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="most repairs to apply in one run (default: deslop.max_repairs_per_run)",
+    )
+    deslop_parser.add_argument(
+        "--install-doctrine",
+        action="store_true",
+        help=(
+            "store the writing standard as a pinned belief, then exit; any client "
+            "calling brain.context before writing then retrieves it"
+        ),
+    )
+    deslop_parser.add_argument("--project", default="workspace")
+    deslop_parser.set_defaults(func=cmd_deslop)
 
     config_parser = commands.add_parser(
         "config",
@@ -1448,6 +1554,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         args.db,
         max_events=args.max_events,
         time_budget_seconds=args.time_budget,
+        full=args.full,
     )
     output(args, result)
     return 0 if result["status"] == "ok" else 3
@@ -1529,6 +1636,191 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
         conn.close()
     output(args, {"action": "hygiene", **payload})
     return 0
+
+
+def _deslop_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
+    """Resolve ``(api_key, base_url, model)`` for the provider, or fail loudly."""
+    from ocbrain.curator import load_env_value
+
+    defaults = PROVIDER_DEFAULTS[args.provider]
+    api_key_env = args.api_key_env or defaults["api_key_env"]
+    api_key = load_env_value(args.env_file.expanduser(), api_key_env)
+    if not api_key:
+        raise SystemExit(
+            f"{api_key_env} is not configured; "
+            f"set it, or pass --mechanical-only to skip every hosted call"
+        )
+    return api_key, args.base_url or defaults["base_url"], args.model or defaults["model"]
+
+
+def cmd_deslop(args: argparse.Namespace) -> int:
+    conn = open_existing_core_v1(args.db)
+    try:
+        if args.install_doctrine:
+            outcome = install_doctrine(conn, project=args.project)
+            output(args, {"action": "deslop", "mode": "doctrine", **outcome})
+            return 0
+        if args.volume:
+            plan = plan_volume_eviction(conn)
+            if args.apply:
+                plan = apply_volume_eviction(conn, plan)
+            payload = {key: value for key, value in plan.items() if key != "targets"}
+            payload["target_sample"] = plan["targets"][:12]
+            payload["megabytes"] = round(plan["bytes"] / 1_048_576, 2)
+            output(args, {"action": "deslop", "mode": "volume", **payload})
+            return 0
+
+        selected = tuple(args.classes) if args.classes else None
+        mechanical = tuple(r for r in (selected or DESLOP_RULE_IDS) if r != JUDGED_RULE)
+        judged_requested = (
+            not args.mechanical_only and (selected is None or JUDGED_RULE in selected)
+        )
+        report = scan_beliefs(conn, rules=mechanical) if mechanical else []
+        by_id = {item["belief_id"]: item for item in report}
+
+        judged: dict[str, dict[str, str]] = {}
+        if judged_requested:
+            api_key, base_url, model = _deslop_credentials(args)
+            # Judge the whole served corpus, not just the mechanical hits: an
+            # unactionable belief is usually well-formed, which is the point.
+            judged = judge_beliefs(
+                served_beliefs(conn),
+                provider=args.provider,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+            )
+            for belief_id, verdict in judged.items():
+                entry = by_id.get(belief_id)
+                finding = {
+                    "rule": JUDGED_RULE,
+                    "repair": "drop",
+                    "detail": verdict["reason"],
+                }
+                if entry is None:
+                    stored = get_core_v1_belief(conn, belief_id) or {}
+                    by_id[belief_id] = {
+                        "belief_id": belief_id,
+                        "body": str(stored.get("body") or ""),
+                        "attributes": stored.get("attributes") or {},
+                        "findings": [finding],
+                    }
+                else:
+                    entry["findings"].append(finding)
+
+        findings = list(by_id.values())
+        census: dict[str, int] = {}
+        for item in findings:
+            for finding in item["findings"]:
+                census[finding["rule"]] = census.get(finding["rule"], 0) + 1
+
+        # Only enforced rules and the judged verdict may act unattended. An
+        # advisory finding is a judgement call, so it reports and waits for a
+        # human to pass `--class` explicitly.
+        actionable = [
+            item
+            for item in findings
+            if any(
+                f["rule"] in DESLOP_ENFORCED_RULE_IDS or f["rule"] == JUDGED_RULE
+                for f in item["findings"]
+            )
+        ]
+        from ocbrain.config import load_config
+
+        config = load_config()
+        limit = args.limit if args.limit is not None else config.deslop.max_repairs_per_run
+        repairs: list[dict[str, Any]] = []
+        if args.apply and actionable:
+            api_key, base_url, model = _deslop_credentials(args)
+            for item in actionable[: max(0, limit)]:
+                repairs.append(_apply_one_repair(
+                    conn,
+                    item,
+                    provider=args.provider,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    current_ttl_days=config.curator.current_ttl_days,
+                ))
+
+        payload = {
+            "action": "deslop",
+            "mode": "beliefs",
+            "scanned": len(served_beliefs(conn)),
+            "flagged": len(findings),
+            "actionable": len(actionable),
+            "census": census,
+            "rules": list(mechanical),
+            "judged": judged_requested,
+            "findings": [
+                {k: v for k, v in item.items() if k != "attributes"} for item in findings
+            ],
+            "apply_requested": bool(args.apply),
+            "repairs": repairs,
+        }
+    finally:
+        conn.close()
+    output(args, payload)
+    return 0
+
+
+def _apply_one_repair(
+    conn,
+    item: dict[str, Any],
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    current_ttl_days: int,
+) -> dict[str, Any]:
+    """Request one repair, then apply it only if it passes the subtractive gate."""
+    # Two repairs need no model call at all. A `drop` finding already said there
+    # is nothing worth keeping, and inventing a rewrite for it would be the exact
+    # failure the subtractive gate exists to catch. A `stamp` finding is missing
+    # metadata, not bad prose, so the body must not change.
+    if all(finding["repair"] == "stamp" for finding in item["findings"]):
+        return {"belief_id": item["belief_id"]} | apply_repair(
+            conn,
+            belief_id=item["belief_id"],
+            action="stamp",
+            bodies=[],
+            reason="; ".join(finding["detail"] for finding in item["findings"]),
+            current_ttl_days=current_ttl_days,
+        )
+    drop_only = all(
+        finding["repair"] == "drop"
+        and (finding["rule"] in DESLOP_ENFORCED_RULE_IDS or finding["rule"] == JUDGED_RULE)
+        for finding in item["findings"]
+    )
+    if drop_only:
+        reason = "; ".join(finding["detail"] for finding in item["findings"])
+        return {"belief_id": item["belief_id"]} | apply_repair(
+            conn, belief_id=item["belief_id"], action="drop", bodies=[], reason=reason
+        )
+    action, bodies, reason, rejection = request_repair(
+        item,
+        item["findings"],
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    if rejection is not None:
+        return {
+            "belief_id": item["belief_id"],
+            "action": action,
+            "rejected": rejection,
+            "created": [],
+        }
+    return {"belief_id": item["belief_id"], "reason": reason} | apply_repair(
+        conn,
+        belief_id=item["belief_id"],
+        action=action,
+        bodies=bodies,
+        reason=reason,
+        current_ttl_days=current_ttl_days,
+    )
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -2874,7 +3166,23 @@ def import_source_v1(
     scope = scope_for_privacy(project, privacy_scope)
     evidence_id = stable_id("evd", text, source_type, source_uri, scope.scope_id)
     evidence_event_id = None
-    if get_core_v1_evidence(conn, evidence_id) is None:
+    # A transcript is imported as a head plus a sliding tail, so every append
+    # mints a new content-addressed id for the same session. When the head is
+    # byte-identical, adopt the stored window wholesale -- id *and* body -- so
+    # the belief compares unchanged too and the import is a true no-op. Reusing
+    # only the id would still re-propose the belief on every harvest, which
+    # appends the transcript to the ledger a second time. See ocbrain.deslop.
+    known = get_core_v1_evidence(conn, evidence_id) is not None
+    if not known and (
+        rewindowed := rewindowed_evidence_id(
+            conn, source_uri=source_uri, kind=source_type, text=text
+        )
+    ):
+        stored = get_core_v1_evidence(conn, rewindowed) or {}
+        evidence_id = rewindowed
+        text = str(stored.get("body") or text)
+        known = True
+    if not known:
         evidence_id, evidence_event_id = record_core_v1_evidence(
             conn,
             body=text,

@@ -165,12 +165,19 @@ def sync_core(
     *,
     max_events: int = 1_000,
     time_budget_seconds: float = 10.0,
+    full: bool = False,
 ) -> dict[str, Any]:
     """Boundedly reconcile the event projection, with no other work dispatch.
 
     The event count is checked before any projection write.  SQLite's progress
     handler enforces the wall-clock deadline for database work, and a savepoint
     makes an interrupted projection atomic.
+
+    ``full`` discards every projected row and refolds the whole ledger. The
+    projections are derived, so this is the recovery path for anything that
+    edits them directly -- ``ocbrain deslop --volume --apply`` in particular,
+    whose reversibility claim rests on it. It ignores ``max_events`` because a
+    partial refold of a cleared projection would serve an incomplete corpus.
     """
     if max_events < 0:
         raise ValueError("max_events must be non-negative")
@@ -201,7 +208,7 @@ def sync_core(
             if cursor_row is not None and cursor_row["last_event_rowid"] is not None
             else None
         )
-        full_rebuild = cursor is None or cursor > max_rowid
+        full_rebuild = full or cursor is None or cursor > max_rowid
         if full_rebuild:
             pending = int(conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0])
         else:
@@ -219,7 +226,11 @@ def sync_core(
             "stages": ["event_projection", "sqlite_quick_check", "foreign_key_check"],
             "forbidden_stages": list(FORBIDDEN_SYNC_STAGES),
         }
-        if pending > max_events:
+        # An explicit full rebuild is a deliberate, operator-initiated recovery of
+        # a projection that is already cleared or wrong. Refusing it for exceeding
+        # the incremental event bound would leave the database in the state the
+        # operator asked to fix; the time budget still applies.
+        if not full and pending > max_events:
             return {
                 "action": "sync",
                 "status": "bounded_refusal",
