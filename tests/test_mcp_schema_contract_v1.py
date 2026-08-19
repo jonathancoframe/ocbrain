@@ -41,11 +41,29 @@ SEMANTIC_REQUIRED = {
 }
 
 
-def _tools_by_name(conn, *, allow_writes=False):
+def _tools_by_name(conn, *, allow_writes=False, client_name=None):
+    session_state = {}
+    if client_name is not None:
+        handle_request(
+            conn,
+            {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": client_name, "version": "0"},
+                },
+            },
+            allow_writes=allow_writes,
+            session_state=session_state,
+        )
     response = handle_request(
         conn,
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
         allow_writes=allow_writes,
+        session_state=session_state,
     )
     return {tool["name"]: tool for tool in response["result"]["tools"]}
 
@@ -73,7 +91,7 @@ def _non_nullable_properties(schema):
 
 def test_v1_schema_required_matches_dispatcher_for_every_tool(tmp_path):
     conn = _seed_v1(tmp_path)
-    tools = _tools_by_name(conn, allow_writes=True)
+    tools = _tools_by_name(conn, allow_writes=True, client_name="codex")
 
     for name, expected in SEMANTIC_REQUIRED.items():
         assert name in tools, f"{name} missing from published surface"
@@ -83,6 +101,35 @@ def test_v1_schema_required_matches_dispatcher_for_every_tool(tmp_path):
         assert schema["additionalProperties"] is False
         assert set(schema["required"]) == set(schema["properties"])
         assert _non_nullable_properties(schema) == expected, name
+
+
+def test_v1_plain_dialect_requires_only_semantic_fields(tmp_path):
+    """Default/plain dialect: ``required`` is exactly what the dispatcher enforces.
+
+    Serving the strict all-keys-required dialect to non-strict harnesses makes
+    them reject ordinary partial calls client-side before the server is reached
+    (observed in Claude Code: a context of only project/repo/runtime failed
+    because context.client/task/session were marked required). Unknown clients
+    therefore get the plain dialect; only strict harnesses opt in by name.
+    """
+    conn = _seed_v1(tmp_path)
+    for client_name in (None, "claude-code", "cursor", "hermes-agent"):
+        tools = _tools_by_name(conn, allow_writes=True, client_name=client_name)
+        for name, expected in SEMANTIC_REQUIRED.items():
+            schema = tools[name]["inputSchema"]
+            assert set(schema.get("required") or []) == expected, (client_name, name)
+        context_schema = tools["brain.context"]["inputSchema"]["properties"]["context"]
+        assert not context_schema.get("required"), client_name
+        assert context_schema["type"] == "object", client_name
+
+
+def test_v1_strict_dialect_is_client_gated(tmp_path):
+    conn = _seed_v1(tmp_path)
+    for client_name in ("codex", "Codex CLI", "openai-agents", "gpt-shell"):
+        tools = _tools_by_name(conn, client_name=client_name)
+        schema = tools["brain.context"]["inputSchema"]
+        assert set(schema["required"]) == set(schema["properties"]), client_name
+        assert schema["additionalProperties"] is False, client_name
 
 
 def _denulled(value):
@@ -225,7 +272,7 @@ def test_double_encoded_scope_and_filters_use_shared_object_seam():
 
 
 def test_v1_schema_optional_fields_keep_type_visible(tmp_path):
-    """Optional fields must stay typed on the wire.
+    """Optional fields must stay typed on the wire (strict dialect).
 
     A ``{"anyOf": [<schema>, {"type": "null"}]}`` wrapper is flattened to an
     untyped parameter by some client harnesses (observed in Claude Code), whose
@@ -233,7 +280,7 @@ def test_v1_schema_optional_fields_keep_type_visible(tmp_path):
     must ride the ``type`` union so every property keeps a visible type.
     """
     conn = _seed_v1(tmp_path)
-    for name, tool in _tools_by_name(conn, allow_writes=True).items():
+    for name, tool in _tools_by_name(conn, allow_writes=True, client_name="codex").items():
         for prop, value in tool["inputSchema"]["properties"].items():
             assert "type" in value, (name, prop, value)
             if _is_nullable(value):
