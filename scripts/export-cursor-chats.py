@@ -13,22 +13,43 @@ Sources per workspace DB (all optional; schema varies by Cursor version):
   - ItemTable key ``aiService.generations``  — assistant generations (JSON array)
   - cursorDiskKV ``bubbleId:*`` / ``composerData:*`` — newer composer bubbles
 
-Known gap, measured 2026-08-24: composer chats are no longer workspace-local.
-``cursorDiskKV`` exists in every workspace DB here and is empty in all nine;
-the bubbles live in ``globalStorage/state.vscdb``, attributed to a workspace
-through its ``composerHeaders.workspaceId``. That store holds 215,674 bubbles
-totalling 2.1GB of JSON, so reading it is not a variation on this sweep — it
-needs recency bounding and a truncation policy of its own, and is deliberately
-left out here. Note for whoever picks it up: ``key LIKE 'bubbleId:<id>:%'``
-full-scans the 7.8GB table, while the equivalent ``key >= 'bubbleId:<id>:' AND
-key < 'bubbleId:<id>;'`` range uses the index and returns in milliseconds.
+Composer chats are no longer workspace-local, which is where nearly all of the
+volume went. ``cursorDiskKV`` exists in every workspace DB on this machine and
+is empty in all ten; the bubbles live in the single
+``globalStorage/state.vscdb`` (7.8GB, 215,696 bubbles, 2.10GB of JSON), each
+attributed to a workspace through ``composerHeaders.workspaceId``. This
+exporter sweeps that store too and merges the result into the owning
+workspace's file, so a workspace whose local tables are empty is no longer
+reported as idle when it holds months of chat.
+
+Three things keep that sweep affordable enough for a 15-minute cron:
+
+  - Range scans, never ``LIKE``. ``key LIKE 'bubbleId:<id>:%'`` plans as SCAN
+    over every key in the store; the equivalent ``key >= 'bubbleId:<id>:' AND
+    key < 'bubbleId:<id>;'`` plans as SEARCH on the covering index. For the
+    same 22 rows on the live store that is 0.1-0.8ms against 1.1s warm and
+    15.3s cold.
+  - Newest first, and stop once a workspace has enough. Composers are walked in
+    ``recency`` order and a workspace is dropped from the walk once it has
+    accumulated ``--max-file-bytes`` of text, because everything older than
+    that would be discarded by the file budget anyway. Measured: 116MB read
+    instead of 2.10GB (5.5%), 85 composers of 808, 1.2s.
+  - Hard per-run row and byte budgets as a circuit breaker, so a store that
+    grows a new shape cannot turn the cron into a 2GB read.
+
+The walk is a pure function of (store contents, window, budgets): composers are
+ordered by ``recency DESC, composerId`` — the tiebreak matters, ties are common
+— so a second run over unchanged chat rebuilds byte-identical files and
+``write_if_changed`` leaves every mtime alone.
 
 Writes are content-compared before replacing, so unchanged workspaces keep their
 mtime and ocbrain's fingerprint gate skips them on recurring runs. All text is
 passed through ``ocbrain.text.redact_secrets`` before touching disk.
 
 Usage: export-cursor-chats.py [--storage DIR] [--out DIR] [--max-file-bytes N]
-                              [--max-record-bytes N]
+                              [--global-storage PATH | --no-global-storage]
+                              [--since-days N] [--max-record-bytes N]
+                              [--max-bubbles N] [--max-scan-bytes N]
 """
 
 from __future__ import annotations
@@ -37,12 +58,13 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-DEFAULT_STORAGE = (
-    Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "workspaceStorage"
-)
+_CURSOR_USER = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
+DEFAULT_STORAGE = _CURSOR_USER / "workspaceStorage"
+DEFAULT_GLOBAL_STORAGE = _CURSOR_USER / "globalStorage" / "state.vscdb"
 DEFAULT_OUT = Path.home() / ".ocbrain" / "exports" / "cursor"
 
 # Generations carry full text in some versions, only a summary in others.
@@ -50,21 +72,39 @@ _PROMPTS_KEY = "aiService.prompts"
 _GENERATIONS_KEY = "aiService.generations"
 
 # Skips are reported in full when few, which is the normal case: this machine
-# has nine workspaces. The cap only stops a pathological storage dir from
+# has ten workspaces. The cap only stops a pathological storage dir from
 # burying the counts under its own listing.
 _SKIPPED_SAMPLE = 20
+
+# Composer bubbles whose workspace is not a directory under --storage. The
+# workspace was deleted, or is a draft target that never had one. Their chat is
+# still real, so it goes to its own file with the claimed id kept per record
+# rather than being dropped for want of a home.
+UNATTRIBUTED = "unattributed"
+
+_BUBBLE_PREFIX = "bubbleId:"
 
 # Room set aside for a truncation marker, in bytes. The longest marker this
 # module writes is under 60 bytes; the slack covers a byte count that grows
 # past the sizes seen so far.
 _MARKER_RESERVE = 96
 
-# Bubble text past this length is the exception, not the rule: on this
-# machine's chat p50 is 146 bytes, p99 is 13,629, and a 16,000-byte cap
-# truncates 0.76% of records. It also sits below import-history's own
-# 20,000-byte per-file index window, so a single message can never crowd out a
-# whole conversation.
+# Bubble text past this length is the exception, not the rule: on the live
+# store p50 is 146 bytes, p99 is 13,629, and a 16,000-byte cap truncates 0.76%
+# of records. It also sits below import-history's own 20,000-byte per-file
+# index window, so a single message can never crowd out a whole conversation.
 DEFAULT_MAX_RECORD_BYTES = 16_000
+
+# Circuit breakers, not a paging scheme. The satisfaction rule below normally
+# stops the walk long before either bites (measured: 16,263 bubbles / 116MB),
+# so a run that reports budget_exhausted means the store changed shape and
+# wants a human, not a bigger number.
+DEFAULT_MAX_BUBBLES = 100_000
+DEFAULT_MAX_SCAN_BYTES = 500_000_000
+
+# Every composer on this machine is inside 45 days; the window exists so a
+# long-lived store cannot grow the sweep without bound.
+DEFAULT_SINCE_DAYS = 45
 
 
 def iso_from_ms(ms: int | float | None) -> str | None:
@@ -110,6 +150,23 @@ def parse_json_array(raw: bytes | str | None) -> list[dict]:
     return []
 
 
+def bubble_key_range(composer_id: str) -> tuple[str, str]:
+    """Half-open ``[lo, hi)`` key range covering one composer's bubbles.
+
+    Bubble keys are ``bubbleId:<composerId>:<bubbleId>``. ``hi`` replaces the
+    trailing ``:`` with ``;``, the next codepoint, which bounds the prefix
+    without excluding any key that carries it. The point is the query plan:
+    ``cursorDiskKV`` has a UNIQUE index on ``key``, so a range comparison plans
+    as ``SEARCH ... USING COVERING INDEX (key>? AND key<?)`` while
+    ``LIKE 'bubbleId:<id>:%'`` plans as ``SCAN`` over all 545k keys of a 7.8GB
+    table -- SQLite will not use an index for LIKE unless the column is
+    declared ``COLLATE NOCASE`` or ``case_sensitive_like`` is on. Same 22 rows
+    on the live store: 0.1-0.8ms versus 1,075ms warm and 15,280ms cold.
+    """
+    low = f"{_BUBBLE_PREFIX}{composer_id}:"
+    return low, low[:-1] + ";"
+
+
 def truncate_middle(text: str, max_bytes: int) -> tuple[str, bool]:
     """Cap one record at ``max_bytes``, keeping the head and the tail.
 
@@ -129,6 +186,118 @@ def truncate_middle(text: str, max_bytes: int) -> tuple[str, bool]:
     head = raw[:head_len].decode("utf-8", errors="ignore")
     tail = raw[len(raw) - tail_len :].decode("utf-8", errors="ignore") if tail_len else ""
     return head + marker + tail, True
+
+
+def composer_index(conn: sqlite3.Connection, since_ms: float) -> list[tuple[str, str | None, int]]:
+    """Composers touched since ``since_ms``, newest first.
+
+    ``composerId`` breaks the ``recency`` tie deliberately. Cursor stamps
+    composers opened together with the same millisecond — 27 of the 808 on this
+    machine sit in such a pair — and an unordered tie makes the byte budget cut
+    the walk at a different place from run to run, which would rewrite files
+    that did not change.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT composerId, workspaceId, recency FROM composerHeaders "
+            "WHERE recency >= ? ORDER BY recency DESC, composerId",
+            (since_ms,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [(str(cid), ws, int(rec or 0)) for cid, ws, rec in rows if cid]
+
+
+# json_extract runs the parse inside SQLite, so a 4.3MB bubble never becomes a
+# Python dict: only its three interesting fields cross the boundary. json_valid
+# guards it because one malformed row would otherwise abort the whole cursor
+# mid-iteration and cost us every bubble behind it.
+_BUBBLE_QUERY = (
+    "SELECT key, length(value), "
+    "CASE WHEN json_valid(value) THEN json_extract(value, '$.type') END, "
+    "CASE WHEN json_valid(value) THEN json_extract(value, '$.createdAt') END, "
+    "CASE WHEN json_valid(value) THEN json_extract(value, '$.text') END "
+    "FROM cursorDiskKV WHERE key >= ? AND key < ?"
+)
+
+
+def harvest_global_bubbles(
+    conn: sqlite3.Connection,
+    *,
+    known_workspaces: set[str],
+    since_ms: float,
+    file_budget: int,
+    max_record_bytes: int,
+    max_bubbles: int,
+    max_scan_bytes: int,
+) -> tuple[dict[str, list[dict]], dict]:
+    """Sweep the global composer store into per-workspace record lists.
+
+    Walks composers newest first and abandons a workspace once it holds
+    ``file_budget`` of text, because ``render_jsonl`` keeps only the newest that
+    much and every older bubble read for it would be discarded unread. That
+    single rule is what turns a 2.10GB store into a 116MB read.
+    """
+    started = time.monotonic()
+    by_workspace: dict[str, list[dict]] = {}
+    filled: dict[str, int] = {}
+    headers = composer_index(conn, since_ms)
+    scanned = bubbles = kept = scan_bytes = truncated = 0
+    exhausted: str | None = None
+    floor_ms: int | None = None
+
+    for composer_id, workspace_id, recency in headers:
+        bucket = workspace_id if workspace_id in known_workspaces else UNATTRIBUTED
+        if filled.get(bucket, 0) >= file_budget:
+            continue
+        scanned += 1
+        floor_ms = recency
+        try:
+            rows = conn.execute(_BUBBLE_QUERY, bubble_key_range(composer_id))
+            for key, size, bubble_type, created_at, text in rows:
+                bubbles += 1
+                scan_bytes += int(size or 0)
+                if not text or not text.strip():
+                    continue
+                content, cut = truncate_middle(text.strip(), max_record_bytes)
+                truncated += int(cut)
+                record = {
+                    "role": "user" if bubble_type == 1 else "assistant",
+                    "timestamp": parse_timestamp(created_at),
+                    "content": content,
+                    "source_key": key,
+                    "composer_id": composer_id,
+                }
+                if bucket == UNATTRIBUTED:
+                    # The file name cannot say which workspace claimed this, so
+                    # the record has to; the id outlives the directory.
+                    record["workspace_id"] = workspace_id
+                by_workspace.setdefault(bucket, []).append(record)
+                filled[bucket] = filled.get(bucket, 0) + len(content)
+                kept += 1
+        except sqlite3.Error as exc:
+            exhausted = f"sqlite_error:{exc}"
+            break
+        if bubbles >= max_bubbles:
+            exhausted = "max_bubbles"
+            break
+        if scan_bytes >= max_scan_bytes:
+            exhausted = "max_scan_bytes"
+            break
+
+    stats = {
+        "composers_in_window": len(headers),
+        "composers_scanned": scanned,
+        "bubbles_read": bubbles,
+        "bubbles_kept": kept,
+        "bubbles_truncated": truncated,
+        "scan_bytes": scan_bytes,
+        "oldest_composer_scanned": iso_from_ms(floor_ms),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
+    if exhausted:
+        stats["budget_exhausted"] = exhausted
+    return by_workspace, stats
 
 
 def workspace_folder(storage_dir: Path) -> str | None:
@@ -221,10 +390,10 @@ def render_jsonl(records: list[dict], meta: dict, max_bytes: int, redact) -> str
 
     The file budget used to be spent front to back, so the first records to be
     dropped were the newest — the ones a memory system most wants and the only
-    ones a reader cannot recover from an earlier export. Filling from the
-    newest end inverts that. It compounds downstream: ``import-history`` indexes
-    a 10KB head and a 10KB tail of each file, so a file truncated at its oldest
-    200KB gave the brain the tail of the OLD chat and never saw the new.
+    ones a reader could not reconstruct from an earlier export. Filling from the
+    newest end inverts that. It matters more now than it did: the global
+    composer store puts orders of magnitude more chat behind this budget, so
+    the wrong end is no longer a rounding error.
     """
 
     def ts_key(rec: dict) -> str:
@@ -272,13 +441,88 @@ def write_if_changed(path: Path, text: str) -> bool:
     return True
 
 
-def main() -> int:
+def read_workspace_records(state_db: Path, max_record_bytes: int) -> tuple[list[dict], str | None]:
+    """Records from one workspace state DB, plus the reason it yielded none."""
+    try:
+        conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return [], f"sqlite_error:{exc}"
+    try:
+        # sqlite3.connect defers reading the header, and extract_records
+        # tolerates a missing table on purpose because the schema varies by
+        # Cursor version. Without this probe an unreadable file reaches the
+        # end of extraction with no records and is filed as an idle
+        # workspace -- the exact confusion this reporting exists to end.
+        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        records = extract_records(conn, max_record_bytes)
+    except sqlite3.Error as exc:
+        return [], f"sqlite_error:{exc}"
+    finally:
+        conn.close()
+    return records, None if records else "no_records"
+
+
+def sweep_global_storage(
+    args: argparse.Namespace, known_workspaces: set[str]
+) -> tuple[dict[str, list[dict]], dict]:
+    """Open the global composer store read-only and harvest it, or say why not.
+
+    The store belongs to a running editor. ``mode=ro`` is the whole guarantee
+    that this exporter cannot corrupt a live 7.8GB database, so every failure
+    below returns a reason instead of retrying on a writable handle.
+    """
+    if args.no_global_storage:
+        return {}, {"status": "disabled"}
+    if not args.global_storage.is_file():
+        return {}, {"status": "absent", "path": str(args.global_storage)}
+    since_ms = (time.time() - args.since_days * 86_400) * 1000
+    try:
+        conn = sqlite3.connect(f"file:{args.global_storage}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return {}, {"status": "error", "error": str(exc)}
+    try:
+        records, stats = harvest_global_bubbles(
+            conn,
+            known_workspaces=known_workspaces,
+            since_ms=since_ms,
+            file_budget=args.max_file_bytes,
+            max_record_bytes=args.max_record_bytes,
+            max_bubbles=args.max_bubbles,
+            max_scan_bytes=args.max_scan_bytes,
+        )
+    finally:
+        conn.close()
+    stats["status"] = "ok"
+    stats["since_days"] = args.since_days
+    stats["workspaces"] = {name: len(rows) for name, rows in sorted(records.items())}
+    return records, stats
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--storage", type=Path, default=DEFAULT_STORAGE)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--max-file-bytes", type=int, default=200_000)
+    parser.add_argument("--global-storage", type=Path, default=DEFAULT_GLOBAL_STORAGE)
+    parser.add_argument(
+        "--no-global-storage",
+        action="store_true",
+        help="sweep only the per-workspace stores",
+    )
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=DEFAULT_SINCE_DAYS,
+        help="only composers touched within this many days",
+    )
     parser.add_argument("--max-record-bytes", type=int, default=DEFAULT_MAX_RECORD_BYTES)
-    args = parser.parse_args()
+    parser.add_argument("--max-bubbles", type=int, default=DEFAULT_MAX_BUBBLES)
+    parser.add_argument("--max-scan-bytes", type=int, default=DEFAULT_MAX_SCAN_BYTES)
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    args = parse_args()
 
     # Secret redaction comes from the ocbrain package when available; fall back
     # to a no-op so the exporter still works standalone (never silently skip).
@@ -293,42 +537,46 @@ def main() -> int:
         return 0
 
     args.out.mkdir(parents=True, exist_ok=True)
-    exported = unchanged = 0
+
     # A bare skip counter cannot distinguish "nothing was ever typed here" from
     # "this workspace moved to a shape we do not read", and three workspaces --
     # including the most recently used one -- sat in that blind spot. Name the
     # workspace and the reason so the next silent drop is one line of output.
+    local: dict[str, list[dict]] = {}
+    reasons: dict[str, str] = {}
+    workspaces = {path.name: path for path in sorted(args.storage.iterdir()) if path.is_dir()}
+    for name, workspace_dir in workspaces.items():
+        state_db = workspace_dir / "state.vscdb"
+        if not state_db.is_file():
+            reasons[name] = "no_state_db"
+            continue
+        records, reason = read_workspace_records(state_db, args.max_record_bytes)
+        local[name] = records
+        if reason:
+            reasons[name] = reason
+
+    global_records, global_stats = sweep_global_storage(args, set(workspaces))
+
+    exported = unchanged = 0
     skipped: list[dict[str, str]] = []
-    for state_db in sorted(args.storage.glob("*/state.vscdb")):
-        workspace_dir = state_db.parent
-        try:
-            conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
-        except sqlite3.Error as exc:
-            skipped.append({"workspace": workspace_dir.name, "reason": f"sqlite_error:{exc}"})
-            continue
-        try:
-            # sqlite3.connect defers reading the header, and extract_records
-            # tolerates a missing table on purpose because the schema varies by
-            # Cursor version. Without this probe an unreadable file reaches the
-            # end of extraction with no records and is filed as an idle
-            # workspace -- the exact confusion this reporting exists to end.
-            conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-            records = extract_records(conn, args.max_record_bytes)
-        except sqlite3.Error as exc:
-            skipped.append({"workspace": workspace_dir.name, "reason": f"sqlite_error:{exc}"})
-            continue
-        finally:
-            conn.close()
+    for name in sorted(set(local) | set(global_records) | set(reasons)):
+        records = local.get(name, []) + global_records.get(name, [])
         if not records:
-            skipped.append({"workspace": workspace_dir.name, "reason": "no_records"})
+            skipped.append({"workspace": name, "reason": reasons.get(name, "no_records")})
             continue
-        meta = {
-            "workspace_id": workspace_dir.name,
-            "workspace_folder": workspace_folder(workspace_dir),
+        workspace_dir = workspaces.get(name)
+        meta: dict[str, object] = {
+            "workspace_id": name,
+            "workspace_folder": workspace_folder(workspace_dir) if workspace_dir else None,
             "record_count": len(records),
+            "composer_record_count": len(global_records.get(name, [])),
         }
+        if name in reasons:
+            # The local store failed but the global one carried the workspace.
+            # Exporting it must not bury why half of it is missing.
+            meta["local_store"] = reasons[name]
         text = render_jsonl(records, meta, args.max_file_bytes, redact)
-        if write_if_changed(args.out / f"cursor-{workspace_dir.name}.jsonl", text):
+        if write_if_changed(args.out / f"cursor-{name}.jsonl", text):
             exported += 1
         else:
             unchanged += 1
@@ -348,6 +596,7 @@ def main() -> int:
                 "skipped": len(skipped),
                 "skipped_by_reason": by_reason,
                 "skipped_sample": skipped[:_SKIPPED_SAMPLE],
+                "global_storage": global_stats,
                 "out": str(args.out),
             }
         )
