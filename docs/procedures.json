@@ -1,0 +1,4483 @@
+{
+  "adapters": {
+    "adapter_status": {
+      "claude-code": "full: tool_use blocks carry name+input, tool_result carries is_error",
+      "codex": "full: custom_tool_call/function_call/mcp_tool_call_end with outputs",
+      "cursor": "stub: the export carries no tool calls at all, only role/content",
+      "hermes": "full: per-profile state.db assistant.tool_calls + tool-role results",
+      "hermes-legacy": "partial: export JSONL records the tool name but not its arguments"
+    },
+    "cache_path": "/private/tmp/claude-501/-Users-jonathancoframe/3ebe3a24-6162-4af2-a4ee-4e8c1de121f7/scratchpad/traces.jsonl",
+    "cursor_shortfall": {
+      "files": 5,
+      "messages": 226,
+      "records_with_tool_field": 0
+    },
+    "sources": {
+      "claude-code": {
+        "events": 19048,
+        "seconds": 3.6,
+        "traces": 173,
+        "truncated_traces": 0
+      },
+      "codex": {
+        "events": 34368,
+        "seconds": 20.7,
+        "traces": 443,
+        "truncated_traces": 0
+      },
+      "hermes": {
+        "events": 109696,
+        "seconds": 25.7,
+        "traces": 411,
+        "truncated_traces": 0
+      },
+      "hermes-legacy": {
+        "events": 27797,
+        "seconds": 0.8,
+        "traces": 793,
+        "truncated_traces": 0
+      }
+    },
+    "total_seconds": 50.8
+  },
+  "closeouts": {
+    "distinct_runtime_strings": 152,
+    "earliest": "2026-07-15T18:39:22.765692+00:00",
+    "grades": {
+      "all": {
+        "artifact-linked": 56,
+        "blocked-or-failed": 38,
+        "partial": 133,
+        "self-reported-completed": 395,
+        "verifier-claimed": 239,
+        "verifier-receipted": 250
+      },
+      "joined_only": {
+        "artifact-linked": 23,
+        "blocked-or-failed": 35,
+        "partial": 68,
+        "self-reported-completed": 183,
+        "verifier-claimed": 61,
+        "verifier-receipted": 122
+      }
+    },
+    "join_by_runtime": {
+      "claude-code": {
+        "ambiguous": 7,
+        "closeouts": 12,
+        "identity": 3,
+        "join_rate": 1.0,
+        "joined": 12,
+        "temporal": 0,
+        "temporal_context": 2,
+        "unjoined": 0
+      },
+      "codex": {
+        "ambiguous": 150,
+        "closeouts": 421,
+        "identity": 21,
+        "join_rate": 0.765,
+        "joined": 322,
+        "temporal": 125,
+        "temporal_context": 26,
+        "unjoined": 99
+      },
+      "cursor": {
+        "ambiguous": 0,
+        "closeouts": 57,
+        "identity": 0,
+        "join_rate": 0.0,
+        "joined": 0,
+        "temporal": 0,
+        "temporal_context": 0,
+        "unjoined": 57
+      },
+      "hermes": {
+        "ambiguous": 130,
+        "closeouts": 145,
+        "identity": 2,
+        "join_rate": 1.0,
+        "joined": 145,
+        "temporal": 10,
+        "temporal_context": 3,
+        "unjoined": 0
+      },
+      "host-batch": {
+        "ambiguous": 0,
+        "closeouts": 25,
+        "identity": 0,
+        "join_rate": 0.0,
+        "joined": 0,
+        "temporal": 0,
+        "temporal_context": 0,
+        "unjoined": 25
+      },
+      "mcp-direct": {
+        "ambiguous": 0,
+        "closeouts": 64,
+        "identity": 4,
+        "join_rate": 0.062,
+        "joined": 4,
+        "temporal": 0,
+        "temporal_context": 0,
+        "unjoined": 60
+      },
+      "unattributed-local": {
+        "ambiguous": 0,
+        "closeouts": 366,
+        "identity": 9,
+        "join_rate": 0.025,
+        "joined": 9,
+        "temporal": 0,
+        "temporal_context": 0,
+        "unjoined": 357
+      },
+      "unknown": {
+        "ambiguous": 0,
+        "closeouts": 21,
+        "identity": 0,
+        "join_rate": 0.0,
+        "joined": 0,
+        "temporal": 0,
+        "temporal_context": 0,
+        "unjoined": 21
+      }
+    },
+    "join_tiers": {
+      "exact": 37,
+      "temporal": 135,
+      "temporal-ambiguous": 287,
+      "temporal-context": 31,
+      "unjoined": 619,
+      "uuid": 2
+    },
+    "latest": "2026-08-24T20:19:00.423261+00:00",
+    "mining_attrition": {
+      "dropped_ambiguous": 287,
+      "dropped_empty_segment": 95,
+      "dropped_too_short": 1,
+      "eligible": 205,
+      "joined": 492,
+      "mining_episodes": 109,
+      "shared_a_trace": 196
+    },
+    "n": 1111
+  },
+  "corpus": {
+    "by_runtime": {
+      "claude-code": {
+        "events": 10066,
+        "failure_rate": 0.035,
+        "failures": 352,
+        "traces": 67
+      },
+      "claude-code-subagent": {
+        "events": 9584,
+        "failure_rate": 0.013,
+        "failures": 127,
+        "traces": 107
+      },
+      "codex": {
+        "events": 34368,
+        "failure_rate": 0.066,
+        "failures": 2276,
+        "traces": 443
+      },
+      "hermes": {
+        "events": 109856,
+        "failure_rate": 0.051,
+        "failures": 5568,
+        "traces": 415
+      },
+      "hermes-legacy": {
+        "events": 27797,
+        "failure_rate": 0.03,
+        "failures": 845,
+        "traces": 793
+      }
+    },
+    "n_events": 191671,
+    "n_traces": 1825,
+    "result_classes": {
+      "empty": 2064,
+      "error": 7923,
+      "ok": 180439,
+      "refused": 818,
+      "timeout": 427
+    },
+    "top_tools": {
+      "Bash": 11793,
+      "Edit": 2431,
+      "Read": 3133,
+      "exec": 20668,
+      "exec_command": 1791,
+      "execute_code": 5869,
+      "kanban_show": 2138,
+      "mcp:brain.context": 1118,
+      "mcp:spine.recent": 1148,
+      "mcp:spine.task_update": 1131,
+      "patch": 14286,
+      "process": 2481,
+      "read_file": 25594,
+      "search_files": 16518,
+      "skill_view": 6505,
+      "terminal": 48845,
+      "todo": 2319,
+      "vision_analyze": 959,
+      "web_search": 2303,
+      "write_file": 4908
+    }
+  },
+  "corpus_runtime_comparison": {
+    "claude-code": {
+      "events": 10066,
+      "failure_rate": 0.035,
+      "max_steps": 977,
+      "median_steps": 54,
+      "p90_steps": 424,
+      "sessions": 67,
+      "step_mix": {
+        "edit": 0.181,
+        "gh:pr": 0.018,
+        "read": 0.119,
+        "remote": 0.026,
+        "search": 0.032,
+        "shell-misc": 0.285,
+        "shell:<empty>": 0.025,
+        "write": 0.052
+      },
+      "worst_step_class": [
+        "tool:ExitPlanMode",
+        0.157,
+        102
+      ]
+    },
+    "claude-code-subagent": {
+      "events": 9584,
+      "failure_rate": 0.013,
+      "max_steps": 2607,
+      "median_steps": 55,
+      "p90_steps": 146,
+      "sessions": 107,
+      "step_mix": {
+        "edit": 0.064,
+        "list": 0.023,
+        "read": 0.265,
+        "remote": 0.013,
+        "search": 0.045,
+        "shell-misc": 0.322,
+        "shell:<empty>": 0.027,
+        "shell:sleep": 0.139
+      },
+      "worst_step_class": [
+        "remote",
+        0.056,
+        126
+      ]
+    },
+    "codex": {
+      "events": 34368,
+      "failure_rate": 0.066,
+      "max_steps": 3970,
+      "median_steps": 37,
+      "p90_steps": 141,
+      "sessions": 443,
+      "step_mix": {
+        "codex:exec": 0.156,
+        "mcp:agent-control.spine.recent": 0.033,
+        "mcp:agent-control.spine.task_update": 0.033,
+        "read": 0.108,
+        "search": 0.064,
+        "shell:nl": 0.041,
+        "wait": 0.035,
+        "web:search": 0.06
+      },
+      "worst_step_class": [
+        "git:diff",
+        0.529,
+        257
+      ]
+    },
+    "hermes": {
+      "events": 109856,
+      "failure_rate": 0.051,
+      "max_steps": 7561,
+      "median_steps": 80,
+      "p90_steps": 450,
+      "sessions": 415,
+      "step_mix": {
+        "edit": 0.11,
+        "read": 0.173,
+        "remote": 0.073,
+        "search": 0.12,
+        "shell": 0.046,
+        "shell-misc": 0.122,
+        "skill": 0.048,
+        "write": 0.045
+      },
+      "worst_step_class": [
+        "tool:kanban_complete",
+        0.329,
+        161
+      ]
+    },
+    "hermes-legacy": {
+      "events": 27797,
+      "failure_rate": 0.03,
+      "max_steps": 262,
+      "median_steps": 19,
+      "p90_steps": 91,
+      "sessions": 793,
+      "step_mix": {
+        "edit": 0.077,
+        "plan": 0.013,
+        "process": 0.011,
+        "read": 0.242,
+        "search": 0.151,
+        "shell": 0.403,
+        "skill": 0.049,
+        "write": 0.022
+      },
+      "worst_step_class": [
+        "process",
+        0.286,
+        304
+      ]
+    }
+  },
+  "families": {
+    "abstained": [
+      {
+        "family_id": "fam_016",
+        "label": "feature / watchdog / personalization / lake",
+        "n_traced_episodes": 6,
+        "reason": "no 3+-step ordered subsequence reaches 4 of 6 traced episodes"
+      },
+      {
+        "family_id": "fam_010",
+        "label": "logging / context / aleksey / pavlo",
+        "n_traced_episodes": 3,
+        "reason": "only 3 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_022",
+        "label": "sdk / snapshot / private / skill",
+        "n_traced_episodes": 3,
+        "reason": "only 3 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_038",
+        "label": "ten / report / chart / lifecycle",
+        "n_traced_episodes": 3,
+        "reason": "only 3 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_065",
+        "label": "cro / oracle / dataset / refresh",
+        "n_traced_episodes": 3,
+        "reason": "only 3 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_003",
+        "label": "deck / founder / headroom / header",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_004",
+        "label": "f5zuwx2zt7ceqx3pnx5mt2qwupb2imavwkxb2btnqta / google / slides / slide",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_025",
+        "label": "t20 / cf90d / health / download",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_036",
+        "label": "handoff / founder / report / activate",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_039",
+        "label": "gen013 / turn / supervisor / verify",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_048",
+        "label": "super / autoresearch / max003 / max004",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_054",
+        "label": "explorer / cro / oracle / quick",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_055",
+        "label": "device / channel / utm / recall",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_062",
+        "label": "cofasc / brain / backed / coframe",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_064",
+        "label": "ocbrain / promote / hosted / restoration",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_066",
+        "label": "cro / oracle / discovery / prompt",
+        "n_traced_episodes": 2,
+        "reason": "only 2 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_000",
+        "label": "templates / query / clickhouse / document",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_001",
+        "label": "coverage / day / mission / feature",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_002",
+        "label": "headers / visual / defaults / explorable",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_005",
+        "label": "arr / company / answer / metrics",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_006",
+        "label": "readability / within / feature / audit",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_007",
+        "label": "tasks / ad2 / b51c / owned",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_008",
+        "label": "freshness / documentation / brain / coframe",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_009",
+        "label": "original / decomposition / negative / above",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_011",
+        "label": "additional / decision / signals / context",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_012",
+        "label": "incremental / visualization / cro / oracle",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_013",
+        "label": "consolidation / documentation / loop / decision",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_014",
+        "label": "propensity / spine / feature / causal",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_015",
+        "label": "t2214z / live / within / status",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_017",
+        "label": "restricted / handoff / feature / within",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_018",
+        "label": "hybrid / personal / t215713z / headers",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_019",
+        "label": "multiarm / fixed / design / autoresearch",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_020",
+        "label": "lightgbm / arm / specify / study",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_021",
+        "label": "preregistration / audit / final / header",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_023",
+        "label": "arm / frozen80 / multiarm / headers",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_024",
+        "label": "stack / health / audit / append",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_026",
+        "label": "assessment / capability / sessions / cf90d",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_027",
+        "label": "lake / history / basic / accepted",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_028",
+        "label": "rich / t233006z / frozen80 / autoresearch",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_029",
+        "label": "gen011 / reconcile / changing / supportable",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_030",
+        "label": "expanded / founder / report / plan",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_031",
+        "label": "overnight / continuity / ocbrain / client",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_032",
+        "label": "controller / improvements / recommend / ocbrain",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_033",
+        "label": "expand / correct / founder / report",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_034",
+        "label": "ads / cmab / plan / autoresearch",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_035",
+        "label": "funnel / understanding / charts / full",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_037",
+        "label": "report / discussion / design / commercial",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_040",
+        "label": "focused / report / lifecycle / analysis",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_041",
+        "label": "clients / high / traffic / brainstorm",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_042",
+        "label": "july / lulu / diagnose / georgia",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_043",
+        "label": "modeling / big / utm / raw",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_045",
+        "label": "leaf / url / utm / features",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_046",
+        "label": "standby / check / repair / only",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_047",
+        "label": "cash / standby / app / june2",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_049",
+        "label": "beat / matched / paused / random",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_050",
+        "label": "database / requirements / reconciliation / storage",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_051",
+        "label": "candidate / max012 / explain / boundary",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_052",
+        "label": "modeling / autoresearch / eval / discussion",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_053",
+        "label": "icon / app / generate / great",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_056",
+        "label": "featimp / absent / frames / importance",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_057",
+        "label": "cofasc / count / extract / finalize",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_058",
+        "label": "sounds / audio / diagnosis / identify",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_059",
+        "label": "raw / augmentation / downloads / complete",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_060",
+        "label": "focused / cofasc / diff / passes",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_061",
+        "label": "cohort / cofasc / attack / beyond",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_063",
+        "label": "working / style / persist / durably",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_067",
+        "label": "fae1b / achievable / independent / review",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_068",
+        "label": "fleet / visibility / only / build",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_069",
+        "label": "dialect / ocbrain / code / followup",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_070",
+        "label": "api / publish / backend / mongo",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_071",
+        "label": "pipeline / offline / weekend / followups",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_072",
+        "label": "harness / eval / overhaul / ws6",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      },
+      {
+        "family_id": "fam_073",
+        "label": "sandbox / plane / data / publisher",
+        "n_traced_episodes": 1,
+        "reason": "only 1 traced episodes; threshold is 5"
+      }
+    ],
+    "n_families": 74,
+    "procedures": [
+      {
+        "edges": [
+          {
+            "count": 13,
+            "from": "mcp:agent-control.spine.task_update",
+            "to": "codex:exec"
+          },
+          {
+            "count": 13,
+            "from": "codex:exec",
+            "to": "mcp:ocbrain.brain.closeout"
+          },
+          {
+            "count": 12,
+            "from": "codex:exec",
+            "to": "mcp:agent-control.spine.task_update"
+          },
+          {
+            "count": 12,
+            "from": "search",
+            "to": "read"
+          },
+          {
+            "count": 11,
+            "from": "codex:exec",
+            "to": "mcp:agent-control.spine.recent"
+          },
+          {
+            "count": 11,
+            "from": "shell:python3",
+            "to": "read"
+          },
+          {
+            "count": 11,
+            "from": "edit",
+            "to": "shell:python3"
+          },
+          {
+            "count": 11,
+            "from": "mcp:agent-control.spine.task_heartbeat",
+            "to": "mcp:agent-control.spine.task_update"
+          },
+          {
+            "count": 10,
+            "from": "read",
+            "to": "edit"
+          },
+          {
+            "count": 9,
+            "from": "shell:python3",
+            "to": "edit"
+          },
+          {
+            "count": 9,
+            "from": "codex:exec",
+            "to": "mcp:agent-control.spine.task_heartbeat"
+          },
+          {
+            "count": 8,
+            "from": "mcp:agent-control.spine.recent",
+            "to": "mcp:ocbrain.brain.context"
+          },
+          {
+            "count": 8,
+            "from": "read",
+            "to": "shell:python3"
+          },
+          {
+            "count": 8,
+            "from": "mcp:ocbrain.brain.closeout",
+            "to": "codex:exec"
+          },
+          {
+            "count": 8,
+            "from": "mcp:agent-control.spine.recent",
+            "to": "shell:python3"
+          },
+          {
+            "count": 8,
+            "from": "shell:<empty>",
+            "to": "codex:exec"
+          },
+          {
+            "count": 7,
+            "from": "edit",
+            "to": "codex:exec"
+          },
+          {
+            "count": 7,
+            "from": "edit",
+            "to": "shell:<path:home>"
+          },
+          {
+            "count": 7,
+            "from": "shell:<empty>",
+            "to": "edit"
+          },
+          {
+            "count": 6,
+            "from": "shell:python3",
+            "to": "search"
+          },
+          {
+            "count": 6,
+            "from": "read",
+            "to": "shell:<path:home>"
+          },
+          {
+            "count": 6,
+            "from": "shell:<path:home>",
+            "to": "shell:python3"
+          },
+          {
+            "count": 6,
+            "from": "shell:python3",
+            "to": "shell:<path:home>"
+          },
+          {
+            "count": 6,
+            "from": "mcp:ocbrain.brain.context",
+            "to": "mcp:agent-control.spine.recent"
+          },
+          {
+            "count": 6,
+            "from": "query",
+            "to": "shell:python3"
+          },
+          {
+            "count": 6,
+            "from": "mcp:agent-control.spine.recent",
+            "to": "shell:<empty>"
+          },
+          {
+            "count": 6,
+            "from": "edit",
+            "to": "shell:<empty>"
+          },
+          {
+            "count": 5,
+            "from": "codex:exec",
+            "to": "edit"
+          },
+          {
+            "count": 5,
+            "from": "read",
+            "to": "search"
+          },
+          {
+            "count": 5,
+            "from": "shell:<path:home>",
+            "to": "tool:write_stdin"
+          },
+          {
+            "count": 5,
+            "from": "shell:ps",
+            "to": "shell:python3"
+          },
+          {
+            "count": 5,
+            "from": "shell:python3",
+            "to": "tool:write_stdin"
+          },
+          {
+            "count": 5,
+            "from": "tool:write_stdin",
+            "to": "shell:ps"
+          },
+          {
+            "count": 5,
+            "from": "shell:<path:home>",
+            "to": "edit"
+          },
+          {
+            "count": 5,
+            "from": "shell:python3",
+            "to": "mcp:agent-control.spine.task_heartbeat"
+          },
+          {
+            "count": 5,
+            "from": "tool:write_stdin",
+            "to": "shell:python3"
+          },
+          {
+            "count": 4,
+            "from": "mcp:agent-control.spine.task_claim",
+            "to": "codex:exec"
+          },
+          {
+            "count": 4,
+            "from": "read",
+            "to": "list"
+          },
+          {
+            "count": 4,
+            "from": "edit",
+            "to": "shell:shasum"
+          },
+          {
+            "count": 4,
+            "from": "shell:wc",
+            "to": "read"
+          }
+        ],
+        "failure_branches": [],
+        "family_id": "fam_044",
+        "label": "maximal / max / safe / url",
+        "n_episodes": 12,
+        "n_traced_episodes": 12,
+        "nodes": [
+          {
+            "step": "mcp:agent-control.spine.recent",
+            "support": 12
+          },
+          {
+            "step": "mcp:agent-control.spine.task_update",
+            "support": 12
+          },
+          {
+            "step": "mcp:ocbrain.brain.closeout",
+            "support": 12
+          },
+          {
+            "step": "edit",
+            "support": 11
+          },
+          {
+            "step": "mcp:ocbrain.brain.context",
+            "support": 11
+          },
+          {
+            "step": "read",
+            "support": 11
+          },
+          {
+            "step": "codex:exec",
+            "support": 10
+          },
+          {
+            "step": "shell:python3",
+            "support": 10
+          },
+          {
+            "step": "shell:<path:home>",
+            "support": 9
+          },
+          {
+            "step": "mcp:agent-control.spine.task_heartbeat",
+            "support": 8
+          },
+          {
+            "step": "shell:shasum",
+            "support": 8
+          },
+          {
+            "step": "tool:write_stdin",
+            "support": 8
+          },
+          {
+            "step": "list",
+            "support": 7
+          },
+          {
+            "step": "shell:ps",
+            "support": 7
+          },
+          {
+            "step": "mcp:agent-control.spine.task_claim",
+            "support": 6
+          },
+          {
+            "step": "query",
+            "support": 6
+          },
+          {
+            "step": "search",
+            "support": 6
+          },
+          {
+            "step": "shell:wc",
+            "support": 6
+          },
+          {
+            "step": "shell:<empty>",
+            "support": 4
+          },
+          {
+            "step": "shell:date",
+            "support": 4
+          },
+          {
+            "step": "shell:for",
+            "support": 4
+          },
+          {
+            "step": "shell:pgrep",
+            "support": 4
+          },
+          {
+            "step": "shell:<path:codexstore:py>",
+            "support": 3
+          },
+          {
+            "step": "write",
+            "support": 3
+          }
+        ],
+        "patterns": [
+          {
+            "coverage": 0.92,
+            "steps": [
+              "mcp:agent-control.spine.recent",
+              "edit",
+              "mcp:ocbrain.brain.closeout"
+            ],
+            "support": 11,
+            "support_episodes": [
+              "close_40365bcc45b47ea8",
+              "close_4b0e1451fcc9a828",
+              "close_762afcc2439ab82a",
+              "close_76d414a28e98979c",
+              "close_8367d5da68e1765e",
+              "close_c56e6746de8ba827",
+              "close_cf72390e599d924d",
+              "close_d7a79fd422854f4c",
+              "close_d884b9e71bfdc952",
+              "close_da77ee9042a7d3e8",
+              "close_e4aa05da23bb7f64"
+            ]
+          },
+          {
+            "coverage": 0.83,
+            "steps": [
+              "mcp:agent-control.spine.recent",
+              "shell:python3",
+              "mcp:ocbrain.brain.closeout"
+            ],
+            "support": 10,
+            "support_episodes": [
+              "close_40365bcc45b47ea8",
+              "close_4b0e1451fcc9a828",
+              "close_762afcc2439ab82a",
+              "close_76d414a28e98979c",
+              "close_8367d5da68e1765e",
+              "close_c56e6746de8ba827",
+              "close_d7a79fd422854f4c",
+              "close_d884b9e71bfdc952",
+              "close_da77ee9042a7d3e8",
+              "close_e4aa05da23bb7f64"
+            ]
+          },
+          {
+            "coverage": 0.83,
+            "steps": [
+              "mcp:ocbrain.brain.context",
+              "edit",
+              "mcp:ocbrain.brain.closeout"
+            ],
+            "support": 10,
+            "support_episodes": [
+              "close_40365bcc45b47ea8",
+              "close_4b0e1451fcc9a828",
+              "close_762afcc2439ab82a",
+              "close_76d414a28e98979c",
+              "close_8367d5da68e1765e",
+              "close_c56e6746de8ba827",
+              "close_d7a79fd422854f4c",
+              "close_d884b9e71bfdc952",
+              "close_da77ee9042a7d3e8",
+              "close_e4aa05da23bb7f64"
+            ]
+          },
+          {
+            "coverage": 0.83,
+            "steps": [
+              "mcp:ocbrain.brain.context",
+              "shell:python3",
+              "mcp:ocbrain.brain.closeout"
+            ],
+            "support": 10,
+            "support_episodes": [
+              "close_40365bcc45b47ea8",
+              "close_4b0e1451fcc9a828",
+              "close_762afcc2439ab82a",
+              "close_76d414a28e98979c",
+              "close_8367d5da68e1765e",
+              "close_c56e6746de8ba827",
+              "close_d7a79fd422854f4c",
+              "close_d884b9e71bfdc952",
+              "close_da77ee9042a7d3e8",
+              "close_e4aa05da23bb7f64"
+            ]
+          },
+          {
+            "coverage": 0.75,
+            "steps": [
+              "mcp:agent-control.spine.recent",
+              "edit",
+              "mcp:agent-control.spine.task_update"
+            ],
+            "support": 9,
+            "support_episodes": [
+              "close_40365bcc45b47ea8",
+              "close_4b0e1451fcc9a828",
+              "close_762afcc2439ab82a",
+              "close_8367d5da68e1765e",
+              "close_c56e6746de8ba827",
+              "close_d7a79fd422854f4c",
+              "close_d884b9e71bfdc952",
+              "close_da77ee9042a7d3e8",
+              "close_e4aa05da23bb7f64"
+            ]
+          }
+        ],
+        "receipts": [
+          "close_40365bcc45b47ea8",
+          "close_4b0e1451fcc9a828",
+          "close_762afcc2439ab82a",
+          "close_76d414a28e98979c",
+          "close_8367d5da68e1765e",
+          "close_a4a843c4ec38d8c0",
+          "close_c56e6746de8ba827",
+          "close_cf72390e599d924d",
+          "close_d7a79fd422854f4c",
+          "close_d884b9e71bfdc952",
+          "close_da77ee9042a7d3e8",
+          "close_e4aa05da23bb7f64"
+        ],
+        "stats": {
+          "by_closeout_runtime": {
+            "codex": 7,
+            "unattributed-local": 5
+          },
+          "by_grade": {
+            "partial": 4,
+            "self-reported-completed": 8
+          },
+          "by_trace_runtime": {
+            "codex": 12
+          },
+          "max_grade_rank": 2,
+          "median_steps": 50,
+          "min_grade_rank": 1,
+          "n": 12,
+          "success_n": 0,
+          "success_rate": 0.0
+        }
+      }
+    ],
+    "thresholds": {
+      "family_similarity": 0.34,
+      "min_family_episodes": 5,
+      "min_node_support": 3,
+      "min_pattern_coverage": 0.5,
+      "min_pattern_length": 3,
+      "min_pattern_support": 4
+    }
+  },
+  "generated_at": "2026-08-24T20:36:41.186320+00:00",
+  "gotchas": [
+    {
+      "by_runtime": {
+        "codex": 357
+      },
+      "calls": 357,
+      "claim": "`tool:wait_agent` fails 207 of 357 calls (58%) across 47 sessions; the dominant failure class is `timeout` (207). Most common message (206x): \"{\"message\":\"Wait timed out.\",\"timed_out\":true}\". The recurring next move is `tool:list_agents` (53 times, succeeding 94%).",
+      "dominant_failure_class": "timeout",
+      "failure_rate": 0.58,
+      "failures": 207,
+      "receipt_sessions": [
+        "019fc874-2645-7201-acd0-d4d47fe9b9a7",
+        "019fc875-197a-79c0-a350-9aa333986385",
+        "019fc95f-17a6-7af0-8b0b-673ff97d2dc2",
+        "019fc973-1f4b-7313-b8e6-3b93ca36dbfd",
+        "019fc973-2342-7580-85c1-a1f7ddc7738d"
+      ],
+      "sessions": 47,
+      "step": "tool:wait_agent",
+      "top_errors": [
+        {
+          "count": 206,
+          "message": "{\"message\":\"Wait timed out.\",\"timed_out\":true}"
+        },
+        {
+          "count": 1,
+          "message": "{\"message\":\"Wait timed out.\\n\\nRequested timeout of 1000ms was clamped to the minimum of 10000ms.\",\"timed_out\":true}"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "claude-code": 94,
+        "claude-code-subagent": 26
+      },
+      "calls": 120,
+      "claim": "`mcp:ocbrain.brain_closeout` fails 70 of 120 calls (58%) across 28 sessions; the dominant failure class is `error` (70). Most common message (31x): \"MCP error -<id>: Input validation error: Invalid arguments for tool brain.closeout: [\". No distinct repair recurs; the agent retries the same step 53 times and it works 55% of the time.",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.583,
+      "failures": 70,
+      "receipt_sessions": [
+        "04b1ec23-a199-4b78-bdb3-0ecb9e8bb4b0",
+        "0be7cd0d-616d-4ba2-850a-e6c338afa89f",
+        "0cc77f93-50d6-4c35-b0cd-52d80ec22a17",
+        "2bc5ae2c-b1f3-442e-b99e-67f66ad46b5a",
+        "3383a1f5-27e2-4f3c-a7d4-566bf692cdf1"
+      ],
+      "sessions": 28,
+      "step": "mcp:ocbrain.brain_closeout",
+      "top_errors": [
+        {
+          "count": 31,
+          "message": "MCP error -<id>: Input validation error: Invalid arguments for tool brain.closeout: ["
+        },
+        {
+          "count": 14,
+          "message": "Error: MCP error -<id>: retrieval_use_ids must be an array"
+        },
+        {
+          "count": 5,
+          "message": "Error: artifact_refs must be an array of objects"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "hermes": 2177
+      },
+      "calls": 2177,
+      "claim": "`tool:process` fails 644 of 2177 calls (30%) across 97 sessions; the dominant failure class is `error` (644). Most common message (33x): \"{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat\". The recurring next move is `bash:ssh -o <chain>` (29 times, succeeding 97%).",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.296,
+      "failures": 644,
+      "receipt_sessions": [
+        "20260807_141305_f6b22280",
+        "20260807_141739_0f290e",
+        "20260810_124335_ff3d8328",
+        "20260810_124948_ab7e09",
+        "20260813_114551_b3a05160"
+      ],
+      "sessions": 97,
+      "step": "tool:process",
+      "top_errors": [
+        {
+          "count": 33,
+          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat"
+        },
+        {
+          "count": 17,
+          "message": "{\"status\": \"exited\", \"command\": \"uv run ruff format scripts/verify_canonical_synthetic_p0_superset.py && uv run ruff check scripts/verify_canonical_synthetic_p0"
+        },
+        {
+          "count": 17,
+          "message": "{\"status\": \"timeout\", \"command\": \"RUN=$(cat <path:tmp:txt>); scp -q dist/coframe_brain-0.1.0-py3-none-any.whl scripts/vm/pooled_feature_method_tournament.py \\\"a"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "codex": 73
+      },
+      "calls": 73,
+      "claim": "`mcp:ocbrain.brain.source` fails 38 of 73 calls (52%) across 10 sessions; the dominant failure class is `error` (38). Most common message (38x): \"tool call error: tool call failed for `ocbrain/brain.source`\". No distinct repair recurs; the agent retries the same step 28 times and it works 14% of the time.",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.521,
+      "failures": 38,
+      "receipt_sessions": [
+        "019f9506-c3e1-7d43-8419-9d38d09bbcbe",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fc133-ef20-7d60-9b34-8bfd336cc83c",
+        "019fc875-197a-79c0-a350-9aa333986385",
+        "019fc874-2645-7201-acd0-d4d47fe9b9a7"
+      ],
+      "sessions": 10,
+      "step": "mcp:ocbrain.brain.source",
+      "top_errors": [
+        {
+          "count": 38,
+          "message": "tool call error: tool call failed for `ocbrain/brain.source`"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "codex": 1148
+      },
+      "calls": 1148,
+      "claim": "`mcp:agent-control.spine.recent` fails 277 of 1148 calls (24%) across 125 sessions; the dominant failure class is `refused` (277). Most common message (150x): \"user rejected MCP tool call\". The recurring next move is `mcp:ocbrain.brain.context` (118 times, succeeding 100%).",
+      "dominant_failure_class": "refused",
+      "failure_rate": 0.241,
+      "failures": 277,
+      "receipt_sessions": [
+        "019f9ecd-200d-7b82-951b-d96e613a8693",
+        "019f9f4a-a0e6-7f73-9494-b8355bf6aab1",
+        "019fa030-649a-71f1-bf6d-e22861fe605b",
+        "019fa6b0-58b5-7ec3-8934-b5e87ec7e3b1",
+        "019fa72f-675f-7a53-8ebe-7d0bbabf9bfb"
+      ],
+      "sessions": 125,
+      "step": "mcp:agent-control.spine.recent",
+      "top_errors": [
+        {
+          "count": 150,
+          "message": "user rejected MCP tool call"
+        },
+        {
+          "count": 127,
+          "message": "user cancelled MCP tool call"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "hermes": 161
+      },
+      "calls": 161,
+      "claim": "`tool:kanban_complete` fails 53 of 161 calls (33%) across 63 sessions; the dominant failure class is `error` (53). Most common message (5x): \"{\"error\": \"could not complete t_dd9f149d (unknown id or already terminal)\"}\". The recurring next move is `tool:kanban_show` (15 times, succeeding 100%).",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.329,
+      "failures": 53,
+      "receipt_sessions": [
+        "20260810_124335_ff3d8328",
+        "20260810_154431_d8ce9266",
+        "20260810_234649_980a03",
+        "20260811_020245_7cd41b",
+        "20260811_020310_19ac82e3"
+      ],
+      "sessions": 63,
+      "step": "tool:kanban_complete",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "{\"error\": \"could not complete t_dd9f149d (unknown id or already terminal)\"}"
+        },
+        {
+          "count": 4,
+          "message": "{\"error\": \"could not complete t_07b4930b (unknown id or already terminal)\"}"
+        },
+        {
+          "count": 4,
+          "message": "{\"error\": \"could not complete t_e6bae7c5 (unknown id or already terminal)\"}"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "hermes-legacy": 304
+      },
+      "calls": 304,
+      "claim": "`toolonly:process` fails 87 of 304 calls (29%) across 74 sessions; the dominant failure class is `error` (86). The recurring next move is `toolonly:terminal` (41 times, succeeding 93%).",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.286,
+      "failures": 87,
+      "receipt_sessions": [
+        "20260719_101552_e5038d20",
+        "20260722_203559_bc2347",
+        "20260723_013409_0ad4d2",
+        "20260728_200046_02a564",
+        "20260728_200046_727d64"
+      ],
+      "sessions": 74,
+      "step": "toolonly:process",
+      "top_errors": []
+    },
+    {
+      "by_runtime": {
+        "hermes": 71
+      },
+      "calls": 71,
+      "claim": "`bash:<path:tmp> <path:rel:py>` fails 27 of 71 calls (38%) across 5 sessions; the dominant failure class is `error` (27). Most common message (6x): \"{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 637, in <module>\\n main()\\n <path:abs>^^\\n File \\\"<path:hermeswork:py>\\\", l\".",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.38,
+      "failures": 27,
+      "receipt_sessions": [
+        "20260811_135043_21ef5f",
+        "20260812_090612_b66bdb0d",
+        "20260812_093015_085674",
+        "20260812_114454_1cb79162"
+      ],
+      "sessions": 5,
+      "step": "bash:<path:tmp> <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 6,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 637, in <module>\\n main()\\n <path:abs>^^\\n File \\\"<path:hermeswork:py>\\\", l"
+        },
+        {
+          "count": 6,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 500, in <module>\\n main()\\n <path:abs>^^\\n File \\\"<path:hermeswork:py>\\\", l"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 40, in <module>\\n publisher.main()\\n <path:abs>^^\\n File \\\"<path:hermeswork"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "hermes": 58
+      },
+      "calls": 58,
+      "claim": "`bash:chmod <path:rel:py> <chain>` fails 23 of 58 calls (40%) across 19 sessions; the dominant failure class is `error` (23). Most common message (2x): \"{\"output\": \"2 files reformatted\\nI001 [*] Import block is un-sorted or un-formatted\\n --> scripts/vm/publish_dashboard_v2_projection.py:9:1\\n |\\n 7 | \\\"\\\"\\\"\\n 8\".",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.397,
+      "failures": 23,
+      "receipt_sessions": [
+        "20260812_093015_085674",
+        "20260812_114454_1cb79162",
+        "20260810_152957_963064",
+        "20260811_162936_608365",
+        "20260811_182557_44d6d9"
+      ],
+      "sessions": 19,
+      "step": "bash:chmod <path:rel:py> <chain>",
+      "top_errors": [
+        {
+          "count": 2,
+          "message": "{\"output\": \"2 files reformatted\\nI001 [*] Import block is un-sorted or un-formatted\\n --> scripts/vm/publish_dashboard_v2_projection.py:9:1\\n |\\n 7 | \\\"\\\"\\\"\\n 8"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"4 files reformatted\\nF841 Local variable `source_manifest` is assigned to but never used\\n --> scripts/verify_canonical_synthetic_p0_bundle.py:74:5\\"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"UP034 [*] Avoid extraneous parentheses\\n --> scripts/package_canonical_synthetic_p0_superset.py:178:9\\n |\\n176 | body.write(f\\\"--{boundary}\\\\r\\\\n\\\"."
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "hermes": 169
+      },
+      "calls": 169,
+      "claim": "`tool:memory` fails 52 of 169 calls (31%) across 32 sessions; the dominant failure class is `error` (52). Most common message (9x): \"{\"success\": false, \"error\": \"After applying all 1 operations, memory would be at 2,224/2,200 chars -- over the limit. Remove or shorten more entries in the same\". No distinct repair recurs; the agent retries the same step 45 times and it works 58% of the time.",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.308,
+      "failures": 52,
+      "receipt_sessions": [
+        "20260807_141305_f6b22280",
+        "20260810_124335_ff3d8328",
+        "20260810_154431_d8ce9266",
+        "20260812_090723_44a3d138",
+        "20260813_114551_b3a05160"
+      ],
+      "sessions": 32,
+      "step": "tool:memory",
+      "top_errors": [
+        {
+          "count": 9,
+          "message": "{\"success\": false, \"error\": \"After applying all 1 operations, memory would be at 2,224/2,200 chars -- over the limit. Remove or shorten more entries in the same"
+        },
+        {
+          "count": 7,
+          "message": "{\"success\": false, \"error\": \"After applying all 1 operations, memory would be at 2,204/2,200 chars -- over the limit. Remove or shorten more entries in the same"
+        },
+        {
+          "count": 2,
+          "message": "{\"success\": false, \"error\": \"Operation 1 (replace): no entry matched 'Jonathan prefers agent-coordination advice as exact copy-paste text'. No operations were a"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "codex": 21,
+        "hermes": 82
+      },
+      "calls": 103,
+      "claim": "`bash:pytest -q <path:rel:py>` fails 35 of 103 calls (34%) across 18 sessions; the dominant failure class is `error` (30). Most common message (5x): \"{\"output\": \"ERROR: file or directory not found: tests/data/acquisition/test_materialized_loader.py\\n\\n\\nno tests ran in 0.00s\", \"exit_code\": 4, \"error\": null}\". The recurring next move is `grep:<path:hermeswork>` (9 times, succeeding 89%).",
+      "dominant_failure_class": "error",
+      "failure_rate": 0.34,
+      "failures": 35,
+      "receipt_sessions": [
+        "019fc998-d559-7a80-ba6e-0b871e5b44e5",
+        "019fcac0-e600-78a3-97ce-d4514a926734",
+        "019fcac6-d96c-7e72-b1fd-0265ad5d7d39",
+        "019fd243-84c6-7583-8568-48d8a9f72c90",
+        "20260807_134135_23b0a5"
+      ],
+      "sessions": 18,
+      "step": "bash:pytest -q <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "{\"output\": \"ERROR: file or directory not found: tests/data/acquisition/test_materialized_loader.py\\n\\n\\nno tests ran in 0.00s\", \"exit_code\": 4, \"error\": null}"
+        },
+        {
+          "count": 3,
+          "message": "Script failed"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"Building coframe-brain @ file://<path:hermeswork>\\n \u00d7 Failed to build `coframe-brain @\\n \u2502 file://<path:hermeswork>`\\n \u251c\u2500\u25b6 The build backend returne"
+        }
+      ]
+    },
+    {
+      "by_runtime": {
+        "codex": 28,
+        "hermes": 25
+      },
+      "calls": 53,
+      "claim": "`bash:git diff --unified <path:rel:py>` fails 21 of 53 calls (40%) across 15 sessions; the dominant failure class is `refused` (21). Most common message (21x): \"git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead\".",
+      "dominant_failure_class": "refused",
+      "failure_rate": 0.396,
+      "failures": 21,
+      "receipt_sessions": [
+        "019fb993-3f8c-7192-802c-b3a7b1d8dab5",
+        "019fd18a-987d-7112-9174-4c5ed1d05807",
+        "019fd1bc-ee03-7571-844d-0f59fd808787",
+        "019fd1dc-3868-7d90-a19b-9526f27c73a3",
+        "019fd569-34ca-7330-99f2-2c259da77402"
+      ],
+      "sessions": 15,
+      "step": "bash:git diff --unified <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 21,
+          "message": "git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead"
+        }
+      ]
+    }
+  ],
+  "motifs": [
+    {
+      "length": 2,
+      "steps": [
+        "search",
+        "read"
+      ],
+      "traces": 639
+    },
+    {
+      "length": 2,
+      "steps": [
+        "read",
+        "search"
+      ],
+      "traces": 619
+    },
+    {
+      "length": 2,
+      "steps": [
+        "read",
+        "shell"
+      ],
+      "traces": 585
+    },
+    {
+      "length": 2,
+      "steps": [
+        "shell",
+        "read"
+      ],
+      "traces": 554
+    },
+    {
+      "length": 3,
+      "steps": [
+        "read",
+        "search",
+        "read"
+      ],
+      "traces": 438
+    },
+    {
+      "length": 3,
+      "steps": [
+        "search",
+        "read",
+        "search"
+      ],
+      "traces": 414
+    },
+    {
+      "length": 2,
+      "steps": [
+        "shell",
+        "search"
+      ],
+      "traces": 383
+    },
+    {
+      "length": 2,
+      "steps": [
+        "search",
+        "shell"
+      ],
+      "traces": 366
+    },
+    {
+      "length": 3,
+      "steps": [
+        "shell",
+        "read",
+        "shell"
+      ],
+      "traces": 357
+    },
+    {
+      "length": 4,
+      "steps": [
+        "search",
+        "read",
+        "search",
+        "read"
+      ],
+      "traces": 312
+    },
+    {
+      "length": 3,
+      "steps": [
+        "read",
+        "shell",
+        "read"
+      ],
+      "traces": 305
+    },
+    {
+      "length": 4,
+      "steps": [
+        "read",
+        "search",
+        "read",
+        "search"
+      ],
+      "traces": 291
+    },
+    {
+      "length": 2,
+      "steps": [
+        "edit",
+        "shell"
+      ],
+      "traces": 257
+    },
+    {
+      "length": 2,
+      "steps": [
+        "shell",
+        "edit"
+      ],
+      "traces": 252
+    },
+    {
+      "length": 2,
+      "steps": [
+        "read",
+        "edit"
+      ],
+      "traces": 250
+    },
+    {
+      "length": 3,
+      "steps": [
+        "shell",
+        "search",
+        "read"
+      ],
+      "traces": 229
+    },
+    {
+      "length": 5,
+      "steps": [
+        "read",
+        "search",
+        "read",
+        "search",
+        "read"
+      ],
+      "traces": 225
+    },
+    {
+      "length": 2,
+      "steps": [
+        "skill",
+        "read"
+      ],
+      "traces": 224
+    },
+    {
+      "length": 3,
+      "steps": [
+        "shell",
+        "search",
+        "shell"
+      ],
+      "traces": 215
+    },
+    {
+      "length": 5,
+      "steps": [
+        "search",
+        "read",
+        "search",
+        "read",
+        "search"
+      ],
+      "traces": 213
+    },
+    {
+      "length": 4,
+      "steps": [
+        "read",
+        "shell",
+        "read",
+        "shell"
+      ],
+      "traces": 212
+    },
+    {
+      "length": 3,
+      "steps": [
+        "search",
+        "read",
+        "shell"
+      ],
+      "traces": 210
+    },
+    {
+      "length": 3,
+      "steps": [
+        "read",
+        "shell",
+        "search"
+      ],
+      "traces": 207
+    },
+    {
+      "length": 3,
+      "steps": [
+        "shell",
+        "read",
+        "search"
+      ],
+      "traces": 205
+    },
+    {
+      "length": 3,
+      "steps": [
+        "search",
+        "shell",
+        "read"
+      ],
+      "traces": 201
+    },
+    {
+      "length": 3,
+      "steps": [
+        "read",
+        "search",
+        "shell"
+      ],
+      "traces": 200
+    },
+    {
+      "length": 2,
+      "steps": [
+        "shell",
+        "write"
+      ],
+      "traces": 199
+    },
+    {
+      "length": 2,
+      "steps": [
+        "read",
+        "shell-misc"
+      ],
+      "traces": 196
+    },
+    {
+      "length": 2,
+      "steps": [
+        "shell-misc",
+        "read"
+      ],
+      "traces": 195
+    },
+    {
+      "length": 3,
+      "steps": [
+        "shell",
+        "edit",
+        "shell"
+      ],
+      "traces": 191
+    }
+  ],
+  "repairs": {
+    "rejected_below_threshold": 3497,
+    "repairs": [
+      {
+        "distinct_sessions": 11,
+        "failing_step": "edit:<multi>",
+        "failing_step_calls": 3520,
+        "failing_step_error_rate": 0.132,
+        "kind": "repair",
+        "lift_over_base_rate": 9.0,
+        "pairs": 136,
+        "repair_step": "edit:<path:hermeswork:py>",
+        "repair_succeeded": 136,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 44,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 81.9,
+        "pairs": 118,
+        "repair_step": "mcp:ocbrain.brain.context",
+        "repair_succeeded": 118,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 33,
+        "failing_step": "edit:<multi>",
+        "failing_step_calls": 3520,
+        "failing_step_error_rate": 0.132,
+        "kind": "repair",
+        "lift_over_base_rate": 4.6,
+        "pairs": 104,
+        "repair_step": "read:<path:hermeswork:py>",
+        "repair_succeeded": 100,
+        "repair_success_rate": 0.962
+      },
+      {
+        "distinct_sessions": 29,
+        "failing_step": "codex:exec:mcp__ocbrain__brain_closeout",
+        "failing_step_calls": 354,
+        "failing_step_error_rate": 0.201,
+        "kind": "repair",
+        "lift_over_base_rate": 213.1,
+        "pairs": 71,
+        "repair_step": "mcp:ocbrain.brain.closeout",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 31,
+        "failing_step": "mcp:ocbrain.brain.closeout",
+        "failing_step_calls": 896,
+        "failing_step_error_rate": 0.148,
+        "kind": "repair",
+        "lift_over_base_rate": 280.3,
+        "pairs": 69,
+        "repair_step": "codex:exec:mcp__ocbrain__brain_closeout",
+        "repair_succeeded": 59,
+        "repair_success_rate": 0.855
+      },
+      {
+        "distinct_sessions": 20,
+        "failing_step": "tool:wait_agent",
+        "failing_step_calls": 357,
+        "failing_step_error_rate": 0.58,
+        "kind": "repair",
+        "lift_over_base_rate": 254.1,
+        "pairs": 53,
+        "repair_step": "tool:list_agents",
+        "repair_succeeded": 50,
+        "repair_success_rate": 0.943
+      },
+      {
+        "distinct_sessions": 19,
+        "failing_step": "tool:wait_agent",
+        "failing_step_calls": 357,
+        "failing_step_error_rate": 0.58,
+        "kind": "repair",
+        "lift_over_base_rate": 65.2,
+        "pairs": 44,
+        "repair_step": "tool:send_message",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 35,
+        "failing_step": "toolonly:terminal",
+        "failing_step_calls": 10424,
+        "failing_step_error_rate": 0.055,
+        "kind": "repair",
+        "lift_over_base_rate": 6.7,
+        "pairs": 43,
+        "repair_step": "toolonly:patch",
+        "repair_succeeded": 41,
+        "repair_success_rate": 0.953
+      },
+      {
+        "distinct_sessions": 42,
+        "failing_step": "toolonly:terminal",
+        "failing_step_calls": 10424,
+        "failing_step_error_rate": 0.055,
+        "kind": "repair",
+        "lift_over_base_rate": 3.6,
+        "pairs": 43,
+        "repair_step": "toolonly:search_files",
+        "repair_succeeded": 43,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 22,
+        "failing_step": "toolonly:process",
+        "failing_step_calls": 304,
+        "failing_step_error_rate": 0.286,
+        "kind": "repair",
+        "lift_over_base_rate": 8.9,
+        "pairs": 41,
+        "repair_step": "toolonly:terminal",
+        "repair_succeeded": 38,
+        "repair_success_rate": 0.927
+      },
+      {
+        "distinct_sessions": 20,
+        "failing_step": "tool:kanban_show",
+        "failing_step_calls": 2105,
+        "failing_step_error_rate": 0.045,
+        "kind": "repair",
+        "lift_over_base_rate": 15.1,
+        "pairs": 37,
+        "repair_step": "tool:skill_view",
+        "repair_succeeded": 36,
+        "repair_success_rate": 0.973
+      },
+      {
+        "distinct_sessions": 22,
+        "failing_step": "read:<path:hermeswork:py>",
+        "failing_step_calls": 9279,
+        "failing_step_error_rate": 0.014,
+        "kind": "repair",
+        "lift_over_base_rate": 6.2,
+        "pairs": 31,
+        "repair_step": "grep:<path:hermeswork>",
+        "repair_succeeded": 31,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "codex:exec:mcp__agent_control__spine_task_update",
+        "failing_step_calls": 116,
+        "failing_step_error_rate": 0.267,
+        "kind": "repair",
+        "lift_over_base_rate": 157.0,
+        "pairs": 29,
+        "repair_step": "mcp:agent-control.spine.task_update",
+        "repair_succeeded": 29,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "tool:process",
+        "failing_step_calls": 2177,
+        "failing_step_error_rate": 0.296,
+        "kind": "repair",
+        "lift_over_base_rate": 6.8,
+        "pairs": 29,
+        "repair_step": "bash:ssh -o <chain>",
+        "repair_succeeded": 28,
+        "repair_success_rate": 0.966
+      },
+      {
+        "distinct_sessions": 9,
+        "failing_step": "edit:<path:hermeswork:py>",
+        "failing_step_calls": 6185,
+        "failing_step_error_rate": 0.018,
+        "kind": "repair",
+        "lift_over_base_rate": 5.3,
+        "pairs": 29,
+        "repair_step": "read:<path:hermeswork:py>",
+        "repair_succeeded": 29,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "tool:process",
+        "failing_step_calls": 2177,
+        "failing_step_error_rate": 0.296,
+        "kind": "repair",
+        "lift_over_base_rate": 2.4,
+        "pairs": 28,
+        "repair_step": "edit:<multi>",
+        "repair_succeeded": 22,
+        "repair_success_rate": 0.786
+      },
+      {
+        "distinct_sessions": 11,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 42.6,
+        "pairs": 27,
+        "repair_step": "codex:exec:<script>",
+        "repair_succeeded": 27,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 11,
+        "failing_step": "bash:ruff format <path:rel:py> <chain>",
+        "failing_step_calls": 369,
+        "failing_step_error_rate": 0.163,
+        "kind": "repair",
+        "lift_over_base_rate": 22.5,
+        "pairs": 25,
+        "repair_step": "edit:<multi>",
+        "repair_succeeded": 23,
+        "repair_success_rate": 0.92
+      },
+      {
+        "distinct_sessions": 19,
+        "failing_step": "toolonly:terminal",
+        "failing_step_calls": 10424,
+        "failing_step_error_rate": 0.055,
+        "kind": "repair",
+        "lift_over_base_rate": 11.9,
+        "pairs": 22,
+        "repair_step": "toolonly:write_file",
+        "repair_succeeded": 22,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 19,
+        "failing_step": "codex:exec:mcp__agent_control__spine_recent",
+        "failing_step_calls": 37,
+        "failing_step_error_rate": 0.568,
+        "kind": "repair",
+        "lift_over_base_rate": 177.9,
+        "pairs": 21,
+        "repair_step": "mcp:agent-control.spine.recent",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "bash:ruff check <path:rel:py> <chain>",
+        "failing_step_calls": 365,
+        "failing_step_error_rate": 0.244,
+        "kind": "repair",
+        "lift_over_base_rate": 11.5,
+        "pairs": 19,
+        "repair_step": "edit:<multi>",
+        "repair_succeeded": 19,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 10,
+        "failing_step": "codex:exec:<script>",
+        "failing_step_calls": 553,
+        "failing_step_error_rate": 0.096,
+        "kind": "repair",
+        "lift_over_base_rate": 95.2,
+        "pairs": 15,
+        "repair_step": "tool:send_message",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "tool:kanban_complete",
+        "failing_step_calls": 161,
+        "failing_step_error_rate": 0.329,
+        "kind": "repair",
+        "lift_over_base_rate": 29.7,
+        "pairs": 15,
+        "repair_step": "tool:kanban_show",
+        "repair_succeeded": 15,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "toolonly:read_file",
+        "failing_step_calls": 6716,
+        "failing_step_error_rate": 0.006,
+        "kind": "repair",
+        "lift_over_base_rate": 6.8,
+        "pairs": 15,
+        "repair_step": "toolonly:terminal",
+        "repair_succeeded": 15,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "tool:process",
+        "failing_step_calls": 2177,
+        "failing_step_error_rate": 0.296,
+        "kind": "repair",
+        "lift_over_base_rate": 3.1,
+        "pairs": 15,
+        "repair_step": "write:<path:hermeswork:py>",
+        "repair_succeeded": 15,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:ruff format <path:rel:py> <chain>",
+        "failing_step_calls": 369,
+        "failing_step_error_rate": 0.163,
+        "kind": "repair",
+        "lift_over_base_rate": 6.7,
+        "pairs": 13,
+        "repair_step": "edit:<path:hermeswork:py>",
+        "repair_succeeded": 13,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "bash:cd <chain>",
+        "failing_step_calls": 12826,
+        "failing_step_error_rate": 0.031,
+        "kind": "repair",
+        "lift_over_base_rate": 5.0,
+        "pairs": 12,
+        "repair_step": "write:<path:tmp:py>",
+        "repair_succeeded": 12,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "bash:sleep <chain>",
+        "failing_step_calls": 2002,
+        "failing_step_error_rate": 0.034,
+        "kind": "repair",
+        "lift_over_base_rate": 200.7,
+        "pairs": 11,
+        "repair_step": "tool:ToolSearch",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 11,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 5.9,
+        "pairs": 11,
+        "repair_step": "codex:exec:exec_command",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.727
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:pwd",
+        "failing_step_calls": 19,
+        "failing_step_error_rate": 0.947,
+        "kind": "repair",
+        "lift_over_base_rate": 182.5,
+        "pairs": 10,
+        "repair_step": "tool:send_message",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 9,
+        "failing_step": "toolonly:execute_code",
+        "failing_step_calls": 769,
+        "failing_step_error_rate": 0.07,
+        "kind": "repair",
+        "lift_over_base_rate": 3.7,
+        "pairs": 10,
+        "repair_step": "toolonly:terminal",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.8
+      },
+      {
+        "distinct_sessions": 10,
+        "failing_step": "read:<path:hermeswork:md>",
+        "failing_step_calls": 2583,
+        "failing_step_error_rate": 0.039,
+        "kind": "repair",
+        "lift_over_base_rate": 2.5,
+        "pairs": 10,
+        "repair_step": "grep:<path:hermeswork>",
+        "repair_succeeded": 9,
+        "repair_success_rate": 0.9
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "read:<path:hermeswork:py>",
+        "failing_step_calls": 9279,
+        "failing_step_error_rate": 0.014,
+        "kind": "repair",
+        "lift_over_base_rate": 2.4,
+        "pairs": 10,
+        "repair_step": "edit:<path:hermeswork:py>",
+        "repair_succeeded": 10,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "tool:wait_agent",
+        "failing_step_calls": 357,
+        "failing_step_error_rate": 0.58,
+        "kind": "repair",
+        "lift_over_base_rate": 206.5,
+        "pairs": 9,
+        "repair_step": "tool:interrupt_agent",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 93.5,
+        "pairs": 9,
+        "repair_step": "bash:wc -l <path:rel:md>",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:ruff check <path:rel:py> <chain>",
+        "failing_step_calls": 365,
+        "failing_step_error_rate": 0.244,
+        "kind": "repair",
+        "lift_over_base_rate": 52.0,
+        "pairs": 9,
+        "repair_step": "bash:ruff format <path:rel:py> <chain>",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 35.7,
+        "pairs": 9,
+        "repair_step": "bash:wc -l <chain>",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.889
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "tool:kanban_block",
+        "failing_step_calls": 112,
+        "failing_step_error_rate": 0.286,
+        "kind": "repair",
+        "lift_over_base_rate": 28.1,
+        "pairs": 9,
+        "repair_step": "tool:kanban_show",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:git show <path:rel:py> <chain>",
+        "failing_step_calls": 510,
+        "failing_step_error_rate": 0.129,
+        "kind": "repair",
+        "lift_over_base_rate": 20.1,
+        "pairs": 9,
+        "repair_step": "bash:rg -n <chain>",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:pytest -q <path:rel:py>",
+        "failing_step_calls": 103,
+        "failing_step_error_rate": 0.34,
+        "kind": "repair",
+        "lift_over_base_rate": 6.7,
+        "pairs": 9,
+        "repair_step": "grep:<path:hermeswork>",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.889
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 3.9,
+        "pairs": 9,
+        "repair_step": "bash:sed -n",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "toolonly:terminal",
+        "failing_step_calls": 10424,
+        "failing_step_error_rate": 0.055,
+        "kind": "repair",
+        "lift_over_base_rate": 3.9,
+        "pairs": 9,
+        "repair_step": "toolonly:execute_code",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.889
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "codex:exec:<script>",
+        "failing_step_calls": 553,
+        "failing_step_error_rate": 0.096,
+        "kind": "repair",
+        "lift_over_base_rate": 114.2,
+        "pairs": 8,
+        "repair_step": "tool:spawn_agent",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "mcp:agent-control.spine.recent",
+        "failing_step_calls": 1148,
+        "failing_step_error_rate": 0.241,
+        "kind": "repair",
+        "lift_over_base_rate": 36.8,
+        "pairs": 8,
+        "repair_step": "bash:wc -l",
+        "repair_succeeded": 7,
+        "repair_success_rate": 0.875
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:cd <chain>",
+        "failing_step_calls": 12826,
+        "failing_step_error_rate": 0.031,
+        "kind": "repair",
+        "lift_over_base_rate": 31.0,
+        "pairs": 8,
+        "repair_step": "write:<path:tmp:md>",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:ssh -o <chain>",
+        "failing_step_calls": 1270,
+        "failing_step_error_rate": 0.074,
+        "kind": "repair",
+        "lift_over_base_rate": 26.6,
+        "pairs": 8,
+        "repair_step": "bash:ssh -o <path:rel>",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "toolonly:read_file",
+        "failing_step_calls": 6716,
+        "failing_step_error_rate": 0.006,
+        "kind": "repair",
+        "lift_over_base_rate": 9.2,
+        "pairs": 8,
+        "repair_step": "toolonly:search_files",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "toolonly:process",
+        "failing_step_calls": 304,
+        "failing_step_error_rate": 0.286,
+        "kind": "repair",
+        "lift_over_base_rate": 8.2,
+        "pairs": 8,
+        "repair_step": "toolonly:patch",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "bash:python3 <path:rel>",
+        "failing_step_calls": 180,
+        "failing_step_error_rate": 0.206,
+        "kind": "repair",
+        "lift_over_base_rate": 8.1,
+        "pairs": 8,
+        "repair_step": "tool:execute_code",
+        "repair_succeeded": 7,
+        "repair_success_rate": 0.875
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:python3 <path:rel> <chain>",
+        "failing_step_calls": 141,
+        "failing_step_error_rate": 0.298,
+        "kind": "repair",
+        "lift_over_base_rate": 7.1,
+        "pairs": 8,
+        "repair_step": "tool:execute_code",
+        "repair_succeeded": 6,
+        "repair_success_rate": 0.75
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "toolonly:patch",
+        "failing_step_calls": 2151,
+        "failing_step_error_rate": 0.012,
+        "kind": "repair",
+        "lift_over_base_rate": 5.7,
+        "pairs": 8,
+        "repair_step": "toolonly:terminal",
+        "repair_succeeded": 8,
+        "repair_success_rate": 1.0
+      }
+    ],
+    "retries": [
+      {
+        "distinct_sessions": 214,
+        "failing_step": "toolonly:terminal",
+        "failing_step_calls": 10424,
+        "failing_step_error_rate": 0.055,
+        "kind": "retry",
+        "lift_over_base_rate": 13.1,
+        "pairs": 399,
+        "repair_step": "toolonly:terminal",
+        "repair_succeeded": 341,
+        "repair_success_rate": 0.855
+      },
+      {
+        "distinct_sessions": 79,
+        "failing_step": "bash:cd <chain>",
+        "failing_step_calls": 12826,
+        "failing_step_error_rate": 0.031,
+        "kind": "retry",
+        "lift_over_base_rate": 8.2,
+        "pairs": 216,
+        "repair_step": "bash:cd <chain>",
+        "repair_succeeded": 200,
+        "repair_success_rate": 0.926
+      },
+      {
+        "distinct_sessions": 39,
+        "failing_step": "edit:<multi>",
+        "failing_step_calls": 3520,
+        "failing_step_error_rate": 0.132,
+        "kind": "retry",
+        "lift_over_base_rate": 18.3,
+        "pairs": 158,
+        "repair_step": "edit:<multi>",
+        "repair_succeeded": 134,
+        "repair_success_rate": 0.848
+      },
+      {
+        "distinct_sessions": 36,
+        "failing_step": "tool:process",
+        "failing_step_calls": 2177,
+        "failing_step_error_rate": 0.296,
+        "kind": "retry",
+        "lift_over_base_rate": 20.7,
+        "pairs": 152,
+        "repair_step": "tool:process",
+        "repair_succeeded": 57,
+        "repair_success_rate": 0.375
+      },
+      {
+        "distinct_sessions": 37,
+        "failing_step": "tool:execute_code",
+        "failing_step_calls": 5100,
+        "failing_step_error_rate": 0.042,
+        "kind": "retry",
+        "lift_over_base_rate": 19.2,
+        "pairs": 111,
+        "repair_step": "tool:execute_code",
+        "repair_succeeded": 87,
+        "repair_success_rate": 0.784
+      },
+      {
+        "distinct_sessions": 9,
+        "failing_step": "mcp:ocbrain.brain.closeout",
+        "failing_step_calls": 896,
+        "failing_step_error_rate": 0.148,
+        "kind": "retry",
+        "lift_over_base_rate": 95.2,
+        "pairs": 59,
+        "repair_step": "mcp:ocbrain.brain.closeout",
+        "repair_succeeded": 48,
+        "repair_success_rate": 0.814
+      },
+      {
+        "distinct_sessions": 20,
+        "failing_step": "codex:exec:exec_command",
+        "failing_step_calls": 1281,
+        "failing_step_error_rate": 0.081,
+        "kind": "retry",
+        "lift_over_base_rate": 86.4,
+        "pairs": 59,
+        "repair_step": "codex:exec:exec_command",
+        "repair_succeeded": 50,
+        "repair_success_rate": 0.847
+      },
+      {
+        "distinct_sessions": 16,
+        "failing_step": "edit:<path:hermeswork:py>",
+        "failing_step_calls": 6185,
+        "failing_step_error_rate": 0.018,
+        "kind": "retry",
+        "lift_over_base_rate": 15.5,
+        "pairs": 57,
+        "repair_step": "edit:<path:hermeswork:py>",
+        "repair_succeeded": 55,
+        "repair_success_rate": 0.965
+      },
+      {
+        "distinct_sessions": 28,
+        "failing_step": "read:<path:hermeswork:md>",
+        "failing_step_calls": 2583,
+        "failing_step_error_rate": 0.039,
+        "kind": "retry",
+        "lift_over_base_rate": 39.7,
+        "pairs": 54,
+        "repair_step": "read:<path:hermeswork:md>",
+        "repair_succeeded": 24,
+        "repair_success_rate": 0.444
+      },
+      {
+        "distinct_sessions": 23,
+        "failing_step": "mcp:ocbrain.brain_closeout",
+        "failing_step_calls": 120,
+        "failing_step_error_rate": 0.583,
+        "kind": "retry",
+        "lift_over_base_rate": 1251.5,
+        "pairs": 53,
+        "repair_step": "mcp:ocbrain.brain_closeout",
+        "repair_succeeded": 29,
+        "repair_success_rate": 0.547
+      },
+      {
+        "distinct_sessions": 27,
+        "failing_step": "read:<path:hermeswork:py>",
+        "failing_step_calls": 9279,
+        "failing_step_error_rate": 0.014,
+        "kind": "retry",
+        "lift_over_base_rate": 7.4,
+        "pairs": 46,
+        "repair_step": "read:<path:hermeswork:py>",
+        "repair_succeeded": 38,
+        "repair_success_rate": 0.826
+      },
+      {
+        "distinct_sessions": 14,
+        "failing_step": "tool:memory",
+        "failing_step_calls": 169,
+        "failing_step_error_rate": 0.308,
+        "kind": "retry",
+        "lift_over_base_rate": 972.1,
+        "pairs": 45,
+        "repair_step": "tool:memory",
+        "repair_succeeded": 26,
+        "repair_success_rate": 0.578
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "tool:tool_call",
+        "failing_step_calls": 751,
+        "failing_step_error_rate": 0.119,
+        "kind": "retry",
+        "lift_over_base_rate": 90.1,
+        "pairs": 31,
+        "repair_step": "tool:tool_call",
+        "repair_succeeded": 19,
+        "repair_success_rate": 0.613
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "bash:ssh -o <chain>",
+        "failing_step_calls": 1270,
+        "failing_step_error_rate": 0.074,
+        "kind": "retry",
+        "lift_over_base_rate": 49.8,
+        "pairs": 31,
+        "repair_step": "bash:ssh -o <chain>",
+        "repair_succeeded": 26,
+        "repair_success_rate": 0.839
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "mcp:ocbrain.brain.source",
+        "failing_step_calls": 73,
+        "failing_step_error_rate": 0.521,
+        "kind": "retry",
+        "lift_over_base_rate": 1916.3,
+        "pairs": 28,
+        "repair_step": "mcp:ocbrain.brain.source",
+        "repair_succeeded": 4,
+        "repair_success_rate": 0.143
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:git show <path:rel:py> <chain>",
+        "failing_step_calls": 510,
+        "failing_step_error_rate": 0.129,
+        "kind": "retry",
+        "lift_over_base_rate": 157.9,
+        "pairs": 28,
+        "repair_step": "bash:git show <path:rel:py> <chain>",
+        "repair_succeeded": 0,
+        "repair_success_rate": 0.0
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "toolonly:execute_code",
+        "failing_step_calls": 769,
+        "failing_step_error_rate": 0.07,
+        "kind": "retry",
+        "lift_over_base_rate": 139.0,
+        "pairs": 28,
+        "repair_step": "toolonly:execute_code",
+        "repair_succeeded": 14,
+        "repair_success_rate": 0.5
+      },
+      {
+        "distinct_sessions": 19,
+        "failing_step": "grep:<path:hermeswork>",
+        "failing_step_calls": 7524,
+        "failing_step_error_rate": 0.007,
+        "kind": "retry",
+        "lift_over_base_rate": 13.1,
+        "pairs": 28,
+        "repair_step": "grep:<path:hermeswork>",
+        "repair_succeeded": 23,
+        "repair_success_rate": 0.821
+      },
+      {
+        "distinct_sessions": 13,
+        "failing_step": "tool:skill_view",
+        "failing_step_calls": 5163,
+        "failing_step_error_rate": 0.017,
+        "kind": "retry",
+        "lift_over_base_rate": 11.0,
+        "pairs": 25,
+        "repair_step": "tool:skill_view",
+        "repair_succeeded": 18,
+        "repair_success_rate": 0.72
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "bash:ssh <path:rel> <chain>",
+        "failing_step_calls": 469,
+        "failing_step_error_rate": 0.134,
+        "kind": "retry",
+        "lift_over_base_rate": 150.2,
+        "pairs": 23,
+        "repair_step": "bash:ssh <path:rel> <chain>",
+        "repair_succeeded": 21,
+        "repair_success_rate": 0.913
+      },
+      {
+        "distinct_sessions": 11,
+        "failing_step": "tool:kanban_show",
+        "failing_step_calls": 2105,
+        "failing_step_error_rate": 0.045,
+        "kind": "retry",
+        "lift_over_base_rate": 23.7,
+        "pairs": 23,
+        "repair_step": "tool:kanban_show",
+        "repair_succeeded": 18,
+        "repair_success_rate": 0.783
+      },
+      {
+        "distinct_sessions": 15,
+        "failing_step": "tool:kanban_create",
+        "failing_step_calls": 321,
+        "failing_step_error_rate": 0.118,
+        "kind": "retry",
+        "lift_over_base_rate": 351.7,
+        "pairs": 22,
+        "repair_step": "tool:kanban_create",
+        "repair_succeeded": 17,
+        "repair_success_rate": 0.773
+      },
+      {
+        "distinct_sessions": 14,
+        "failing_step": "tool:wait_agent",
+        "failing_step_calls": 357,
+        "failing_step_error_rate": 0.58,
+        "kind": "retry",
+        "lift_over_base_rate": 59.4,
+        "pairs": 22,
+        "repair_step": "tool:wait_agent",
+        "repair_succeeded": 11,
+        "repair_success_rate": 0.5
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "toolonly:process",
+        "failing_step_calls": 304,
+        "failing_step_error_rate": 0.286,
+        "kind": "retry",
+        "lift_over_base_rate": 153.5,
+        "pairs": 21,
+        "repair_step": "toolonly:process",
+        "repair_succeeded": 3,
+        "repair_success_rate": 0.143
+      },
+      {
+        "distinct_sessions": 11,
+        "failing_step": "bash:ssh -o <path:rel>",
+        "failing_step_calls": 613,
+        "failing_step_error_rate": 0.088,
+        "kind": "retry",
+        "lift_over_base_rate": 120.4,
+        "pairs": 21,
+        "repair_step": "bash:ssh -o <path:rel>",
+        "repair_succeeded": 17,
+        "repair_success_rate": 0.81
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "bash:python -c <chain>",
+        "failing_step_calls": 473,
+        "failing_step_error_rate": 0.142,
+        "kind": "retry",
+        "lift_over_base_rate": 107.8,
+        "pairs": 18,
+        "repair_step": "bash:python -c <chain>",
+        "repair_succeeded": 16,
+        "repair_success_rate": 0.889
+      },
+      {
+        "distinct_sessions": 8,
+        "failing_step": "tool:kanban_block",
+        "failing_step_calls": 112,
+        "failing_step_error_rate": 0.286,
+        "kind": "retry",
+        "lift_over_base_rate": 929.5,
+        "pairs": 17,
+        "repair_step": "tool:kanban_block",
+        "repair_succeeded": 6,
+        "repair_success_rate": 0.353
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "bash:ssh <chain>",
+        "failing_step_calls": 605,
+        "failing_step_error_rate": 0.074,
+        "kind": "retry",
+        "lift_over_base_rate": 118.7,
+        "pairs": 17,
+        "repair_step": "bash:ssh <chain>",
+        "repair_succeeded": 15,
+        "repair_success_rate": 0.882
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "bash:sleep <chain>",
+        "failing_step_calls": 2002,
+        "failing_step_error_rate": 0.034,
+        "kind": "retry",
+        "lift_over_base_rate": 23.7,
+        "pairs": 17,
+        "repair_step": "bash:sleep <chain>",
+        "repair_succeeded": 14,
+        "repair_success_rate": 0.824
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "tool:kanban_complete",
+        "failing_step_calls": 161,
+        "failing_step_error_rate": 0.329,
+        "kind": "retry",
+        "lift_over_base_rate": 385.0,
+        "pairs": 16,
+        "repair_step": "tool:kanban_complete",
+        "repair_succeeded": 11,
+        "repair_success_rate": 0.688
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "bash:printf <chain>",
+        "failing_step_calls": 1115,
+        "failing_step_error_rate": 0.03,
+        "kind": "retry",
+        "lift_over_base_rate": 70.1,
+        "pairs": 14,
+        "repair_step": "bash:printf <chain>",
+        "repair_succeeded": 14,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 9,
+        "failing_step": "bash:<empty>",
+        "failing_step_calls": 1201,
+        "failing_step_error_rate": 0.032,
+        "kind": "retry",
+        "lift_over_base_rate": 56.7,
+        "pairs": 14,
+        "repair_step": "bash:<empty>",
+        "repair_succeeded": 11,
+        "repair_success_rate": 0.786
+      },
+      {
+        "distinct_sessions": 12,
+        "failing_step": "toolonly:read_file",
+        "failing_step_calls": 6716,
+        "failing_step_error_rate": 0.006,
+        "kind": "retry",
+        "lift_over_base_rate": 10.0,
+        "pairs": 14,
+        "repair_step": "toolonly:read_file",
+        "repair_succeeded": 12,
+        "repair_success_rate": 0.857
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:ssh -o <path:rel> <chain>",
+        "failing_step_calls": 700,
+        "failing_step_error_rate": 0.093,
+        "kind": "retry",
+        "lift_over_base_rate": 54.2,
+        "pairs": 13,
+        "repair_step": "bash:ssh -o <path:rel> <chain>",
+        "repair_succeeded": 10,
+        "repair_success_rate": 0.769
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "codex:exec:apply_patch",
+        "failing_step_calls": 947,
+        "failing_step_error_rate": 0.044,
+        "kind": "retry",
+        "lift_over_base_rate": 57.3,
+        "pairs": 12,
+        "repair_step": "codex:exec:apply_patch",
+        "repair_succeeded": 12,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:for <chain>",
+        "failing_step_calls": 918,
+        "failing_step_error_rate": 0.051,
+        "kind": "retry",
+        "lift_over_base_rate": 52.9,
+        "pairs": 12,
+        "repair_step": "bash:for <chain>",
+        "repair_succeeded": 11,
+        "repair_success_rate": 0.917
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "toolonly:patch",
+        "failing_step_calls": 2151,
+        "failing_step_error_rate": 0.012,
+        "kind": "retry",
+        "lift_over_base_rate": 40.8,
+        "pairs": 12,
+        "repair_step": "toolonly:patch",
+        "repair_succeeded": 9,
+        "repair_success_rate": 0.75
+      },
+      {
+        "distinct_sessions": 5,
+        "failing_step": "tool:kanban_comment",
+        "failing_step_calls": 739,
+        "failing_step_error_rate": 0.022,
+        "kind": "retry",
+        "lift_over_base_rate": 176.6,
+        "pairs": 11,
+        "repair_step": "tool:kanban_comment",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.727
+      },
+      {
+        "distinct_sessions": 7,
+        "failing_step": "bash:python3 -c <chain>",
+        "failing_step_calls": 379,
+        "failing_step_error_rate": 0.121,
+        "kind": "retry",
+        "lift_over_base_rate": 119.8,
+        "pairs": 11,
+        "repair_step": "bash:python3 -c <chain>",
+        "repair_succeeded": 10,
+        "repair_success_rate": 0.909
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "bash:ssh -eu <chain>",
+        "failing_step_calls": 281,
+        "failing_step_error_rate": 0.121,
+        "kind": "retry",
+        "lift_over_base_rate": 204.7,
+        "pairs": 10,
+        "repair_step": "bash:ssh -eu <chain>",
+        "repair_succeeded": 8,
+        "repair_success_rate": 0.8
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:nl -ba <path:rel:py> <chain>",
+        "failing_step_calls": 876,
+        "failing_step_error_rate": 0.03,
+        "kind": "retry",
+        "lift_over_base_rate": 75.1,
+        "pairs": 9,
+        "repair_step": "bash:nl -ba <path:rel:py> <chain>",
+        "repair_succeeded": 9,
+        "repair_success_rate": 1.0
+      },
+      {
+        "distinct_sessions": 4,
+        "failing_step": "edit:<path:repo:coframe:py>",
+        "failing_step_calls": 890,
+        "failing_step_error_rate": 0.016,
+        "kind": "retry",
+        "lift_over_base_rate": 121.9,
+        "pairs": 8,
+        "repair_step": "edit:<path:repo:coframe:py>",
+        "repair_succeeded": 5,
+        "repair_success_rate": 0.625
+      },
+      {
+        "distinct_sessions": 6,
+        "failing_step": "bash:echo <chain>",
+        "failing_step_calls": 654,
+        "failing_step_error_rate": 0.038,
+        "kind": "retry",
+        "lift_over_base_rate": 96.9,
+        "pairs": 8,
+        "repair_step": "bash:echo <chain>",
+        "repair_succeeded": 7,
+        "repair_success_rate": 0.875
+      }
+    ],
+    "thresholds": {
+      "min_distinct_sessions": 4,
+      "min_lift": 2.0,
+      "min_pairs": 8
+    }
+  },
+  "runtime_comparison": {
+    "claude-code": {
+      "episodes": 2,
+      "events": 123,
+      "failure_rate": 0.033,
+      "median_steps": 79,
+      "p90_steps": 79,
+      "receipted_or_better": 0,
+      "receipted_rate": 0.0,
+      "top_steps": {
+        "bash:cd <chain>": 36,
+        "bash:echo <chain>": 12,
+        "edit:<path:claudestore:md>": 4,
+        "edit:<path:repo:ocbrain:py>": 14,
+        "read:<path:repo:ocbrain:py>": 10,
+        "tool:TaskCreate": 4,
+        "tool:TaskUpdate": 8,
+        "tool:ToolSearch": 3
+      }
+    },
+    "claude-code-subagent": {
+      "episodes": 5,
+      "events": 223,
+      "failure_rate": 0.013,
+      "median_steps": 43,
+      "p90_steps": 62,
+      "receipted_or_better": 3,
+      "receipted_rate": 0.6,
+      "top_steps": {
+        "bash:cd <chain>": 136,
+        "bash:ls -la <chain>": 4,
+        "bash:python3 -c": 5,
+        "bash:sleep": 4,
+        "bash:ssh -o <chain>": 6,
+        "read:<path:hermeswork:md>": 3,
+        "read:<path:repo:coframe:py>": 7,
+        "read:<path:tmp:py>": 4
+      }
+    },
+    "codex": {
+      "episodes": 100,
+      "events": 9123,
+      "failure_rate": 0.053,
+      "median_steps": 39,
+      "p90_steps": 173,
+      "receipted_or_better": 52,
+      "receipted_rate": 0.52,
+      "top_steps": {
+        "bash:for <chain>": 215,
+        "bash:rg -n <chain>": 248,
+        "bash:sed -n": 442,
+        "codex:exec:apply_patch": 402,
+        "codex:exec:exec_command": 187,
+        "codex:exec:write_stdin": 501,
+        "edit:<multi>": 197,
+        "tool:wait": 553
+      }
+    },
+    "hermes-legacy": {
+      "episodes": 2,
+      "events": 106,
+      "failure_rate": 0.019,
+      "median_steps": 84,
+      "p90_steps": 84,
+      "receipted_or_better": 1,
+      "receipted_rate": 0.5,
+      "top_steps": {
+        "toolonly:patch": 8,
+        "toolonly:read_file": 15,
+        "toolonly:search_files": 7,
+        "toolonly:session_search": 10,
+        "toolonly:skill_view": 10,
+        "toolonly:terminal": 27,
+        "toolonly:tool_describe": 5,
+        "toolonly:write_file": 5
+      }
+    }
+  },
+  "step_reliability": [
+    {
+      "by_result_class": {
+        "error": 70,
+        "ok": 50
+      },
+      "by_runtime": {
+        "claude-code": 94,
+        "claude-code-subagent": 26
+      },
+      "calls": 120,
+      "failure_rate": 0.583,
+      "failures": 70,
+      "receipt_sessions": [
+        "04b1ec23-a199-4b78-bdb3-0ecb9e8bb4b0",
+        "0be7cd0d-616d-4ba2-850a-e6c338afa89f",
+        "0cc77f93-50d6-4c35-b0cd-52d80ec22a17",
+        "2bc5ae2c-b1f3-442e-b99e-67f66ad46b5a",
+        "3383a1f5-27e2-4f3c-a7d4-566bf692cdf1"
+      ],
+      "sessions": 28,
+      "step": "mcp:ocbrain.brain_closeout",
+      "top_errors": [
+        {
+          "count": 31,
+          "message": "MCP error -<id>: Input validation error: Invalid arguments for tool brain.closeout: ["
+        },
+        {
+          "count": 14,
+          "message": "Error: MCP error -<id>: retrieval_use_ids must be an array"
+        },
+        {
+          "count": 5,
+          "message": "Error: artifact_refs must be an array of objects"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "ok": 150,
+        "timeout": 207
+      },
+      "by_runtime": {
+        "codex": 357
+      },
+      "calls": 357,
+      "failure_rate": 0.58,
+      "failures": 207,
+      "receipt_sessions": [
+        "019fc874-2645-7201-acd0-d4d47fe9b9a7",
+        "019fc875-197a-79c0-a350-9aa333986385",
+        "019fc95f-17a6-7af0-8b0b-673ff97d2dc2",
+        "019fc973-1f4b-7313-b8e6-3b93ca36dbfd",
+        "019fc973-2342-7580-85c1-a1f7ddc7738d"
+      ],
+      "sessions": 47,
+      "step": "tool:wait_agent",
+      "top_errors": [
+        {
+          "count": 206,
+          "message": "{\"message\":\"Wait timed out.\",\"timed_out\":true}"
+        },
+        {
+          "count": 1,
+          "message": "{\"message\":\"Wait timed out.\\n\\nRequested timeout of 1000ms was clamped to the minimum of 10000ms.\",\"timed_out\":true}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 38,
+        "ok": 35
+      },
+      "by_runtime": {
+        "codex": 73
+      },
+      "calls": 73,
+      "failure_rate": 0.521,
+      "failures": 38,
+      "receipt_sessions": [
+        "019f9506-c3e1-7d43-8419-9d38d09bbcbe",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fc133-ef20-7d60-9b34-8bfd336cc83c",
+        "019fc875-197a-79c0-a350-9aa333986385",
+        "019fc874-2645-7201-acd0-d4d47fe9b9a7"
+      ],
+      "sessions": 10,
+      "step": "mcp:ocbrain.brain.source",
+      "top_errors": [
+        {
+          "count": 38,
+          "message": "tool call error: tool call failed for `ocbrain/brain.source`"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 23,
+        "ok": 35
+      },
+      "by_runtime": {
+        "hermes": 58
+      },
+      "calls": 58,
+      "failure_rate": 0.397,
+      "failures": 23,
+      "receipt_sessions": [
+        "20260812_093015_085674",
+        "20260812_114454_1cb79162",
+        "20260810_152957_963064",
+        "20260811_162936_608365",
+        "20260811_182557_44d6d9"
+      ],
+      "sessions": 19,
+      "step": "bash:chmod <path:rel:py> <chain>",
+      "top_errors": [
+        {
+          "count": 2,
+          "message": "{\"output\": \"2 files reformatted\\nI001 [*] Import block is un-sorted or un-formatted\\n --> scripts/vm/publish_dashboard_v2_projection.py:9:1\\n |\\n 7 | \\\"\\\"\\\"\\n 8"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"4 files reformatted\\nF841 Local variable `source_manifest` is assigned to but never used\\n --> scripts/verify_canonical_synthetic_p0_bundle.py:74:5\\"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"UP034 [*] Avoid extraneous parentheses\\n --> scripts/package_canonical_synthetic_p0_superset.py:178:9\\n |\\n176 | body.write(f\\\"--{boundary}\\\\r\\\\n\\\"."
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 1,
+        "ok": 31,
+        "refused": 21
+      },
+      "by_runtime": {
+        "codex": 28,
+        "hermes": 25
+      },
+      "calls": 53,
+      "failure_rate": 0.396,
+      "failures": 21,
+      "receipt_sessions": [
+        "019fb993-3f8c-7192-802c-b3a7b1d8dab5",
+        "019fd18a-987d-7112-9174-4c5ed1d05807",
+        "019fd1bc-ee03-7571-844d-0f59fd808787",
+        "019fd1dc-3868-7d90-a19b-9526f27c73a3",
+        "019fd569-34ca-7330-99f2-2c259da77402"
+      ],
+      "sessions": 15,
+      "step": "bash:git diff --unified <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 21,
+          "message": "git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 27,
+        "ok": 44
+      },
+      "by_runtime": {
+        "hermes": 71
+      },
+      "calls": 71,
+      "failure_rate": 0.38,
+      "failures": 27,
+      "receipt_sessions": [
+        "20260811_135043_21ef5f",
+        "20260812_090612_b66bdb0d",
+        "20260812_093015_085674",
+        "20260812_114454_1cb79162"
+      ],
+      "sessions": 5,
+      "step": "bash:<path:tmp> <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 6,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 637, in <module>\\n main()\\n <path:abs>^^\\n File \\\"<path:hermeswork:py>\\\", l"
+        },
+        {
+          "count": 6,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 500, in <module>\\n main()\\n <path:abs>^^\\n File \\\"<path:hermeswork:py>\\\", l"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermeswork:py>\\\", line 40, in <module>\\n publisher.main()\\n <path:abs>^^\\n File \\\"<path:hermeswork"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 30,
+        "ok": 68,
+        "refused": 5
+      },
+      "by_runtime": {
+        "codex": 21,
+        "hermes": 82
+      },
+      "calls": 103,
+      "failure_rate": 0.34,
+      "failures": 35,
+      "receipt_sessions": [
+        "019fc998-d559-7a80-ba6e-0b871e5b44e5",
+        "019fcac0-e600-78a3-97ce-d4514a926734",
+        "019fcac6-d96c-7e72-b1fd-0265ad5d7d39",
+        "019fd243-84c6-7583-8568-48d8a9f72c90",
+        "20260807_134135_23b0a5"
+      ],
+      "sessions": 18,
+      "step": "bash:pytest -q <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "{\"output\": \"ERROR: file or directory not found: tests/data/acquisition/test_materialized_loader.py\\n\\n\\nno tests ran in 0.00s\", \"exit_code\": 4, \"error\": null}"
+        },
+        {
+          "count": 3,
+          "message": "Script failed"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"Building coframe-brain @ file://<path:hermeswork>\\n \u00d7 Failed to build `coframe-brain @\\n \u2502 file://<path:hermeswork>`\\n \u251c\u2500\u25b6 The build backend returne"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 53,
+        "ok": 108
+      },
+      "by_runtime": {
+        "hermes": 161
+      },
+      "calls": 161,
+      "failure_rate": 0.329,
+      "failures": 53,
+      "receipt_sessions": [
+        "20260810_124335_ff3d8328",
+        "20260810_154431_d8ce9266",
+        "20260810_234649_980a03",
+        "20260811_020245_7cd41b",
+        "20260811_020310_19ac82e3"
+      ],
+      "sessions": 63,
+      "step": "tool:kanban_complete",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "{\"error\": \"could not complete t_dd9f149d (unknown id or already terminal)\"}"
+        },
+        {
+          "count": 4,
+          "message": "{\"error\": \"could not complete t_07b4930b (unknown id or already terminal)\"}"
+        },
+        {
+          "count": 4,
+          "message": "{\"error\": \"could not complete t_e6bae7c5 (unknown id or already terminal)\"}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 52,
+        "ok": 117
+      },
+      "by_runtime": {
+        "hermes": 169
+      },
+      "calls": 169,
+      "failure_rate": 0.308,
+      "failures": 52,
+      "receipt_sessions": [
+        "20260807_141305_f6b22280",
+        "20260810_124335_ff3d8328",
+        "20260810_154431_d8ce9266",
+        "20260812_090723_44a3d138",
+        "20260813_114551_b3a05160"
+      ],
+      "sessions": 32,
+      "step": "tool:memory",
+      "top_errors": [
+        {
+          "count": 9,
+          "message": "{\"success\": false, \"error\": \"After applying all 1 operations, memory would be at 2,224/2,200 chars -- over the limit. Remove or shorten more entries in the same"
+        },
+        {
+          "count": 7,
+          "message": "{\"success\": false, \"error\": \"After applying all 1 operations, memory would be at 2,204/2,200 chars -- over the limit. Remove or shorten more entries in the same"
+        },
+        {
+          "count": 2,
+          "message": "{\"success\": false, \"error\": \"Operation 1 (replace): no entry matched 'Jonathan prefers agent-coordination advice as exact copy-paste text'. No operations were a"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 1,
+        "error": 40,
+        "ok": 98,
+        "refused": 2
+      },
+      "by_runtime": {
+        "claude-code-subagent": 17,
+        "codex": 31,
+        "hermes": 84
+      },
+      "calls": 141,
+      "failure_rate": 0.298,
+      "failures": 42,
+      "receipt_sessions": [
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019fc973-1bc3-7863-900a-5e38138936ef",
+        "20260810_154431_d8ce9266",
+        "20260811_143852_8117ce",
+        "20260812_114532_c20e8888"
+      ],
+      "sessions": 48,
+      "step": "bash:python3 <path:rel> <chain>",
+      "top_errors": [
+        {
+          "count": 35,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 2,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 2,
+          "message": "zsh:1: can't create temp file for here document: operation not permitted"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 1,
+        "error": 644,
+        "ok": 1532
+      },
+      "by_runtime": {
+        "hermes": 2177
+      },
+      "calls": 2177,
+      "failure_rate": 0.296,
+      "failures": 644,
+      "receipt_sessions": [
+        "20260807_141305_f6b22280",
+        "20260807_141739_0f290e",
+        "20260810_124335_ff3d8328",
+        "20260810_124948_ab7e09",
+        "20260813_114551_b3a05160"
+      ],
+      "sessions": 97,
+      "step": "tool:process",
+      "top_errors": [
+        {
+          "count": 33,
+          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat"
+        },
+        {
+          "count": 17,
+          "message": "{\"status\": \"exited\", \"command\": \"uv run ruff format scripts/verify_canonical_synthetic_p0_superset.py && uv run ruff check scripts/verify_canonical_synthetic_p0"
+        },
+        {
+          "count": 17,
+          "message": "{\"status\": \"timeout\", \"command\": \"RUN=$(cat <path:tmp:txt>); scp -q dist/coframe_brain-0.1.0-py3-none-any.whl scripts/vm/pooled_feature_method_tournament.py \\\"a"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 19,
+        "ok": 50,
+        "timeout": 2
+      },
+      "by_runtime": {
+        "codex": 46,
+        "hermes": 25
+      },
+      "calls": 71,
+      "failure_rate": 0.296,
+      "failures": 21,
+      "receipt_sessions": [
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "20260810_154431_d8ce9266",
+        "20260812_091923_7c038a"
+      ],
+      "sessions": 19,
+      "step": "bash:python <path:rel> <chain>",
+      "top_errors": [
+        {
+          "count": 8,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 6,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"Downloading pycryptodome (2.4MiB)\\n Downloaded pycryptodome\\nInstalled 1 package in 4ms\\n\\n[Command timed out after 180s]\", \"exit_code\": 124, \"error"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 86,
+        "ok": 217,
+        "refused": 1
+      },
+      "by_runtime": {
+        "hermes-legacy": 304
+      },
+      "calls": 304,
+      "failure_rate": 0.286,
+      "failures": 87,
+      "receipt_sessions": [
+        "20260719_101552_e5038d20",
+        "20260722_203559_bc2347",
+        "20260723_013409_0ad4d2",
+        "20260728_200046_02a564",
+        "20260728_200046_727d64"
+      ],
+      "sessions": 74,
+      "step": "toolonly:process",
+      "top_errors": []
+    },
+    {
+      "by_result_class": {
+        "error": 32,
+        "ok": 80
+      },
+      "by_runtime": {
+        "hermes": 112
+      },
+      "calls": 112,
+      "failure_rate": 0.286,
+      "failures": 32,
+      "receipt_sessions": [
+        "20260810_154431_d8ce9266",
+        "20260810_175653_dac3ff",
+        "20260811_020315_868fa1",
+        "20260811_021418_1b710f",
+        "20260811_162936_608365"
+      ],
+      "sessions": 56,
+      "step": "tool:kanban_block",
+      "top_errors": [
+        {
+          "count": 4,
+          "message": "{\"error\": \"goal_mode tasks can only block with kind in ['dependency', 'needs_input'] (got 'capability'). If the task is actually finished or cannot proceed for "
+        },
+        {
+          "count": 4,
+          "message": "{\"error\": \"goal_mode tasks can only block with kind in ['dependency', 'needs_input'] (got 'transient'). If the task is actually finished or cannot proceed for a"
+        },
+        {
+          "count": 3,
+          "message": "{\"error\": \"goal_mode tasks can only block with kind in ['dependency', 'needs_input'] (got None). If the task is actually finished or cannot proceed for another "
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 31,
+        "ok": 85
+      },
+      "by_runtime": {
+        "codex": 116
+      },
+      "calls": 116,
+      "failure_rate": 0.267,
+      "failures": 31,
+      "receipt_sessions": [
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fc133-ef20-7d60-9b34-8bfd336cc83c",
+        "019fc874-2645-7201-acd0-d4d47fe9b9a7",
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "019fd7dd-7261-7d51-94b3-84d26fd79e5a"
+      ],
+      "sessions": 11,
+      "step": "codex:exec:mcp__agent_control__spine_task_update",
+      "top_errors": [
+        {
+          "count": 7,
+          "message": "{\"content\":[{\"type\":\"text\",\"text\":\"ValueError: use release_seal to enter sealed state\"}],\"isError\":true}"
+        },
+        {
+          "count": 7,
+          "message": "ValueError: invalid status transition: running -> delivered"
+        },
+        {
+          "count": 6,
+          "message": "{\"content\":[{\"type\":\"text\",\"text\":\"ValueError: invalid status transition: running -> delivered\"}],\"isError\":true}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 14,
+        "ok": 43
+      },
+      "by_runtime": {
+        "hermes": 57
+      },
+      "calls": 57,
+      "failure_rate": 0.246,
+      "failures": 14,
+      "receipt_sessions": [
+        "20260812_090607_099194f3",
+        "20260813_114541_64df80db",
+        "20260807_123042_e29f92bf",
+        "20260818_092423_90ba1efd",
+        "cron_ce96eb9e7c1e_20260821_151132"
+      ],
+      "sessions": 15,
+      "step": "read:<path:hermeswork>",
+      "top_errors": [
+        {
+          "count": 11,
+          "message": "{\"content\": \"\", \"total_lines\": 0, \"file_size\": 0, \"truncated\": false, \"is_binary\": false, \"is_image\": false, \"error\": \"File not found: <path:hermeswork>\"}"
+        },
+        {
+          "count": 2,
+          "message": "{\"content\": \"\", \"total_lines\": 0, \"file_size\": 0, \"truncated\": false, \"is_binary\": false, \"is_image\": false, \"error\": \"Cannot read '<path:hermeswork>': not a re"
+        },
+        {
+          "count": 1,
+          "message": "{\"content\": \"\", \"total_lines\": 0, \"file_size\": 0, \"truncated\": false, \"is_binary\": false, \"is_image\": false, \"error\": \"File not found: <path:hermeswork>\", \"simi"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 89,
+        "ok": 276
+      },
+      "by_runtime": {
+        "claude-code": 25,
+        "codex": 9,
+        "hermes": 330
+      },
+      "calls": 365,
+      "failure_rate": 0.244,
+      "failures": 89,
+      "receipt_sessions": [
+        "20260810_154431_d8ce9266",
+        "20260807_134724_de4941",
+        "20260810_175653_dac3ff",
+        "20260810_224510_62d276",
+        "20260810_235050_7bd050"
+      ],
+      "sessions": 60,
+      "step": "bash:ruff check <path:rel:py> <chain>",
+      "top_errors": [
+        {
+          "count": 4,
+          "message": "{\"output\": \"TRY004 Prefer `TypeError` exception for invalid type\\n --> src/coframe_brain/runtime/evidence.py:41:9\\n |\\n39 | raise ValueError(f\\\"{label} is not v"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"All checks passed!\\nunformatted: File would be reformatted\\n --> src/coframe_brain/data/semantics/outcomes.py:170:18\\n |\\n169 | if matured is True a"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"All checks passed!\\nunformatted: File would be reformatted\\n --> src/coframe_brain/explorer/contract.py:719:1\\n |\\n718 | return value\\n -\\n |\\n\\n1 f"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "ok": 871,
+        "refused": 277
+      },
+      "by_runtime": {
+        "codex": 1148
+      },
+      "calls": 1148,
+      "failure_rate": 0.241,
+      "failures": 277,
+      "receipt_sessions": [
+        "019f9ecd-200d-7b82-951b-d96e613a8693",
+        "019f9f4a-a0e6-7f73-9494-b8355bf6aab1",
+        "019fa030-649a-71f1-bf6d-e22861fe605b",
+        "019fa6b0-58b5-7ec3-8934-b5e87ec7e3b1",
+        "019fa72f-675f-7a53-8ebe-7d0bbabf9bfb"
+      ],
+      "sessions": 125,
+      "step": "mcp:agent-control.spine.recent",
+      "top_errors": [
+        {
+          "count": 150,
+          "message": "user rejected MCP tool call"
+        },
+        {
+          "count": 127,
+          "message": "user cancelled MCP tool call"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 1,
+        "error": 22,
+        "ok": 79
+      },
+      "by_runtime": {
+        "codex": 6,
+        "hermes": 96
+      },
+      "calls": 102,
+      "failure_rate": 0.216,
+      "failures": 22,
+      "receipt_sessions": [
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "20260810_152957_963064",
+        "20260811_003659_2e8549",
+        "20260812_010015_cfca6a",
+        "20260812_112615_338c201d"
+      ],
+      "sessions": 14,
+      "step": "bash:ssh -eu -o <chain>",
+      "top_errors": [
+        {
+          "count": 6,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": null}"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"From github.com:Coframe/coframe-brain\\n * branch coframe-brain-tasks/pika-994-pipeline-continuation-<id>-v2 -> FETCH_HEAD\\nfatal: invalid reference:"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"Preparing worktree (detached HEAD d2cd614)\\nHEAD is now at d2cd614 fix(corpus): bind continuation to its task checkout\\nbash: line 1: uv: command no"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 2,
+        "ok": 40,
+        "refused": 11
+      },
+      "by_runtime": {
+        "codex": 21,
+        "hermes": 32
+      },
+      "calls": 53,
+      "failure_rate": 0.208,
+      "failures": 11,
+      "receipt_sessions": [
+        "019fc998-d559-7a80-ba6e-0b871e5b44e5",
+        "019fc9ab-c7ed-7fe3-8b43-310c9df619f5",
+        "019fd1a1-ff87-72c3-a3ca-9bf1f8ce6b1c",
+        "019fd1bc-ee03-7571-844d-0f59fd808787",
+        "019fd433-8cd2-7713-8722-46365c128ebe"
+      ],
+      "sessions": 22,
+      "step": "bash:git diff <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 11,
+          "message": "git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 2,
+        "error": 37,
+        "ok": 141
+      },
+      "by_runtime": {
+        "claude-code": 9,
+        "codex": 41,
+        "hermes": 126
+      },
+      "calls": 180,
+      "failure_rate": 0.206,
+      "failures": 37,
+      "receipt_sessions": [
+        "4aa5d087-8136-4f1d-a008-2036e611a850",
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019fa845-2eca-7e02-b32e-5c66a48e6145",
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "20260807_141305_f6b22280"
+      ],
+      "sessions": 62,
+      "step": "bash:python3 <path:rel>",
+      "top_errors": [
+        {
+          "count": 30,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 6,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 1,
+          "message": "{\"output\": \"<path:hermesstore:json> <id> <id>\\nkeys ['blockers', 'consumer', 'created_cards', 'dated_claims', 'decisions', 'git', 'independent_verifier_receipt'"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 1,
+        "error": 71,
+        "ok": 282
+      },
+      "by_runtime": {
+        "codex": 354
+      },
+      "calls": 354,
+      "failure_rate": 0.201,
+      "failures": 71,
+      "receipt_sessions": [
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019f9027-3c77-7d50-a2dc-bb1b6c1b90f4",
+        "019f95d4-7403-74d1-a99c-29bae1b04f3a",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019faca3-6224-78b2-b9fd-54263e98f5b6"
+      ],
+      "sessions": 61,
+      "step": "codex:exec:mcp__ocbrain__brain_closeout",
+      "top_errors": [
+        {
+          "count": 34,
+          "message": "tool call error: tool call failed for `ocbrain/brain.closeout`"
+        },
+        {
+          "count": 20,
+          "message": "{\"content\":[{\"type\":\"text\",\"text\":\"tool call error: tool call failed for `ocbrain/brain.closeout`\\n\\nCaused by:\\n Mcp error: -<id>: actions[].feature_schema mus"
+        },
+        {
+          "count": 11,
+          "message": "{\"content\":[{\"type\":\"text\",\"text\":\"tool call error: tool call failed for `ocbrain/brain.closeout`\\n\\nCaused by:\\n Mcp error: -<id>: outcomes[].feature_schema mu"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 34,
+        "ok": 181,
+        "refused": 6
+      },
+      "by_runtime": {
+        "claude-code": 1,
+        "codex": 77,
+        "hermes": 143
+      },
+      "calls": 221,
+      "failure_rate": 0.181,
+      "failures": 40,
+      "receipt_sessions": [
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fc973-2342-7580-85c1-a1f7ddc7738d",
+        "019fc998-d559-7a80-ba6e-0b871e5b44e5",
+        "019fc9ab-c7ed-7fe3-8b43-310c9df619f5",
+        "019fcd29-b584-7d01-bca8-ded4d31d6ddf"
+      ],
+      "sessions": 109,
+      "step": "bash:pwd <chain>",
+      "top_errors": [
+        {
+          "count": 7,
+          "message": "failed to spawn code-mode host <path:home>: No such file or directory (os error 2)"
+        },
+        {
+          "count": 6,
+          "message": "git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"<path:hermesstore>\\nfatal: not a git repository (or any of the parent directories): .git\", \"exit_code\": 128, \"error\": null}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 7,
+        "ok": 55,
+        "timeout": 5
+      },
+      "by_runtime": {
+        "claude-code": 67
+      },
+      "calls": 67,
+      "failure_rate": 0.179,
+      "failures": 12,
+      "receipt_sessions": [
+        "4281dd0e-ec14-42f4-981f-9d8b122d4d77",
+        "4aa5d087-8136-4f1d-a008-2036e611a850",
+        "bfa9042c-56a3-47b0-95a9-8f2b7d5a5270",
+        "e29ba0e1-ade2-4f1a-abee-b48578b5e802",
+        "e6e1a3d1-c12c-4864-9548-643432af36bd"
+      ],
+      "sessions": 9,
+      "step": "mcp:Claude_Browser.computer",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "computer timed out after 30s. The Browser pane is currently hidden. The pane may be stuck (modal dialog, navigation hang, or unresponsive renderer). Check previ"
+        },
+        {
+          "count": 4,
+          "message": "No site is open in this tab. Use `navigate` first."
+        },
+        {
+          "count": 1,
+          "message": "MCP error -<id>: Input validation error: Invalid arguments for tool computer: ["
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 15,
+        "ok": 73
+      },
+      "by_runtime": {
+        "claude-code-subagent": 11,
+        "codex": 60,
+        "hermes": 16
+      },
+      "calls": 88,
+      "failure_rate": 0.17,
+      "failures": 15,
+      "receipt_sessions": [
+        "e29ba0e1-ade2-4f1a-abee-b48578b5e802",
+        "019fc875-197a-79c0-a350-9aa333986385",
+        "019fd7dd-7261-7d51-94b3-84d26fd79e5a",
+        "20260812_090612_b66bdb0d",
+        "20260812_051722_19f67d"
+      ],
+      "sessions": 10,
+      "step": "bash:sqlite3 -readonly <chain>",
+      "top_errors": [
+        {
+          "count": 4,
+          "message": "Error: in prepare, unable to open database file (14)"
+        },
+        {
+          "count": 4,
+          "message": "Error: unable to open database file"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"Error: in prepare, unable to open database file (14)\", \"exit_code\": 14, \"error\": null}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 9,
+        "ok": 59,
+        "refused": 1,
+        "timeout": 2
+      },
+      "by_runtime": {
+        "claude-code": 2,
+        "codex": 45,
+        "hermes": 24
+      },
+      "calls": 71,
+      "failure_rate": 0.169,
+      "failures": 12,
+      "receipt_sessions": [
+        "4aa5d087-8136-4f1d-a008-2036e611a850",
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019fad5e-7a6b-74c0-a8e5-c8d21f376d16",
+        "019fb493-cb1a-7241-b937-f00606fb8623",
+        "019fcac0-e600-78a3-97ce-d4514a926734"
+      ],
+      "sessions": 20,
+      "step": "bash:python <path:rel>",
+      "top_errors": [
+        {
+          "count": 6,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"[Command timed out after 120s]\", \"exit_code\": 124, \"error\": null, \"hint\": \"Exit 124: the command hit its timeout. Raise timeout= (foreground max 600"
+        },
+        {
+          "count": 1,
+          "message": "zsh:1: command not found: python"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 60,
+        "ok": 309
+      },
+      "by_runtime": {
+        "claude-code": 6,
+        "codex": 5,
+        "hermes": 358
+      },
+      "calls": 369,
+      "failure_rate": 0.163,
+      "failures": 60,
+      "receipt_sessions": [
+        "a9251c0c-7fe6-4aee-8ce2-a951c8a55f6b",
+        "bfa9042c-56a3-47b0-95a9-8f2b7d5a5270",
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "20260807_123042_dfbda94d",
+        "20260807_142454_903198"
+      ],
+      "sessions": 41,
+      "step": "bash:ruff format <path:rel:py> <chain>",
+      "top_errors": [
+        {
+          "count": 2,
+          "message": "Exit code 1"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"5 files left unchanged\\nF..F.F.....................................................F............ [ 75%]\\n.........F.............. [100%]\\n=========="
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"2 files left unchanged\\n...F... [100%]\\n=================================== FAILURES ===================================\\n____________ test_source_v"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "ok": 86,
+        "refused": 16
+      },
+      "by_runtime": {
+        "claude-code": 102
+      },
+      "calls": 102,
+      "failure_rate": 0.157,
+      "failures": 16,
+      "receipt_sessions": [
+        "2bc5ae2c-b1f3-442e-b99e-67f66ad46b5a",
+        "4aa5d087-8136-4f1d-a008-2036e611a850",
+        "8bc533ed-4e22-48c7-954c-64619c03a042",
+        "96e432ee-22b2-4942-bb2d-e0dba68a671f",
+        "bfa9042c-56a3-47b0-95a9-8f2b7d5a5270"
+      ],
+      "sessions": 21,
+      "step": "tool:ExitPlanMode",
+      "top_errors": [
+        {
+          "count": 10,
+          "message": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell "
+        },
+        {
+          "count": 6,
+          "message": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP wha"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 13,
+        "ok": 70
+      },
+      "by_runtime": {
+        "hermes": 83
+      },
+      "calls": 83,
+      "failure_rate": 0.157,
+      "failures": 13,
+      "receipt_sessions": [
+        "20260805_160419_b88c5d",
+        "20260811_044315_38e4d3",
+        "20260812_114504_ce9a6412",
+        "20260812_164523_3c9b87"
+      ],
+      "sessions": 4,
+      "step": "bash:ssh -euo <chain>",
+      "top_errors": [
+        {
+          "count": 3,
+          "message": "{\"output\": \"<id>-08-13T06:15:12Z\\nsample=<path:abs:jsonl>\", \"exit_code\": 1, \"error\": null}"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"BEFORE_PRIMARY\\n22640243 <id> <id>\\nrchar: <id>\\nwchar: <id>\\nread_bytes: 0\\nwrite_bytes: <id>\\n3\\nBEFORE_ABLATION\\n932673 <id> <id>\\nrchar: <id>\\nw"
+        },
+        {
+          "count": 1,
+          "message": "{\"output\": \"bash: line 1: printf: --: invalid option\\nprintf: usage: printf [-v var] format [arguments]\", \"exit_code\": 2, \"error\": null}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 32,
+        "ok": 192,
+        "refused": 3
+      },
+      "by_runtime": {
+        "claude-code-subagent": 15,
+        "codex": 46,
+        "hermes": 156
+      },
+      "calls": 227,
+      "failure_rate": 0.154,
+      "failures": 35,
+      "receipt_sessions": [
+        "7aca3c3e-6f53-45fd-9415-08d1bf5c7cd1",
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019fc973-2342-7580-85c1-a1f7ddc7738d",
+        "019fc973-1f4b-7313-b8e6-3b93ca36dbfd",
+        "20260810_154431_d8ce9266"
+      ],
+      "sessions": 51,
+      "step": "bash:python3 <chain>",
+      "top_errors": [
+        {
+          "count": 15,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 3,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 3,
+          "message": "zsh:1: can't create temp file for here document: operation not permitted"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 133,
+        "ok": 763
+      },
+      "by_runtime": {
+        "codex": 896
+      },
+      "calls": 896,
+      "failure_rate": 0.148,
+      "failures": 133,
+      "receipt_sessions": [
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019f9027-3c77-7d50-a2dc-bb1b6c1b90f4",
+        "019f95d4-7403-74d1-a99c-29bae1b04f3a",
+        "019f95ec-f7df-7230-afc8-6ae12c27ecce",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596"
+      ],
+      "sessions": 94,
+      "step": "mcp:ocbrain.brain.closeout",
+      "top_errors": [
+        {
+          "count": 133,
+          "message": "tool call error: tool call failed for `ocbrain/brain.closeout`"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 8,
+        "ok": 46
+      },
+      "by_runtime": {
+        "hermes": 54
+      },
+      "calls": 54,
+      "failure_rate": 0.148,
+      "failures": 8,
+      "receipt_sessions": [
+        "20260811_020245_c73088",
+        "20260811_162936_608365",
+        "20260812_004312_f7af9a",
+        "20260812_051611_5a1d11",
+        "20260812_114504_ce9a6412"
+      ],
+      "sessions": 22,
+      "step": "bash:pyright <path:rel:py>",
+      "top_errors": [
+        {
+          "count": 2,
+          "message": "{\"output\": \"<path:hermeswork:py>\\n <path:hermeswork:py>:201:17 - error: Argument of type \\\"object\\\" cannot be assigned to parameter \\\"x\\\" of type \\\"ConvertibleT"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"<path:hermeswork:py>\\n <path:hermeswork:py>:395:13 - error: Object of type \\\"None\\\" is not subscriptable (reportOptionalSubscript)\\n <path:hermeswor"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"<path:hermeswork:py>\\n <path:hermeswork:py>:931:59 - error: Cannot access attribute \\\"score\\\" for class \\\"object\\\"\\n Attribute \\\"score\\\" is unknown "
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 10,
+        "ok": 64,
+        "timeout": 1
+      },
+      "by_runtime": {
+        "codex": 69,
+        "hermes": 6
+      },
+      "calls": 75,
+      "failure_rate": 0.147,
+      "failures": 11,
+      "receipt_sessions": [
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019f9027-3c77-7d50-a2dc-bb1b6c1b90f4",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "019fa72f-6c4b-7c70-8e70-0e107967812b",
+        "20260814_151136_7fd65995"
+      ],
+      "sessions": 18,
+      "step": "bash:<path:home>",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:hermesstore:py>\\\", line 16, in <module>\\n result = endpoint.select(sql, timeout=120)\\n File \\\"<pat"
+        },
+        {
+          "count": 1,
+          "message": "torch missing ModuleNotFoundError"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 24,
+        "ok": 165,
+        "refused": 4
+      },
+      "by_runtime": {
+        "claude-code": 1,
+        "codex": 103,
+        "hermes": 89
+      },
+      "calls": 193,
+      "failure_rate": 0.145,
+      "failures": 28,
+      "receipt_sessions": [
+        "4aa5d087-8136-4f1d-a008-2036e611a850",
+        "019f8595-e6af-7683-b205-5648ed3e1316",
+        "019f9027-3c77-7d50-a2dc-bb1b6c1b90f4",
+        "019fad5e-7a6b-74c0-a8e5-c8d21f376d16",
+        "019fb493-cb1a-7241-b937-f00606fb8623"
+      ],
+      "sessions": 47,
+      "step": "bash:python",
+      "top_errors": [
+        {
+          "count": 10,
+          "message": "Traceback (most recent call last):"
+        },
+        {
+          "count": 2,
+          "message": "zsh:1: can't create temp file for here document: operation not permitted"
+        },
+        {
+          "count": 2,
+          "message": "zsh:1: command not found: python"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 9,
+        "error": 67,
+        "ok": 397
+      },
+      "by_runtime": {
+        "claude-code": 6,
+        "codex": 73,
+        "hermes": 392
+      },
+      "calls": 473,
+      "failure_rate": 0.142,
+      "failures": 67,
+      "receipt_sessions": [
+        "019fb949-2d5a-75d0-89cc-3f5b8f743331",
+        "019fcdc6-b49f-73f0-a311-0154a7603d2f",
+        "019fcdd0-9d62-7d31-8165-1726750667d0",
+        "019fd306-077e-78f1-b9d9-bdea673afcb3",
+        "019fd433-8cd2-7713-8722-46365c128ebe"
+      ],
+      "sessions": 105,
+      "step": "bash:python -c <chain>",
+      "top_errors": [
+        {
+          "count": 7,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<path:tmp:py>\\\", line 431, in validate_app_data\\n return ExplorerData.model_validate(_json_arrays_to_tup"
+        },
+        {
+          "count": 6,
+          "message": "{\"output\": \"Using CPython 3.13.9\\nCreating virtual environment at: .venv\\n Building coframe-brain @ file://<path:hermeswork>\\n Built coframe-brain @ file://<pat"
+        },
+        {
+          "count": 4,
+          "message": "Traceback (most recent call last):"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 41,
+        "ok": 259,
+        "refused": 2
+      },
+      "by_runtime": {
+        "claude-code": 5,
+        "codex": 43,
+        "hermes": 253
+      },
+      "calls": 302,
+      "failure_rate": 0.142,
+      "failures": 43,
+      "receipt_sessions": [
+        "019fb94d-8ae7-7a02-89fe-e6926fe4dc2d",
+        "019fc973-1bc3-7863-900a-5e38138936ef",
+        "019fd7dd-7261-7d51-94b3-84d26fd79e5a",
+        "20260810_154431_d8ce9266",
+        "20260812_114532_c20e8888"
+      ],
+      "sessions": 68,
+      "step": "bash:python3",
+      "top_errors": [
+        {
+          "count": 34,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 3,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<stdin>\\\", line 1, in <module>\\n File \\\"<path:hermeswork:py>\\\", line 3, in <module>\\n from coframe_brain"
+        },
+        {
+          "count": 2,
+          "message": "zsh:1: can't create temp file for here document: operation not permitted"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 2,
+        "ok": 41,
+        "refused": 7
+      },
+      "by_runtime": {
+        "claude-code": 1,
+        "codex": 24,
+        "hermes": 25
+      },
+      "calls": 50,
+      "failure_rate": 0.14,
+      "failures": 7,
+      "receipt_sessions": [
+        "019fb8f1-f443-7c80-a4f4-6b321a3330dc",
+        "019fc9ab-c7ed-7fe3-8b43-310c9df619f5",
+        "019fd433-8cd2-7713-8722-46365c128ebe"
+      ],
+      "sessions": 24,
+      "step": "bash:git diff <path:rel:py> <chain>",
+      "top_errors": [
+        {
+          "count": 7,
+          "message": "git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using <path:tmp> instead"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "empty": 4,
+        "error": 63,
+        "ok": 402
+      },
+      "by_runtime": {
+        "claude-code": 3,
+        "codex": 2,
+        "hermes": 463
+      },
+      "calls": 469,
+      "failure_rate": 0.134,
+      "failures": 63,
+      "receipt_sessions": [
+        "04b1ec23-a199-4b78-bdb3-0ecb9e8bb4b0",
+        "019fa4d4-a885-73e3-a9a6-59dc1789b596",
+        "20260810_154431_d8ce9266",
+        "20260810_175653_dac3ff",
+        "20260810_235050_7bd050"
+      ],
+      "sessions": 50,
+      "step": "bash:ssh <path:rel> <chain>",
+      "top_errors": [
+        {
+          "count": 3,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<string>\\\", line 7, in <module>\\n if p.get(\\\"error\\\"): raise RuntimeError(p[\\\"error\\\"].get(\\\"message\\\"))"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"/bin/bash: eval: line 71: syntax error near unexpected token `('\\n/bin/bash: eval: line 71: ` count_if(lower(trim(coalesce(referrer,''))) IN ('none'"
+        },
+        {
+          "count": 2,
+          "message": "{\"output\": \"Traceback (most recent call last):\\n File \\\"<stdin>\\\", line 6, in <module>\\nKeyError: 'encoded_feature_names'\", \"exit_code\": 1, \"error\": null}"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 10,
+        "ok": 72,
+        "refused": 1
+      },
+      "by_runtime": {
+        "codex": 34,
+        "hermes": 49
+      },
+      "calls": 83,
+      "failure_rate": 0.133,
+      "failures": 11,
+      "receipt_sessions": [
+        "019fc973-1f4b-7313-b8e6-3b93ca36dbfd",
+        "019fd7dd-7261-7d51-94b3-84d26fd79e5a",
+        "20260812_090607_099194f3",
+        "20260811_220539_2bab8e",
+        "20260812_004312_f7af9a"
+      ],
+      "sessions": 13,
+      "step": "bash:set -eu <chain>",
+      "top_errors": [
+        {
+          "count": 2,
+          "message": "{\"output\": \"\", \"exit_code\": 1, \"error\": \"Blocked: command or referenced script cannot restart or stop the gateway from inside the gateway process. The gateway w"
+        },
+        {
+          "count": 1,
+          "message": "zsh:4: can't create temp file for here document: operation not permitted"
+        },
+        {
+          "count": 1,
+          "message": "[Tool loop warning: repeated_exact_failure_warning; count=2; browser_navigate has failed 2 times with identical arguments. Th"
+        }
+      ]
+    },
+    {
+      "by_result_class": {
+        "error": 8,
+        "ok": 52
+      },
+      "by_runtime": {
+        "hermes": 60
+      },
+      "calls": 60,
+      "failure_rate": 0.133,
+      "failures": 8,
+      "receipt_sessions": [
+        "20260807_123042_dfbda94d"
+      ],
+      "sessions": 1,
+      "step": "bash:ruff format <path:rel> <chain>",
+      "top_errors": [
+        {
+          "count": 5,
+          "message": "{\"output\": \"31 files left unchanged\\nI001 [*] Import block is un-sorted or un-formatted\\n --> outcome/contracts.py:3:1\\n |\\n 1 | \\\"\\\"\\\"Version-zero contracts fo"
+        },
+        {
+          "count": 1,
+          "message": "{\"output\": \"2 files reformatted, 9 files left unchanged\\nAll checks passed!\\n0 errors, 0 warnings, 0 informations\\n...............................F.....F......."
+        },
+        {
+          "count": 1,
+          "message": "{\"output\": \"5 files reformatted, 41 files left unchanged\\nS112 `try`-`except`-`continue` detected, consider logging the exception\\n --> action/cro_oracle/live_a"
+        }
+      ]
+    }
+  ]
+}
