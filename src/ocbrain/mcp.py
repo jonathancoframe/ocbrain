@@ -170,6 +170,32 @@ def nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return nullable
 
 
+PLAIN_DIALECT = "plain"
+STRICT_DIALECT = "strict"
+STRICT_SCHEMA_CLIENT_MARKERS = ("codex", "openai", "gpt")
+
+
+def schema_dialect_for_client(client_name: str | None) -> str:
+    """Pick the schema dialect a connecting client can actually consume.
+
+    Strict-mode harnesses (Codex-style function calling) need every property
+    listed in ``required`` with null-union types carrying the optionality, and
+    their models populate every field. Other harnesses enforce ``required``
+    against what the model actually sends, so serving them the strict dialect
+    makes ordinary partial calls — a context with only ``project`` — fail
+    client-side before the server is reached (observed in Claude Code). The
+    client names itself at initialize; ``OCBRAIN_SCHEMA_DIALECT`` overrides in
+    either direction for harnesses this heuristic misses.
+    """
+    forced = os.environ.get("OCBRAIN_SCHEMA_DIALECT", "").strip().lower()
+    if forced in {PLAIN_DIALECT, STRICT_DIALECT}:
+        return forced
+    lowered = (client_name or "").lower()
+    if any(marker in lowered for marker in STRICT_SCHEMA_CLIENT_MARKERS):
+        return STRICT_DIALECT
+    return PLAIN_DIALECT
+
+
 def provider_safe_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Make omission explicit for providers that populate every schema field."""
     transformed = dict(schema)
@@ -220,6 +246,7 @@ def serve(
     else:
         init_core_v1(conn)
     stdin_reader = _StdinLineReader(idle_timeout_seconds)
+    session_state: dict[str, Any] = {}
     while True:
         line = stdin_reader.readline()
         if line is None:
@@ -253,6 +280,7 @@ def serve(
             allow_writes=allow_writes,
             profile=profile,
             delivery_target=delivery_target,
+            session_state=session_state,
         )
         if response is None:
             continue
@@ -367,6 +395,7 @@ def handle_request(
     allow_writes: bool = False,
     profile: str | None = None,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    session_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(request, dict):
         return error_response(
@@ -384,6 +413,10 @@ def handle_request(
         if not isinstance(params, dict):
             raise ValueError("invalid params: params must be a JSON object")
         if method == "initialize":
+            if session_state is not None:
+                client_info = params.get("clientInfo")
+                if isinstance(client_info, dict):
+                    session_state["client_name"] = str(client_info.get("name") or "")
             result = {
                 "protocolVersion": "2025-11-25",
                 "serverInfo": {
@@ -403,6 +436,7 @@ def handle_request(
                 "tools": tool_list(
                     profile=resolved_profile,
                     time_travel=not is_core_v1(conn),
+                    dialect=schema_dialect_for_client((session_state or {}).get("client_name")),
                 )
             }
         elif method == "tools/call":
@@ -1318,7 +1352,12 @@ def read_resource(
     return {"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
 
 
-def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> list[dict[str, Any]]:
+def tool_list(
+    *,
+    profile: str = RUNTIME_PROFILE,
+    time_travel: bool = False,
+    dialect: str = PLAIN_DIALECT,
+) -> list[dict[str, Any]]:
     profile = resolve_profile(profile=profile)
     tools = [
         {
@@ -1897,7 +1936,8 @@ def tool_list(*, profile: str = RUNTIME_PROFILE, time_travel: bool = False) -> l
             tool["annotations"] = dict(destructive_write)
         else:
             tool["annotations"] = dict(local_write)
-        tool["inputSchema"] = provider_safe_schema(tool["inputSchema"])
+        if dialect == STRICT_DIALECT:
+            tool["inputSchema"] = provider_safe_schema(tool["inputSchema"])
     return tools
 
 
