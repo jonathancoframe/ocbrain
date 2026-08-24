@@ -301,9 +301,6 @@ def main() -> int:
     skipped: list[dict[str, str]] = []
     for state_db in sorted(args.storage.glob("*/state.vscdb")):
         workspace_dir = state_db.parent
-        if workspace_dir.name == "empty-window":
-            skipped.append({"workspace": workspace_dir.name, "reason": "empty-window"})
-            continue
         try:
             conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
         except sqlite3.Error as exc:

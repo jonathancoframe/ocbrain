@@ -62,8 +62,6 @@ def test_skip_reasons_are_reported(tmp_path):
 
     # One real workspace, so the run is not trivially all-skips.
     _workspace(storage, "has-chat", {"aiService.prompts": [{"text": "how do I ship this"}]})
-    # Skipped by name, the way Cursor's folder-less windows always have been.
-    _workspace(storage, "empty-window", {"aiService.prompts": [{"text": "orphan"}]})
     # Present but idle: the arrays exist and are empty. This is what all three
     # of the real zero-record workspaces turned out to be.
     _workspace(storage, "idle-ws", {"aiService.prompts": [], "aiService.generations": []})
@@ -75,11 +73,10 @@ def test_skip_reasons_are_reported(tmp_path):
     payload = _run(module, storage, tmp_path / "out")
 
     assert payload["exported"] == 1
-    assert payload["skipped"] == 3
-    assert payload["skipped_by_reason"] == {"empty-window": 1, "no_records": 1, "sqlite_error": 1}
+    assert payload["skipped"] == 2
+    assert payload["skipped_by_reason"] == {"no_records": 1, "sqlite_error": 1}
 
     by_workspace = {entry["workspace"]: entry["reason"] for entry in payload["skipped_sample"]}
-    assert by_workspace["empty-window"] == "empty-window"
     assert by_workspace["idle-ws"] == "no_records"
     assert by_workspace["broken-ws"].startswith("sqlite_error:")
     # The reason has to name the fault, not just its class.
@@ -196,3 +193,22 @@ def test_file_budget_drops_the_oldest_records_not_the_newest(tmp_path):
     assert kept[-1] == "day 20"
     assert note == {"dropped_oldest": len(records) - len(kept), "kept_newest": len(kept)}
     assert len(text) <= 700
+
+
+def test_empty_window_is_harvested_like_any_other_workspace(tmp_path):
+    """``empty-window`` was skipped on its name alone, and holds real chat.
+
+    Cursor files a window opened without a folder under that fixed name. It is
+    not a placeholder: on this machine it carried 2,843 bytes of prompts and
+    14,427 bytes of generations, none of which ever reached the brain.
+    """
+    module = _module()
+    storage = tmp_path / "workspaceStorage"
+    _workspace(storage, "empty-window", {"aiService.prompts": [{"text": "orphan window chat"}]})
+
+    payload = _run(module, storage, tmp_path / "out")
+
+    assert payload["exported"] == 1
+    assert payload["skipped"] == 0
+    body = (tmp_path / "out" / "cursor-empty-window.jsonl").read_text().splitlines()
+    assert json.loads(body[1])["content"] == "orphan window chat"
