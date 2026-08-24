@@ -120,6 +120,14 @@ same gates and quote validation apply whichever model runs. The Anthropic
 backend needs the optional extra: `pip install -e '.[curator]'`. Only the API
 key's variable *name* is configured; the value is never persisted.
 
+`--project` is repeatable and `--projects-from-config` curates every scope in
+`curator.projects`. Each project is gated on its own digest inside one run, so a
+scope whose evidence has not changed makes no call, and a scope with fewer than
+`curator.min_evidence_per_project` eligible objects is reported as skipped rather
+than billed. Do not loop the script over `--project` from a shell: `state.json`
+holds one digest per project in a single file, so each invocation would discard
+the previous project's cursor and every cycle would re-bill every project.
+
 ```bash
 # Keep background harvesting in the evidence ledger, not current truth.
 ocbrain --db /absolute/core.sqlite import-history /history/root \
@@ -130,6 +138,10 @@ ocbrain --db /absolute/core.sqlite import-history /history/root \
   --db /absolute/core.sqlite --max-beliefs 12 --allow-hosted-egress
 .venv/bin/python scripts/wiki-curator.py \
   --db /absolute/core.sqlite --max-beliefs 12 --allow-hosted-egress --apply
+
+# Curate every configured project scope in one run.
+.venv/bin/python scripts/wiki-curator.py \
+  --db /absolute/core.sqlite --projects-from-config --apply
 ```
 
 `scripts/kimi-wiki-curator.py` remains as a shim forwarding to

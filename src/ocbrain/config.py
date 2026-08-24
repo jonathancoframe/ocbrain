@@ -422,6 +422,19 @@ class CuratorConfig:
     model: str = ""  # empty means the provider's default
     max_beliefs: int = 24
     current_ttl_days: int = 90
+    # Which project scopes the scheduled curator compiles, in order. A single
+    # pinned project is a wiki that freezes the moment work moves to a second
+    # scope, and the evidence keeps arriving regardless: one real brain had 574
+    # eligible objects spread over ~40 project scopes while the pin curated 19.
+    #
+    # Ships as the historical single pin. Real project names are operator data
+    # and this repo is public, so the list an operator actually wants is set in
+    # their own config file, never here.
+    projects: list[str] = field(default_factory=lambda: ["workspace"])
+    # A project with fewer eligible objects than this is skipped, and reported as
+    # skipped, rather than spending a hosted call on a handful of rows. Set to 1
+    # to curate every project with any eligible evidence at all.
+    min_evidence_per_project: int = 3
 
 
 @dataclass(frozen=True)

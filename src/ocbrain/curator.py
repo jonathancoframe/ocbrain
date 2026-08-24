@@ -36,11 +36,16 @@ from ocbrain.core_v1 import append_core_event, get_core_v1_belief
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
-from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID
+from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID, matching_stored_scope_ids
 from ocbrain.text import is_restatement
 
 CURATOR_VERSION = "wiki-curator-v2"
-WIKI_STATE_SCHEMA = "ocbrain.wiki-state.v1"
+WIKI_STATE_SCHEMA = "ocbrain.wiki-state.v2"
+
+# The project every pre-multi-project run curated. A flat ``input_digest`` in an
+# existing ``state.json`` was that project's digest, so it migrates onto this key
+# rather than being discarded, which would re-bill the first cycle after upgrade.
+LEGACY_STATE_PROJECT = "workspace"
 
 ELIGIBLE_KINDS = frozenset(
     {
@@ -227,13 +232,21 @@ def select_evidence(
 ) -> list[dict[str, Any]]:
     """Select curation-eligible evidence for one project.
 
-    The egress gate is the load-bearing part. By default only ``public``/
+    The egress gate is what decides this. By default only ``public``/
     ``internal`` visibility and ``hosted_ok`` policy qualify, so a fresh install
     sends nothing it was not explicitly given. An operator may widen the
     allow-lists via ``curator.egress_policies`` -- necessary on any brain whose
     evidence is written as ``local_only``, which is the default for client
     writes -- but ``prohibited`` egress and ``secret`` visibility are refused in
     code regardless. Raw transcripts stay ineligible by kind either way.
+
+    The project gate matches by canonical spelling, not by exact string. Clients
+    name their own scope, so one project arrives written a dozen ways and the
+    stored rows keep whichever spelling was used. Exact equality curated one
+    spelling and left the rest unreachable: on one real brain, ``workspace``
+    matched 19 of 574 eligible rows. ``matching_stored_scope_ids`` only ever adds
+    spellings of the project the caller already named, so nothing widens past the
+    scope they asked for.
     """
     if not project:
         raise ValueError("project is required for evidence selection")
@@ -242,9 +255,13 @@ def select_evidence(
         visibilities=visibilities,
         allow_hosted_egress=allow_hosted_egress,
     )
+    scope_ids = matching_stored_scope_ids(
+        conn, "evidence_objects", (f"project:{project}",)
+    )
     placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
     egress_placeholders = ",".join("?" for _ in resolved_egress)
     visibility_placeholders = ",".join("?" for _ in resolved_visibility)
+    scope_placeholders = ",".join("?" for _ in scope_ids)
     rows = [
         dict(row)
         for row in conn.execute(
@@ -255,14 +272,14 @@ def select_evidence(
             WHERE kind IN ({placeholders})
               AND visibility IN ({visibility_placeholders})
               AND egress_policy IN ({egress_placeholders})
-              AND scope_type = 'project' AND scope_id = ?
+              AND scope_type = 'project' AND scope_id IN ({scope_placeholders})
             ORDER BY recorded_at DESC, evidence_id DESC
             """,  # noqa: S608 - placeholders derive only from fixed local constants
             (
                 *tuple(sorted(ELIGIBLE_KINDS)),
                 *resolved_visibility,
                 *resolved_egress,
-                f"project:{project}",
+                *scope_ids,
             ),
         )
     ]
@@ -299,6 +316,30 @@ def input_digest(evidence: list[dict[str, Any]], existing: list[dict[str, Any]])
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def project_digests(state: Any) -> dict[str, str]:
+    """Per-project input digests from a wiki ``state.json``, legacy shape included.
+
+    ``state.json`` held one flat ``input_digest`` back when the curator only ever
+    ran against a single pinned project. Reading that value as the legacy
+    project's digest is what keeps the first cycle after an upgrade free: discard
+    it and every already-curated project bills a hosted call again.
+    """
+    if not isinstance(state, dict):
+        return {}
+    projects = state.get("projects")
+    if isinstance(projects, dict):
+        digests: dict[str, str] = {}
+        for name, entry in projects.items():
+            digest = entry.get("input_digest") if isinstance(entry, dict) else entry
+            if isinstance(digest, str) and digest:
+                digests[str(name)] = digest
+        return digests
+    legacy = state.get("input_digest")
+    if isinstance(legacy, str) and legacy:
+        return {LEGACY_STATE_PROJECT: legacy}
+    return {}
 
 
 def build_user_prompt(
@@ -719,7 +760,9 @@ def apply_claims(
         # Look in this project AND in global doctrine. Once a fact is promoted to
         # `global:doctrine`, a project-scoped run that only searched its own scope
         # would not see it and would mint a fresh per-project copy of something
-        # the brain already states once.
+        # the brain already states once. Curating many projects makes that the
+        # common case, not the rare one: the same durable truth is supported by
+        # evidence in several of them.
         equivalent = conn.execute(
             """
             SELECT belief_id, body, evidence_ids
@@ -756,9 +799,23 @@ def apply_claims(
             ),
             None,
         )
+        proposal_scope: dict[str, Any] = {
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "visibility": "internal",
+            "egress_policy": "local_only",
+            "provenance": "wiki_curator",
+        }
         if restated_id is not None:
             belief_id = restated_id
             existing = get_core_v1_belief(conn, belief_id)
+            # An approved proposal writes its scope onto the belief, so a claim
+            # that `claim_scope` typed as project-scoped would quietly demote the
+            # doctrine fact it restates. Only a `scope_promoted` event with a
+            # named approver may move a belief between tiers; a rewording keeps
+            # the belief exactly where it already is.
+            if existing is not None and str(existing["scope"]["scope_id"]) != scope_id:
+                proposal_scope = dict(existing["scope"])
         if existing is not None and existing.get("status") in {"retracted", "tombstoned"}:
             blocked.append(belief_id)
             continue
@@ -785,13 +842,7 @@ def apply_claims(
                 "belief_type": "wiki_fact",
                 "body": claim["body"],
                 "evidence_ids": claim["evidence_ids"],
-                "scope": {
-                    "scope_type": scope_type,
-                    "scope_id": scope_id,
-                    "visibility": "internal",
-                    "egress_policy": "local_only",
-                    "provenance": "wiki_curator",
-                },
+                "scope": proposal_scope,
                 "confidence": claim["confidence"],
                 "reward_band": "strong" if claim["confidence"] >= 0.8 else "moderate",
                 "attributes": attributes,
@@ -821,6 +872,7 @@ __all__ = [
     "ELIGIBLE_KINDS",
     "FORBIDDEN_EGRESS_POLICIES",
     "FORBIDDEN_VISIBILITIES",
+    "LEGACY_STATE_PROJECT",
     "PROVIDER_DEFAULTS",
     "SYSTEM_PROMPT",
     "WIKI_STATE_SCHEMA",
@@ -831,6 +883,7 @@ __all__ = [
     "input_digest",
     "load_env_value",
     "now_iso",
+    "project_digests",
     "record_curation_egress",
     "request_claims",
     "request_structured",

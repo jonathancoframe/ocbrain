@@ -40,7 +40,16 @@ fi
 # keeps exiting 0 while promoting nothing. Set OCBRAIN_CONFIG yourself to
 # override.
 
-PROMOTE_PROJECT="${OCBRAIN_PROMOTE_PROJECT:-workspace}"
+# Which project scopes get curated is the operator's config (curator.projects),
+# not a pin in this script. A single pinned project freezes the wiki the moment
+# work moves to a second scope, and the evidence keeps arriving regardless.
+# OCBRAIN_PROMOTE_PROJECT still curates exactly one scope, for a one-off run.
+PROMOTE_PROJECT="${OCBRAIN_PROMOTE_PROJECT:-}"
+if [[ -n "$PROMOTE_PROJECT" ]]; then
+  CURATE_SCOPE_ARGS=(--project "$PROMOTE_PROJECT")
+else
+  CURATE_SCOPE_ARGS=(--projects-from-config)
+fi
 PROMOTE_PROVIDER="${OCBRAIN_PROMOTE_PROVIDER:-anthropic}"
 PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
@@ -146,12 +155,13 @@ if [[ "$PROMOTE_BACKUP" == "1" ]]; then
   fi
 fi
 
-# 1. Curate. Digest-gated, so this is a no-op (and free) when nothing changed.
+# 1. Curate. Digest-gated per project, so a scope whose evidence has not changed
+# makes no API call and a fully quiet cycle is free.
 run_with_budget "$BUDGET_SECONDS" \
   "$PY" "$REPO/scripts/wiki-curator.py" \
   --db "$DB" \
   --provider "$PROMOTE_PROVIDER" \
-  --project "$PROMOTE_PROJECT" \
+  "${CURATE_SCOPE_ARGS[@]}" \
   --wiki-dir "$WIKI_DIR" \
   --max-beliefs "$PROMOTE_MAX_BELIEFS" \
   --apply \
