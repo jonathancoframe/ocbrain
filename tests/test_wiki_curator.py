@@ -592,3 +592,120 @@ def test_curator_still_adds_a_genuinely_different_fact(tmp_path: Path) -> None:
         == 2
     )
     conn.close()
+
+
+def test_durable_preference_claims_compile_to_global_scope(tmp_path: Path) -> None:
+    """A durable preference is doctrine, not a fact about whoever ran the curator.
+
+    Stamped into `project:<runner>` it is invisible everywhere else, which is how
+    a brain accumulates preferences no other project can reach.
+    """
+    from ocbrain.curator import apply_claims, claim_scope
+
+    assert claim_scope({"category": "preference", "lifecycle": "durable"}, project="hermes") == (
+        "global",
+        "global:doctrine",
+    )
+    assert claim_scope({"category": "preference", "lifecycle": "current"}, project="hermes") == (
+        "project",
+        "project:hermes",
+    )
+    assert claim_scope({"category": "system", "lifecycle": "durable"}, project="hermes") == (
+        "project",
+        "project:hermes",
+    )
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    applied = apply_claims(
+        conn,
+        [
+            {
+                "key": "reply-style",
+                "title": "Reply style",
+                "body": "Answers open with the result and never restate the question.",
+                "category": "preference",
+                "lifecycle": "durable",
+                "confidence": 0.9,
+                "evidence_ids": [],
+            },
+            {
+                "key": "sotu-mart",
+                "title": "SOTU mart",
+                "body": "The sandbox_sotu mart is rebuilt by a launchd job every morning.",
+                "category": "project",
+                "lifecycle": "durable",
+                "confidence": 0.9,
+                "evidence_ids": [],
+            },
+        ],
+        model="test",
+        project="hermes",
+    )
+    assert len(applied["applied"]) == 2
+
+    scopes = {
+        str(row["belief_id"]): (str(row["scope_type"]), str(row["scope_id"]))
+        for row in conn.execute(
+            "SELECT belief_id, scope_type, scope_id FROM current_beliefs WHERE serve=1"
+        )
+    }
+    by_scope = set(scopes.values())
+    assert ("global", "global:doctrine") in by_scope
+    assert ("project", "project:hermes") in by_scope
+    # Wider reach is not wider egress: the curator still writes local_only.
+    policies = conn.execute("SELECT egress_policy FROM current_beliefs").fetchall()
+    assert {str(row["egress_policy"]) for row in policies} == {"local_only"}
+    conn.close()
+
+
+def test_global_belief_dedups_against_project_restatement(tmp_path: Path) -> None:
+    """A globally promoted fact is updated, not re-minted once per project.
+
+    The dedup lookup used to see only the running project's scope, so the first
+    curator run after a promotion would state the same thing a second time.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+
+    def claim(key: str, body: str) -> dict:
+        return {
+            "key": key,
+            "title": "Reply style",
+            "body": body,
+            "category": "preference",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+
+    first = apply_claims(
+        conn,
+        [claim("reply-style", "Answers open with the result and never restate the question.")],
+        model="test",
+        project="hermes",
+    )
+    original_id = first["applied"][0]
+
+    # A different project, a reworded restatement of the same durable preference.
+    second = apply_claims(
+        conn,
+        [
+            claim(
+                "answer-style",
+                "Answers open with the result and never restate the question asked.",
+            )
+        ],
+        model="test",
+        project="codex",
+    )
+
+    assert second["applied"] == [original_id]
+    serving = conn.execute(
+        "SELECT belief_id, scope_id FROM current_beliefs WHERE serve=1 AND status='current'"
+    ).fetchall()
+    assert len(serving) == 1
+    assert str(serving[0]["scope_id"]) == "global:doctrine"
+    conn.close()

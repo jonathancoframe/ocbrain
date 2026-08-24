@@ -44,6 +44,10 @@ Pass all context you actually know:
 - Do not widen project/client/private material into global doctrine.
 - `cross_scope` is an explicit discovery request, not permission to reveal
   confidential foreign scopes.
+- A scoped read that returns nothing retries once across scopes on its own and
+  reports it in `coverage.scope_fallback`. Read the `scope` on each item before
+  reusing it: those results come from a neighbouring scope, not yours. Set
+  `retrieval.scope_fallback_enabled` to `false` to keep strict isolation.
 - A source handle can be expanded only within its original scope. If the source
   changed, request a fresh context packet.
 - `brain.get` is not an ID bypass: scope, confidentiality, quarantine, and

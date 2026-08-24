@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- Add `ocbrain scope-promote`, the missing emitter for the `scope_promoted`
+  event. The kind, its projection, and its rebuild path all shipped; nothing ever
+  wrote one, which is why a real brain holds zero global beliefs. `--approved-by`
+  is required — widening a belief's audience is a human decision the ledger has
+  to be able to name — and `--select-durable-preferences` picks the current,
+  served workspace `wiki_fact` rows whose lifecycle is `durable` and whose
+  category is preference/decision/workflow/system. A promotion widens reach and
+  never egress: each belief carries its own visibility and egress policy through,
+  so a `local_only` belief promoted to `global:doctrine` becomes recallable from
+  every project on this machine and is still refused for hosted delivery.
+- Stamp curator claim scope mechanically instead of always using the running
+  project. A durable `preference` claim is doctrine — as true in one project as
+  the next — and stamping it into `project:<whatever ran the curator>` is what
+  leaves a workspace scope nobody else can reach. The model never chooses this;
+  it supplies a category and lifecycle that are already range-checked, and
+  letting it name a scope would make the visibility boundary an injection
+  target. The dedup lookup now also searches `global:doctrine`, so a promoted
+  fact is updated rather than re-minted once per project.
+- Retry a retrieval across scopes when the scoped pass returns nothing at all,
+  and declare it in `coverage.scope_fallback`. `cross_scope` is an opt-in almost
+  no caller sends, so a question the brain could answer from a neighbouring
+  project abstained on a technicality instead. The retry is reach only: it is the
+  same primitive with the same dense floors, multi-term lexical bar, redundancy
+  filter, and dedup, so a question nothing answers still comes back empty. There
+  is no merge — a scoped pass that returned anything is returned untouched, and a
+  cross-scope item carries scope_weight 0.15 against a scoped item's 1.25, so it
+  could not displace a scoped hit even if there were. The top-level `cross_scope`
+  keeps reporting what the caller asked for. `retrieval.scope_fallback_enabled`
+  turns it off for strict isolation.
+- Match scopes by canonical spelling instead of exact string equality. Callers
+  name their own scope, so one project arrived as `coframe-brain`,
+  `coframe_brain__v2`, `Coframe Brain`, and five other spellings, each of which
+  reached nothing. `project`, `repo`, and `client` are now folded (lowercased,
+  separator runs collapsed to `-`) once in `ScopeContext.__post_init__`, which
+  every entry point already goes through, and an operator `scopes.aliases` table
+  maps the remaining genuinely-different names onto one id. Stored rows are never
+  rewritten: the search prefilter widens its `IN (...)` list to the stored
+  spellings that resolve to a scope the caller already names, and `scope_match`
+  folds the same way so a row the SQL admitted is not zeroed by the ranker.
+  Task and session ids stay trim-only — they are machine-minted and
+  high-cardinality, so folding them risks collapsing two distinct ids into one —
+  and a path-shaped component is left alone because `repo` is routinely a
+  filesystem path that `Path(...).resolve()` has to still find. `ScopeTag` itself
+  never folds: it runs during projection replay and over stored handle scopes,
+  where an alias-dependent rewrite would make a ledger refold depend on today's
+  config. The alias table ships empty, so a fresh install behaves exactly as
+  before, and an alias may rename a scope but never re-type one — promotion to
+  `global` stays a `scope_promoted` event with a named approver.
+
 - Preserve the last curator input digest when a non-curator wiki rematerialization
   replaces `state.json`. The promote script rematerializes after every run; losing
   that digest made an unchanged next cycle call the hosted model again instead of

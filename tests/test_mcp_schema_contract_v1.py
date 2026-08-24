@@ -422,12 +422,15 @@ def test_v1_context_reports_feedback_needed(tmp_path):
     assert served["coverage"]["returned"] > 0
     assert served["coverage"]["feedback_needed"] is True
 
+    # A query nothing answers, rather than a query the wrong scope cannot see:
+    # an unreachable scope now retries across scopes, so it no longer produces a
+    # reliably empty packet. The subject here is the flag, not scope isolation.
     empty = _payload(
         handle_request(
             conn,
             _tool_call(
                 "brain.context",
-                {"query": "Shared Context", "context": {"project": "no-such-project"}},
+                {"query": "quartz zeppelin nonsense", "context": {"project": "ocbrain"}},
                 request_id=2,
             ),
         )

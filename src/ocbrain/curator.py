@@ -36,6 +36,7 @@ from ocbrain.core_v1 import append_core_event, get_core_v1_belief
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
+from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID
 from ocbrain.text import is_restatement
 
 CURATOR_VERSION = "wiki-curator-v2"
@@ -669,6 +670,23 @@ def claim_valid_until(claim: dict[str, Any], *, current_ttl_days: int, now: date
     return (now + timedelta(days=current_ttl_days)).isoformat(timespec="seconds")
 
 
+def claim_scope(claim: dict[str, Any], *, project: str) -> tuple[str, str]:
+    """Decide a claim's scope from its own type, mechanically.
+
+    A durable preference is doctrine: it describes how the operator works, and it
+    is as true in one project as in the next. Stamping it into
+    ``project:<whatever ran the curator>`` is what leaves a brain with a
+    workspace scope nobody else can reach. Everything else stays project-scoped.
+
+    The model never chooses this. It supplies the claim's category and lifecycle,
+    which are already range-checked against fixed vocabularies; letting it name a
+    scope directly would make the visibility boundary a prompt-injection target.
+    """
+    if claim.get("category") == "preference" and claim.get("lifecycle") == "durable":
+        return ("global", DEFAULT_GLOBAL_SCOPE_ID)
+    return ("project", f"project:{project}")
+
+
 def apply_claims(
     conn,
     claims: list[dict[str, Any]],
@@ -684,8 +702,9 @@ def apply_claims(
     applied: list[str] = []
     unchanged: list[str] = []
     blocked: list[str] = []
+    project_scope_id = f"project:{project}"
     for claim in claims:
-        scope_id = f"project:{project}"
+        scope_type, scope_id = claim_scope(claim, project=project)
         belief_id = stable_id("belief", "wiki", claim["key"], scope_id)
         existing = get_core_v1_belief(conn, belief_id)
         if (
@@ -697,15 +716,19 @@ def apply_claims(
         ):
             unchanged.append(belief_id)
             continue
+        # Look in this project AND in global doctrine. Once a fact is promoted to
+        # `global:doctrine`, a project-scoped run that only searched its own scope
+        # would not see it and would mint a fresh per-project copy of something
+        # the brain already states once.
         equivalent = conn.execute(
             """
             SELECT belief_id, body, evidence_ids
             FROM current_beliefs
             WHERE belief_type='wiki_fact' AND status='current' AND serve=1
-              AND scope_id=?
+              AND scope_id IN (?, ?)
             ORDER BY belief_id
             """,
-            (scope_id,),
+            (project_scope_id, DEFAULT_GLOBAL_SCOPE_ID),
         ).fetchall()
         equivalent_id = next(
             (
@@ -763,7 +786,7 @@ def apply_claims(
                 "body": claim["body"],
                 "evidence_ids": claim["evidence_ids"],
                 "scope": {
-                    "scope_type": "project",
+                    "scope_type": scope_type,
                     "scope_id": scope_id,
                     "visibility": "internal",
                     "egress_policy": "local_only",
@@ -803,6 +826,7 @@ __all__ = [
     "WIKI_STATE_SCHEMA",
     "apply_claims",
     "build_user_prompt",
+    "claim_scope",
     "claim_valid_until",
     "input_digest",
     "load_env_value",

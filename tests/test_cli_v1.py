@@ -72,11 +72,15 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_hygiene.py, tests/test_config_surface.py, and
     # tests/test_deslop.py, including their CLI routes.
     hygiene_acceptance = {"hygiene", "config", "deslop"}
+    # Covered in tests/test_scope_promote_cli.py, including the projection
+    # rebuild and the egress boundary.
+    scope_acceptance = {"scope-promote"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
         | curated_and_vector_acceptance
         | hygiene_acceptance
+        | scope_acceptance
     )
 
 

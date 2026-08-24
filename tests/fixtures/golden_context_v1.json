@@ -190,7 +190,12 @@
         "excluded_scope_count": 1,
         "excluded_delivery_count": 3,
         "forbidden_ids": ["golden:alpha:local-note", "golden:alpha:confidential-note"],
-        "forbidden_markers": ["GOLDEN_LOCAL_ONLY_MARKER", "GOLDEN_CONFIDENTIAL_MARKER"]
+        "forbidden_markers": ["GOLDEN_LOCAL_ONLY_MARKER", "GOLDEN_CONFIDENTIAL_MARKER"],
+        "scope_fallback": {
+          "mode": "cross_scope_auto",
+          "first_pass_eligible_count": 4,
+          "first_pass_excluded_scope_count": 1
+        }
       }
     },
     {
@@ -199,6 +204,7 @@
       "context": {"project": "alpha", "runtime": "golden"},
       "delivery_target": "hosted_model",
       "cross_scope": false,
+      "scope_fallback_enabled": false,
       "limit": 5,
       "expected": {
         "ids_ordered": [],
@@ -221,6 +227,27 @@
         "eligible_count": 5,
         "excluded_scope_count": 0,
         "excluded_delivery_count": 3,
+        "source_item_id": "golden:beta:foreign-note",
+        "source_sha256": "a9a72862411ea63b670bb4f0401b1e37a0c4c16d6f6285232a6a22c9d632bac2"
+      }
+    },
+    {
+      "id": "scope-fallback-auto-cross-scope",
+      "query": "silver orchard",
+      "context": {"project": "alpha", "runtime": "golden"},
+      "delivery_target": "hosted_model",
+      "cross_scope": false,
+      "limit": 5,
+      "expected": {
+        "ids_ordered": ["golden:beta:foreign-note"],
+        "eligible_count": 5,
+        "excluded_scope_count": 0,
+        "excluded_delivery_count": 3,
+        "scope_fallback": {
+          "mode": "cross_scope_auto",
+          "first_pass_eligible_count": 4,
+          "first_pass_excluded_scope_count": 1
+        },
         "source_item_id": "golden:beta:foreign-note",
         "source_sha256": "a9a72862411ea63b670bb4f0401b1e37a0c4c16d6f6285232a6a22c9d632bac2"
       }
@@ -254,7 +281,12 @@
         "excluded_scope_count": 1,
         "excluded_delivery_count": 1,
         "forbidden_ids": ["golden:alpha:prohibited-note"],
-        "forbidden_markers": ["GOLDEN_PROHIBITED_MARKER"]
+        "forbidden_markers": ["GOLDEN_PROHIBITED_MARKER"],
+        "scope_fallback": {
+          "mode": "cross_scope_auto",
+          "first_pass_eligible_count": 6,
+          "first_pass_excluded_scope_count": 1
+        }
       }
     },
     {
@@ -268,7 +300,12 @@
         "ids_ordered": [],
         "eligible_count": 4,
         "excluded_scope_count": 1,
-        "excluded_delivery_count": 3
+        "excluded_delivery_count": 3,
+        "scope_fallback": {
+          "mode": "cross_scope_auto",
+          "first_pass_eligible_count": 4,
+          "first_pass_excluded_scope_count": 1
+        }
       }
     },
     {
