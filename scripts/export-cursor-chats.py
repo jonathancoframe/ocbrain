@@ -13,6 +13,16 @@ Sources per workspace DB (all optional; schema varies by Cursor version):
   - ItemTable key ``aiService.generations``  — assistant generations (JSON array)
   - cursorDiskKV ``bubbleId:*`` / ``composerData:*`` — newer composer bubbles
 
+Known gap, measured 2026-08-24: composer chats are no longer workspace-local.
+``cursorDiskKV`` exists in every workspace DB here and is empty in all nine;
+the bubbles live in ``globalStorage/state.vscdb``, attributed to a workspace
+through its ``composerHeaders.workspaceId``. That store holds 215,674 bubbles
+totalling 2.1GB of JSON, so reading it is not a variation on this sweep — it
+needs recency bounding and a truncation policy of its own, and is deliberately
+left out here. Note for whoever picks it up: ``key LIKE 'bubbleId:<id>:%'``
+full-scans the 7.8GB table, while the equivalent ``key >= 'bubbleId:<id>:' AND
+key < 'bubbleId:<id>;'`` range uses the index and returns in milliseconds.
+
 Writes are content-compared before replacing, so unchanged workspaces keep their
 mtime and ocbrain's fingerprint gate skips them on recurring runs. All text is
 passed through ``ocbrain.text.redact_secrets`` before touching disk.
@@ -38,14 +48,39 @@ DEFAULT_OUT = Path.home() / ".ocbrain" / "exports" / "cursor"
 _PROMPTS_KEY = "aiService.prompts"
 _GENERATIONS_KEY = "aiService.generations"
 
+# Skips are reported in full when few, which is the normal case: this machine
+# has nine workspaces. The cap only stops a pathological storage dir from
+# burying the counts under its own listing.
+_SKIPPED_SAMPLE = 20
+
 
 def iso_from_ms(ms: int | float | None) -> str | None:
     if not ms:
         return None
     try:
         return datetime.fromtimestamp(ms / 1000, UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
+    except (OverflowError, OSError, TypeError, ValueError):
         return None
+
+
+def parse_timestamp(value: object) -> str | None:
+    """Normalise the two spellings Cursor uses for a time.
+
+    ``aiService`` rows carry epoch milliseconds; composer bubbles carry an ISO
+    8601 string. Dividing the latter by 1000 raises TypeError, which the numeric
+    path deliberately swallows rather than propagates — an unreadable timestamp
+    must not cost us the message it belongs to.
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC).isoformat()
+        except ValueError:
+            return None
+    if isinstance(value, int | float):
+        return iso_from_ms(value)
+    return None
 
 
 def parse_json_array(raw: bytes | str | None) -> list[dict]:
@@ -127,7 +162,7 @@ def extract_records(conn: sqlite3.Connection) -> list[dict]:
         records.append(
             {
                 "role": role,
-                "timestamp": iso_from_ms(data.get("createdAt") or data.get("unixMs")),
+                "timestamp": parse_timestamp(data.get("createdAt") or data.get("unixMs")),
                 "content": text,
                 "source_key": key,
             }
@@ -185,23 +220,37 @@ def main() -> int:
         return 0
 
     args.out.mkdir(parents=True, exist_ok=True)
-    exported = unchanged = skipped = 0
+    exported = unchanged = 0
+    # A bare skip counter cannot distinguish "nothing was ever typed here" from
+    # "this workspace moved to a shape we do not read", and three workspaces --
+    # including the most recently used one -- sat in that blind spot. Name the
+    # workspace and the reason so the next silent drop is one line of output.
+    skipped: list[dict[str, str]] = []
     for state_db in sorted(args.storage.glob("*/state.vscdb")):
         workspace_dir = state_db.parent
         if workspace_dir.name == "empty-window":
-            skipped += 1
+            skipped.append({"workspace": workspace_dir.name, "reason": "empty-window"})
             continue
         try:
             conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
-        except sqlite3.Error:
-            skipped += 1
+        except sqlite3.Error as exc:
+            skipped.append({"workspace": workspace_dir.name, "reason": f"sqlite_error:{exc}"})
             continue
         try:
+            # sqlite3.connect defers reading the header, and extract_records
+            # tolerates a missing table on purpose because the schema varies by
+            # Cursor version. Without this probe an unreadable file reaches the
+            # end of extraction with no records and is filed as an idle
+            # workspace -- the exact confusion this reporting exists to end.
+            conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
             records = extract_records(conn)
+        except sqlite3.Error as exc:
+            skipped.append({"workspace": workspace_dir.name, "reason": f"sqlite_error:{exc}"})
+            continue
         finally:
             conn.close()
         if not records:
-            skipped += 1
+            skipped.append({"workspace": workspace_dir.name, "reason": "no_records"})
             continue
         meta = {
             "workspace_id": workspace_dir.name,
@@ -214,9 +263,23 @@ def main() -> int:
         else:
             unchanged += 1
 
+    # Group by reason class: a sqlite error carries a distinct message per
+    # workspace, which would make the tally as unreadable as the raw list.
+    by_reason: dict[str, int] = {}
+    for entry in skipped:
+        klass = entry["reason"].split(":", 1)[0]
+        by_reason[klass] = by_reason.get(klass, 0) + 1
+
     print(
         json.dumps(
-            {"exported": exported, "unchanged": unchanged, "skipped": skipped, "out": str(args.out)}
+            {
+                "exported": exported,
+                "unchanged": unchanged,
+                "skipped": len(skipped),
+                "skipped_by_reason": by_reason,
+                "skipped_sample": skipped[:_SKIPPED_SAMPLE],
+                "out": str(args.out),
+            }
         )
     )
     return 0
