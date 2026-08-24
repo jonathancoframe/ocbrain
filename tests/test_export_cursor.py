@@ -154,3 +154,45 @@ def test_workspace_with_records_still_exports_and_regates(tmp_path):
     body = (out / "cursor-has-chat.jsonl").read_text().splitlines()
     assert json.loads(body[0])["_meta"]["workspace_id"] == "has-chat"
     assert json.loads(body[1])["content"] == "first question"
+
+
+def test_per_record_truncation_keeps_head_and_tail(tmp_path):
+    module = _module()
+    text = "HEAD" + ("m" * 5_000) + "TAIL"
+
+    capped, was_cut = module.truncate_middle(text, 1_000)
+
+    assert was_cut
+    assert len(capped.encode("utf-8")) <= 1_000
+    assert capped.startswith("HEAD")
+    assert capped.endswith("TAIL")
+    assert "omitted from middle" in capped
+    # Under the cap, nothing is touched and nothing claims to have been.
+    assert module.truncate_middle("short", 1_000) == ("short", False)
+
+
+def test_file_budget_drops_the_oldest_records_not_the_newest(tmp_path):
+    """The budget used to be spent front to back, dropping the newest chat.
+
+    That is exactly backwards for a memory system: the newest turn is the one
+    no earlier export already carries.
+    """
+    module = _module()
+    records = [
+        {"role": "user", "timestamp": f"2026-08-{day:02d}T00:00:00+00:00", "content": f"day {day}"}
+        for day in range(1, 21)
+    ]
+
+    text = module.render_jsonl(records, {"workspace_id": "ws"}, 700, lambda value: value)
+
+    lines = [json.loads(line) for line in text.splitlines()]
+    kept = [line["content"] for line in lines if "content" in line]
+    note = next(line["_truncated"] for line in lines if "_truncated" in line)
+
+    assert kept, "the budget dropped everything"
+    assert len(kept) < len(records), "the fixture did not exercise the budget"
+    # The survivors are the newest, contiguous, and still in ascending order.
+    assert kept == [f"day {day}" for day in range(21 - len(kept), 21)]
+    assert kept[-1] == "day 20"
+    assert note == {"dropped_oldest": len(records) - len(kept), "kept_newest": len(kept)}
+    assert len(text) <= 700
