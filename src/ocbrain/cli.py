@@ -5,6 +5,7 @@ import json
 import mmap
 import re
 import sys
+from collections.abc import Callable
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
@@ -1684,6 +1685,27 @@ def _deslop_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
     return api_key, args.base_url or defaults["base_url"], args.model or defaults["model"]
 
 
+def _deferred_deslop_credentials(
+    args: argparse.Namespace,
+) -> Callable[[], tuple[str, str, str]]:
+    """Resolve credentials on first real need, then reuse them for the run.
+
+    A `stamp` or `drop` repair is applied locally, so a run whose repairs are
+    all local makes no hosted call and must not require an API key. Resolving
+    up front turned those runs into a hard exit on any machine without one —
+    including CI, where the test asserting a stamp needs no hosted call was the
+    thing that failed.
+    """
+    resolved: list[tuple[str, str, str]] = []
+
+    def resolve() -> tuple[str, str, str]:
+        if not resolved:
+            resolved.append(_deslop_credentials(args))
+        return resolved[0]
+
+    return resolve
+
+
 def cmd_deslop(args: argparse.Namespace) -> int:
     conn = open_existing_core_v1(args.db)
     try:
@@ -1762,15 +1784,13 @@ def cmd_deslop(args: argparse.Namespace) -> int:
         limit = args.limit if args.limit is not None else config.deslop.max_repairs_per_run
         repairs: list[dict[str, Any]] = []
         if args.apply and actionable:
-            api_key, base_url, model = _deslop_credentials(args)
+            credentials = _deferred_deslop_credentials(args)
             for item in actionable[: max(0, limit)]:
                 repairs.append(_apply_one_repair(
                     conn,
                     item,
                     provider=args.provider,
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
+                    credentials=credentials,
                     current_ttl_days=config.curator.current_ttl_days,
                 ))
 
@@ -1800,12 +1820,14 @@ def _apply_one_repair(
     item: dict[str, Any],
     *,
     provider: str,
-    api_key: str,
-    base_url: str,
-    model: str,
+    credentials: Callable[[], tuple[str, str, str]],
     current_ttl_days: int,
 ) -> dict[str, Any]:
-    """Request one repair, then apply it only if it passes the subtractive gate."""
+    """Request one repair, then apply it only if it passes the subtractive gate.
+
+    ``credentials`` is called only on the path that actually reaches the model,
+    so the two local repairs below stay free of any API-key requirement.
+    """
     # Two repairs need no model call at all. A `drop` finding already said there
     # is nothing worth keeping, and inventing a rewrite for it would be the exact
     # failure the subtractive gate exists to catch. A `stamp` finding is missing
@@ -1829,6 +1851,7 @@ def _apply_one_repair(
         return {"belief_id": item["belief_id"]} | apply_repair(
             conn, belief_id=item["belief_id"], action="drop", bodies=[], reason=reason
         )
+    api_key, base_url, model = credentials()
     action, bodies, reason, rejection = request_repair(
         item,
         item["findings"],
