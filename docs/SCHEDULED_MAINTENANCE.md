@@ -45,18 +45,34 @@ Six ordered stages: curate → hygiene → deslop → rematerialize wiki → lin
 rebuild vectors. Each continues on failure so one bad stage cannot strand the
 rest.
 
-**Step 1 is the only hosted call by default**, and it is digest-gated: if no
-eligible evidence changed since the last run, it exits without contacting the
-provider. A quiet cycle is therefore free, which is what makes an hourly schedule
-reasonable. Deslop runs mechanical-only unless you opt in, so it stays free and
-its findings are reproducible across runs.
+**Step 1 is the only hosted call by default**, and it is digest-gated per
+project: a project whose eligible evidence has not changed since the last run is
+skipped without contacting the provider, and a cycle where nothing moved is
+therefore free. That is what makes an hourly schedule reasonable across many
+project scopes. Deslop runs mechanical-only unless you opt in, so it stays free
+and its findings are reproducible across runs.
+
+Which projects get curated is `curator.projects` in your config, not a pin in
+the script. Set it to the scopes you actually work in:
+
+```json
+"curator": {
+  "projects": ["coframe", "coframe-personalization", "workspace"],
+  "min_evidence_per_project": 3
+}
+```
+
+A project with fewer than `min_evidence_per_project` eligible objects is skipped
+and reported as `skipped_thin_project` rather than billed. Every project the run
+considered emits one JSON line naming its status, followed by a
+`wiki-curate-rollup` line, so the promote log stays greppable.
 
 Environment:
 
 | Variable | Default | Notes |
 |---|---|---|
 | `OCBRAIN_PROMOTE_PROVIDER` | `anthropic` | Also `openai`, `moonshot` |
-| `OCBRAIN_PROMOTE_PROJECT` | `workspace` | |
+| `OCBRAIN_PROMOTE_PROJECT` | unset | Set it to curate exactly one scope for a one-off run; unset uses `curator.projects` |
 | `OCBRAIN_PROMOTE_MAX_BELIEFS` | `24` | Upper bound per run; fewer is better |
 | `OCBRAIN_HYGIENE_CLASSES` | all three | e.g. `--class expired` to restrict |
 | `OCBRAIN_HYGIENE_APPLY` | `0` (report only) | `1` lets the sweep retire beliefs |
@@ -72,7 +88,10 @@ An hourly interval is ample — evidence arrives at human pace.
 ### What the curator sends
 
 Only evidence with `public`/`internal` visibility and `hosted_ok` egress policy,
-in one project scope, bounded to 4,000 characters per body. Raw transcripts are
+in a configured project scope, bounded to 4,000 characters per body. A scope
+matches by canonical spelling, so evidence a client stored as `Coframe Brain` is
+reached by the project named `coframe-brain`; widening only ever adds spellings
+of a project already on the list. Raw transcripts are
 structurally ineligible: their kind is not in the eligible set. Confidential,
 secret, local-only, and prohibited objects never qualify. `--allow-hosted-egress`
 additionally admits `approval_required` objects and nothing else.

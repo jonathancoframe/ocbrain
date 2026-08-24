@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 import ocbrain.curator
 from ocbrain.core_v1 import append_core_event, init_core_v1, record_core_v1_evidence
-from ocbrain.curator import select_evidence
+from ocbrain.curator import ELIGIBLE_KINDS, select_evidence
 from ocbrain.db import connect
 from ocbrain.mcp_v1 import decide_proposal_v1
 from ocbrain.scope import ScopeTag
@@ -371,6 +372,9 @@ def test_hosted_prompt_excludes_local_and_confidential_objects(
             str(tmp_path / "wiki"),
             "--project",
             "test",
+            # This fixture is about the egress boundary, not the thinness gate.
+            "--min-evidence-per-project",
+            "1",
             "--allow-hosted-egress",
             "--apply",
             "--force",
@@ -708,4 +712,452 @@ def test_global_belief_dedups_against_project_restatement(tmp_path: Path) -> Non
     ).fetchall()
     assert len(serving) == 1
     assert str(serving[0]["scope_id"]) == "global:doctrine"
+    conn.close()
+# --------------------------------------------------------------------------- #
+# Multi-project curation
+#
+# A curator pinned to one project scope curates one spelling of one project. On
+# a real brain that was 5 of 574 eligible objects, and the wiki froze for six
+# days while evidence kept arriving in ~40 other project scopes. These pin the
+# repair and, just as importantly, the cost discipline that has to survive it:
+# a project only bills a hosted call when its own evidence changed.
+# --------------------------------------------------------------------------- #
+
+_EVIDENCE_BLOCK_RE = re.compile(
+    r'<evidence id="([^"]+)"[^>]*>\n(.*?)\n</evidence>', re.DOTALL
+)
+
+
+def _seed_project_evidence(conn, project: str, count: int, *, marker: str = "") -> None:
+    """Give ``project`` ``count`` curation-eligible objects, tagged so a stubbed
+    provider can tell which project's prompt it is answering."""
+    for index in range(count):
+        record_core_v1_evidence(
+            conn,
+            body=(
+                f"PROJECT {project} FACT {marker}{index}: the {project} runner writes "
+                f"its receipt to /var/{project}/receipt-{marker}{index}.json every run."
+            ),
+            kind="task_closeout_summary",
+            scope=ScopeTag(
+                "project",
+                f"project:{project}",
+                visibility="internal",
+                egress_policy="hosted_ok",
+            ),
+            writer="test",
+        )
+    conn.commit()
+
+
+def _stub_provider(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Answer every curation request locally, and record the prompts sent.
+
+    A test must never reach a hosted provider, and the prompt is also the only
+    place the project under compilation is visible, so recording it is what lets
+    a test assert which projects billed a call.
+    """
+    prompts: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payload = json.loads(request.data)
+        prompt = payload["messages"][1]["content"]
+        prompts.append(prompt)
+        match = _EVIDENCE_BLOCK_RE.search(prompt)
+        assert match is not None, "curation prompt carried no evidence"
+        evidence_id, body = match.group(1), match.group(2)
+        belief = {
+            "key": f"receipt-path-{len(prompts)}",
+            "title": "Runner receipt path",
+            "body": body[:400],
+            "category": "system",
+            "lifecycle": "current",
+            "confidence": 0.9,
+            "supports": [{"evidence_id": evidence_id, "quote": body[:60]}],
+        }
+        response = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": json.dumps({"beliefs": [belief]})},
+                }
+            ]
+        }
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(ocbrain.curator.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("KIMI_API_KEY", "test-key-never-sent")
+    return prompts
+
+
+def _run_curator(monkeypatch: pytest.MonkeyPatch, db_path: Path, wiki_dir: Path, *args):
+    curator = _curator_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "wiki-curator.py",
+            "--provider",
+            "moonshot",
+            "--db",
+            str(db_path),
+            "--wiki-dir",
+            str(wiki_dir),
+            *args,
+        ],
+    )
+    return curator.main()
+
+
+def _projects_in(prompts: list[str]) -> list[str]:
+    """Which project each recorded prompt was compiled for."""
+    found = []
+    for prompt in prompts:
+        match = re.search(r"PROJECT (\S+) FACT", prompt)
+        assert match is not None, "prompt carried no project marker"
+        found.append(match.group(1))
+    return found
+
+
+def test_select_evidence_includes_alias_variant_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selection matches a project by canonical spelling, not exact string.
+
+    Stored rows keep whatever spelling the client used and are never rewritten,
+    so equality against one spelling leaves the rest of the project unreachable.
+    """
+    monkeypatch.setenv(
+        "OCBRAIN_SCOPES_ALIASES",
+        json.dumps({"project:coframe-brain-v2": "project:coframe-brain"}),
+    )
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    stored = {
+        "canonical": "project:coframe-brain",
+        "spaced and cased": "project:Coframe Brain",
+        "underscored": "project:coframe_brain",
+        "aliased": "project:coframe-brain-v2",
+        "unrelated": "project:personalization-headroom",
+    }
+    for body, scope_id in stored.items():
+        record_core_v1_evidence(
+            conn,
+            body=f"EVIDENCE FROM THE {body} SCOPE SPELLING",
+            kind="task_closeout_summary",
+            scope=ScopeTag(
+                "project", scope_id, visibility="internal", egress_policy="hosted_ok"
+            ),
+            writer="test",
+        )
+    conn.commit()
+
+    reached = {
+        str(row["scope_id"])
+        for row in select_evidence(conn, limit=50, project="Coframe Brain")
+    }
+    assert reached == {
+        "project:coframe-brain",
+        "project:Coframe Brain",
+        "project:coframe_brain",
+        "project:coframe-brain-v2",
+    }
+    # Widening only ever adds spellings of the project the caller named.
+    assert "project:personalization-headroom" not in reached
+    conn.close()
+
+
+def test_history_file_kinds_are_never_eligible(tmp_path: Path) -> None:
+    """Raw transcripts must stay ineligible however far the scope gate widens.
+
+    Curating more projects only stays defensible if the thing that never leaves
+    the machine still never leaves it. The kind allow-list is the whole gate, so
+    it is asserted directly rather than through one sampled transcript kind.
+    """
+    assert not [kind for kind in ELIGIBLE_KINDS if kind.endswith("_history_file")]
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    for kind in (
+        "claude_history_file",
+        "codex_history_file",
+        "cursor_history_file",
+        "hermes_history_file",
+        "openclaw_history_file",
+        "unknown_history_file",
+    ):
+        record_core_v1_evidence(
+            conn,
+            body=f"RAW TRANSCRIPT FROM {kind} THAT MUST NEVER EGRESS",
+            kind=kind,
+            scope=ScopeTag(
+                "project", "project:test", visibility="public", egress_policy="hosted_ok"
+            ),
+            writer="test",
+        )
+    conn.commit()
+    assert (
+        select_evidence(
+            conn,
+            limit=50,
+            project="test",
+            egress_policies=["hosted_ok", "approval_required", "local_only"],
+            visibilities=["public", "internal", "confidential"],
+        )
+        == []
+    )
+    conn.close()
+
+
+def test_multi_project_state_digest_is_per_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One state file, one digest per project.
+
+    A shell loop over ``--project`` cannot do this: state.json is one file per
+    wiki dir, so the second project would overwrite the first project's digest
+    and every scheduled cycle would re-bill a call for every project.
+    """
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed_project_evidence(conn, "alpha", 4)
+    _seed_project_evidence(conn, "beta", 4)
+    conn.close()
+
+    prompts = _stub_provider(monkeypatch)
+    wiki_dir = tmp_path / "wiki"
+    assert (
+        _run_curator(
+            monkeypatch,
+            db_path,
+            wiki_dir,
+            "--project",
+            "alpha",
+            "--project",
+            "beta",
+            "--apply",
+        )
+        == 0
+    )
+
+    assert sorted(_projects_in(prompts)) == ["alpha", "beta"]
+    state = json.loads((wiki_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["schema_version"] == ocbrain.curator.WIKI_STATE_SCHEMA
+    assert sorted(state["projects"]) == ["alpha", "beta"]
+    digests = {name: entry["input_digest"] for name, entry in state["projects"].items()}
+    assert digests["alpha"] != digests["beta"]
+    assert all(digests.values())
+
+
+def test_unchanged_project_digest_skips_api_call_while_changed_project_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cost discipline: only the project whose evidence moved bills a call."""
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed_project_evidence(conn, "alpha", 4)
+    _seed_project_evidence(conn, "beta", 4)
+    conn.close()
+
+    prompts = _stub_provider(monkeypatch)
+    wiki_dir = tmp_path / "wiki"
+    scopes = ("--project", "alpha", "--project", "beta", "--apply")
+    assert _run_curator(monkeypatch, db_path, wiki_dir, *scopes) == 0
+    assert sorted(_projects_in(prompts)) == ["alpha", "beta"]
+
+    # A completely quiet cycle costs nothing at all.
+    prompts.clear()
+    assert _run_curator(monkeypatch, db_path, wiki_dir, *scopes) == 0
+    assert prompts == []
+
+    # New evidence in one project bills that project, and only that project.
+    conn = connect(db_path)
+    _seed_project_evidence(conn, "beta", 2, marker="new-")
+    conn.close()
+    assert _run_curator(monkeypatch, db_path, wiki_dir, *scopes) == 0
+    assert _projects_in(prompts) == ["beta"]
+
+    state = json.loads((wiki_dir / "state.json").read_text(encoding="utf-8"))
+    assert sorted(state["projects"]) == ["alpha", "beta"]
+
+
+def test_legacy_flat_state_json_migrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing install keeps its short-circuit across the upgrade.
+
+    Pre-multi-project runs wrote one flat ``input_digest`` for the pinned
+    ``workspace`` project. Reading it as anything other than workspace's digest
+    would re-bill a hosted call for a project that is already up to date.
+    """
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed_project_evidence(conn, "workspace", 4)
+    conn.close()
+
+    prompts = _stub_provider(monkeypatch)
+    wiki_dir = tmp_path / "wiki"
+    assert _run_curator(monkeypatch, db_path, wiki_dir, "--project", "workspace", "--apply") == 0
+    assert len(prompts) == 1
+    state = json.loads((wiki_dir / "state.json").read_text(encoding="utf-8"))
+    digest = state["projects"]["workspace"]["input_digest"]
+
+    # Rewrite state.json in the pre-upgrade shape and confirm it still gates.
+    (wiki_dir / "state.json").write_text(
+        json.dumps({"schema_version": "ocbrain.wiki-state.v1", "input_digest": digest}),
+        encoding="utf-8",
+    )
+    prompts.clear()
+    assert _run_curator(monkeypatch, db_path, wiki_dir, "--project", "workspace", "--apply") == 0
+    assert prompts == []
+
+    # A legacy digest belongs to workspace alone; another project still runs.
+    conn = connect(db_path)
+    _seed_project_evidence(conn, "beta", 4)
+    conn.close()
+    (wiki_dir / "state.json").write_text(
+        json.dumps({"schema_version": "ocbrain.wiki-state.v1", "input_digest": digest}),
+        encoding="utf-8",
+    )
+    assert (
+        _run_curator(
+            monkeypatch,
+            db_path,
+            wiki_dir,
+            "--project",
+            "workspace",
+            "--project",
+            "beta",
+            "--apply",
+        )
+        == 0
+    )
+    assert _projects_in(prompts) == ["beta"]
+
+
+def test_thin_project_is_skipped_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A scope too thin to justify a hosted call is skipped out loud."""
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed_project_evidence(conn, "thin", 2)
+    _seed_project_evidence(conn, "thick", 4)
+    conn.close()
+
+    prompts = _stub_provider(monkeypatch)
+    assert (
+        _run_curator(
+            monkeypatch,
+            db_path,
+            tmp_path / "wiki",
+            "--project",
+            "thin",
+            "--project",
+            "thick",
+            "--min-evidence-per-project",
+            "3",
+            "--apply",
+        )
+        == 0
+    )
+
+    assert _projects_in(prompts) == ["thick"]
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{")
+    ]
+    skipped = [line for line in lines if line.get("status") == "skipped_thin_project"]
+    assert [line["project"] for line in skipped] == ["thin"]
+    assert skipped[0]["eligible_evidence"] == 2
+    assert skipped[0]["min_evidence_per_project"] == 3
+    rollup = next(line for line in lines if line["action"] == "wiki-curate-rollup")
+    assert rollup["projects_by_status"] == {
+        "completed": ["thick"],
+        "skipped_thin_project": ["thin"],
+    }
+    assert rollup["hosted_calls"] == 1
+
+
+def test_rewording_a_doctrine_fact_does_not_demote_it(tmp_path: Path) -> None:
+    """An update to a doctrine fact must not move it into a project scope.
+
+    An approved proposal writes its scope onto the belief. A claim that
+    `claim_scope` types as project-scoped — anything that is not a durable
+    preference — would therefore drag the `global:doctrine` fact it restates
+    down with it, undoing a promotion that required a named approver.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    doctrine_id = "belief:doctrine-gcloud"
+    proposal_id = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "belief_id": doctrine_id,
+            "belief_type": "wiki_fact",
+            "body": "For Coframe production infrastructure, use the gcloud CLI rather "
+            "than kubectl.",
+            "evidence_ids": [],
+            "scope": ScopeTag(
+                "global",
+                "global:doctrine",
+                visibility="internal",
+                egress_policy="hosted_ok",
+                provenance="test",
+            ).to_dict(),
+            "confidence": 0.95,
+            "attributes": {"key": "gcloud-over-kubectl", "category": "workflow"},
+        },
+        writer="test",
+    )
+    decide_proposal_v1(
+        conn,
+        proposal_event_id=proposal_id,
+        decision="approve",
+        actor="test",
+        edited_body=None,
+        reason="doctrine seed",
+    )
+    conn.commit()
+
+    restatement = [
+        {
+            "key": "gcloud-not-kubectl",
+            "title": "gcloud over kubectl",
+            "body": "Use the gcloud CLI rather than kubectl for Coframe production "
+            "infrastructure.",
+            "category": "workflow",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+    ]
+    # The first project rewords the doctrine fact in place; the second finds it
+    # already saying exactly that and writes nothing at all.
+    first = apply_claims(conn, restatement, model="test", project="coframe")
+    assert first["applied"] == [doctrine_id]
+    second = apply_claims(
+        conn, restatement, model="test", project="coframe-personalization"
+    )
+    assert second["applied"] == []
+    assert second["unchanged"] == [doctrine_id]
+
+    served = conn.execute(
+        "SELECT belief_id, scope_type, scope_id FROM current_beliefs "
+        "WHERE belief_type='wiki_fact' AND serve=1 AND status='current'"
+    ).fetchall()
+    assert len(served) == 1
+    assert str(served[0]["belief_id"]) == doctrine_id
+    # A rewording is not a demotion: only a scope_promoted event moves a belief.
+    assert str(served[0]["scope_type"]) == "global"
+    assert str(served[0]["scope_id"]) == "global:doctrine"
     conn.close()
