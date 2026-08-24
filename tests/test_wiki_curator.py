@@ -799,3 +799,81 @@ def test_history_file_kinds_are_never_eligible(tmp_path: Path) -> None:
         == []
     )
     conn.close()
+
+
+def test_rewording_a_doctrine_fact_does_not_demote_it(tmp_path: Path) -> None:
+    """An update to a doctrine fact must not move it into a project scope.
+
+    An approved proposal writes its scope onto the belief. A claim that
+    `claim_scope` types as project-scoped — anything that is not a durable
+    preference — would therefore drag the `global:doctrine` fact it restates
+    down with it, undoing a promotion that required a named approver.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    doctrine_id = "belief:doctrine-gcloud"
+    proposal_id = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "belief_id": doctrine_id,
+            "belief_type": "wiki_fact",
+            "body": "For Coframe production infrastructure, use the gcloud CLI rather "
+            "than kubectl.",
+            "evidence_ids": [],
+            "scope": ScopeTag(
+                "global",
+                "global:doctrine",
+                visibility="internal",
+                egress_policy="hosted_ok",
+                provenance="test",
+            ).to_dict(),
+            "confidence": 0.95,
+            "attributes": {"key": "gcloud-over-kubectl", "category": "workflow"},
+        },
+        writer="test",
+    )
+    decide_proposal_v1(
+        conn,
+        proposal_event_id=proposal_id,
+        decision="approve",
+        actor="test",
+        edited_body=None,
+        reason="doctrine seed",
+    )
+    conn.commit()
+
+    restatement = [
+        {
+            "key": "gcloud-not-kubectl",
+            "title": "gcloud over kubectl",
+            "body": "Use the gcloud CLI rather than kubectl for Coframe production "
+            "infrastructure.",
+            "category": "workflow",
+            "lifecycle": "durable",
+            "confidence": 0.9,
+            "evidence_ids": [],
+        }
+    ]
+    # The first project rewords the doctrine fact in place; the second finds it
+    # already saying exactly that and writes nothing at all.
+    first = apply_claims(conn, restatement, model="test", project="coframe")
+    assert first["applied"] == [doctrine_id]
+    second = apply_claims(
+        conn, restatement, model="test", project="coframe-personalization"
+    )
+    assert second["applied"] == []
+    assert second["unchanged"] == [doctrine_id]
+
+    served = conn.execute(
+        "SELECT belief_id, scope_type, scope_id FROM current_beliefs "
+        "WHERE belief_type='wiki_fact' AND serve=1 AND status='current'"
+    ).fetchall()
+    assert len(served) == 1
+    assert str(served[0]["belief_id"]) == doctrine_id
+    # A rewording is not a demotion: only a scope_promoted event moves a belief.
+    assert str(served[0]["scope_type"]) == "global"
+    assert str(served[0]["scope_id"]) == "global:doctrine"
+    conn.close()

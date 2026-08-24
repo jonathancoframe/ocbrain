@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep a doctrine fact at doctrine scope when a curator run rewords it. An
+  approved proposal writes its scope onto the belief, so a claim the curator
+  typed as project-scoped demoted the `global:doctrine` fact it restated. Only a
+  `scope_promoted` event with a named approver may move a belief between tiers;
+  a rewording now carries the matched belief's own scope through unchanged.
 - Add `ocbrain scope-promote`, the missing emitter for the `scope_promoted`
   event. The kind, its projection, and its rebuild path all shipped; nothing ever
   wrote one, which is why a real brain holds zero global beliefs. `--approved-by`

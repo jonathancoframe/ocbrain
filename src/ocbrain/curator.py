@@ -731,7 +731,9 @@ def apply_claims(
         # Look in this project AND in global doctrine. Once a fact is promoted to
         # `global:doctrine`, a project-scoped run that only searched its own scope
         # would not see it and would mint a fresh per-project copy of something
-        # the brain already states once.
+        # the brain already states once. Curating many projects makes that the
+        # common case, not the rare one: the same durable truth is supported by
+        # evidence in several of them.
         equivalent = conn.execute(
             """
             SELECT belief_id, body, evidence_ids
@@ -768,9 +770,23 @@ def apply_claims(
             ),
             None,
         )
+        proposal_scope: dict[str, Any] = {
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "visibility": "internal",
+            "egress_policy": "local_only",
+            "provenance": "wiki_curator",
+        }
         if restated_id is not None:
             belief_id = restated_id
             existing = get_core_v1_belief(conn, belief_id)
+            # An approved proposal writes its scope onto the belief, so a claim
+            # that `claim_scope` typed as project-scoped would quietly demote the
+            # doctrine fact it restates. Only a `scope_promoted` event with a
+            # named approver may move a belief between tiers; a rewording keeps
+            # the belief exactly where it already is.
+            if existing is not None and str(existing["scope"]["scope_id"]) != scope_id:
+                proposal_scope = dict(existing["scope"])
         if existing is not None and existing.get("status") in {"retracted", "tombstoned"}:
             blocked.append(belief_id)
             continue
@@ -797,13 +813,7 @@ def apply_claims(
                 "belief_type": "wiki_fact",
                 "body": claim["body"],
                 "evidence_ids": claim["evidence_ids"],
-                "scope": {
-                    "scope_type": scope_type,
-                    "scope_id": scope_id,
-                    "visibility": "internal",
-                    "egress_policy": "local_only",
-                    "provenance": "wiki_curator",
-                },
+                "scope": proposal_scope,
                 "confidence": claim["confidence"],
                 "reward_band": "strong" if claim["confidence"] >= 0.8 else "moderate",
                 "attributes": attributes,
