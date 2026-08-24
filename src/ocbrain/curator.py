@@ -36,7 +36,7 @@ from ocbrain.core_v1 import append_core_event, get_core_v1_belief
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import decide_proposal_v1
-from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID
+from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID, matching_stored_scope_ids
 from ocbrain.text import is_restatement
 
 CURATOR_VERSION = "wiki-curator-v2"
@@ -227,13 +227,21 @@ def select_evidence(
 ) -> list[dict[str, Any]]:
     """Select curation-eligible evidence for one project.
 
-    The egress gate is the load-bearing part. By default only ``public``/
+    The egress gate is what decides this. By default only ``public``/
     ``internal`` visibility and ``hosted_ok`` policy qualify, so a fresh install
     sends nothing it was not explicitly given. An operator may widen the
     allow-lists via ``curator.egress_policies`` -- necessary on any brain whose
     evidence is written as ``local_only``, which is the default for client
     writes -- but ``prohibited`` egress and ``secret`` visibility are refused in
     code regardless. Raw transcripts stay ineligible by kind either way.
+
+    The project gate matches by canonical spelling, not by exact string. Clients
+    name their own scope, so one project arrives written a dozen ways and the
+    stored rows keep whichever spelling was used. Exact equality curated one
+    spelling and left the rest unreachable: on one real brain, ``workspace``
+    matched 19 of 574 eligible rows. ``matching_stored_scope_ids`` only ever adds
+    spellings of the project the caller already named, so nothing widens past the
+    scope they asked for.
     """
     if not project:
         raise ValueError("project is required for evidence selection")
@@ -242,9 +250,13 @@ def select_evidence(
         visibilities=visibilities,
         allow_hosted_egress=allow_hosted_egress,
     )
+    scope_ids = matching_stored_scope_ids(
+        conn, "evidence_objects", (f"project:{project}",)
+    )
     placeholders = ",".join("?" for _ in ELIGIBLE_KINDS)
     egress_placeholders = ",".join("?" for _ in resolved_egress)
     visibility_placeholders = ",".join("?" for _ in resolved_visibility)
+    scope_placeholders = ",".join("?" for _ in scope_ids)
     rows = [
         dict(row)
         for row in conn.execute(
@@ -255,14 +267,14 @@ def select_evidence(
             WHERE kind IN ({placeholders})
               AND visibility IN ({visibility_placeholders})
               AND egress_policy IN ({egress_placeholders})
-              AND scope_type = 'project' AND scope_id = ?
+              AND scope_type = 'project' AND scope_id IN ({scope_placeholders})
             ORDER BY recorded_at DESC, evidence_id DESC
             """,  # noqa: S608 - placeholders derive only from fixed local constants
             (
                 *tuple(sorted(ELIGIBLE_KINDS)),
                 *resolved_visibility,
                 *resolved_egress,
-                f"project:{project}",
+                *scope_ids,
             ),
         )
     ]

@@ -10,7 +10,7 @@ import pytest
 
 import ocbrain.curator
 from ocbrain.core_v1 import append_core_event, init_core_v1, record_core_v1_evidence
-from ocbrain.curator import select_evidence
+from ocbrain.curator import ELIGIBLE_KINDS, select_evidence
 from ocbrain.db import connect
 from ocbrain.mcp_v1 import decide_proposal_v1
 from ocbrain.scope import ScopeTag
@@ -708,4 +708,94 @@ def test_global_belief_dedups_against_project_restatement(tmp_path: Path) -> Non
     ).fetchall()
     assert len(serving) == 1
     assert str(serving[0]["scope_id"]) == "global:doctrine"
+    conn.close()
+
+
+def test_select_evidence_includes_alias_variant_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selection matches a project by canonical spelling, not exact string.
+
+    Stored rows keep whatever spelling the client used and are never rewritten,
+    so equality against one spelling leaves the rest of the project unreachable.
+    """
+    monkeypatch.setenv(
+        "OCBRAIN_SCOPES_ALIASES",
+        json.dumps({"project:coframe-brain-v2": "project:coframe-brain"}),
+    )
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    stored = {
+        "canonical": "project:coframe-brain",
+        "spaced and cased": "project:Coframe Brain",
+        "underscored": "project:coframe_brain",
+        "aliased": "project:coframe-brain-v2",
+        "unrelated": "project:personalization-headroom",
+    }
+    for body, scope_id in stored.items():
+        record_core_v1_evidence(
+            conn,
+            body=f"EVIDENCE FROM THE {body} SCOPE SPELLING",
+            kind="task_closeout_summary",
+            scope=ScopeTag(
+                "project", scope_id, visibility="internal", egress_policy="hosted_ok"
+            ),
+            writer="test",
+        )
+    conn.commit()
+
+    reached = {
+        str(row["scope_id"])
+        for row in select_evidence(conn, limit=50, project="Coframe Brain")
+    }
+    assert reached == {
+        "project:coframe-brain",
+        "project:Coframe Brain",
+        "project:coframe_brain",
+        "project:coframe-brain-v2",
+    }
+    # Widening only ever adds spellings of the project the caller named.
+    assert "project:personalization-headroom" not in reached
+    conn.close()
+
+
+def test_history_file_kinds_are_never_eligible(tmp_path: Path) -> None:
+    """Raw transcripts must stay ineligible however far the scope gate widens.
+
+    Reaching more of the corpus only stays defensible if the thing that never
+    leaves the machine still never leaves it. The kind allow-list is the whole
+    gate, so it is asserted directly rather than through one sampled kind.
+    """
+    assert not [kind for kind in ELIGIBLE_KINDS if kind.endswith("_history_file")]
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    for kind in (
+        "claude_history_file",
+        "codex_history_file",
+        "cursor_history_file",
+        "hermes_history_file",
+        "openclaw_history_file",
+        "unknown_history_file",
+    ):
+        record_core_v1_evidence(
+            conn,
+            body=f"RAW TRANSCRIPT FROM {kind} THAT MUST NEVER EGRESS",
+            kind=kind,
+            scope=ScopeTag(
+                "project", "project:test", visibility="public", egress_policy="hosted_ok"
+            ),
+            writer="test",
+        )
+    conn.commit()
+    assert (
+        select_evidence(
+            conn,
+            limit=50,
+            project="test",
+            egress_policies=["hosted_ok", "approval_required", "local_only"],
+            visibilities=["public", "internal", "confidential"],
+        )
+        == []
+    )
     conn.close()
