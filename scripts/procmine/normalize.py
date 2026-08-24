@@ -149,9 +149,26 @@ def classify_path(raw: str) -> str:
     return f"{root[:-1]}{suffix}>" if suffix else root
 
 
+# Absolute-ish paths embedded in prose. `classify_path` maps one whole token; a
+# captured error message is free text with paths inside it, which is how a raw
+# `/Users/<name>/...` reached a committed artifact and tripped the repo's own
+# public-safety scan.
+_PATH_IN_TEXT = re.compile(r"(?:~|/(?:Users|home|private|tmp|var|etc|usr|opt))[\w.\-+/~]*")
+
+
+def _class_paths_in_text(text: str) -> str:
+    """Replace every embedded filesystem path with its stable class token."""
+    return _PATH_IN_TEXT.sub(lambda match: classify_path(match.group(0)), text)
+
+
 def _safe(text: str) -> str | None:
-    """Redact, then refuse anything that still trips the leak detector."""
-    cleaned = redact_secrets(text)
+    """Redact, class any embedded path, then refuse what still trips the detector.
+
+    Path classing belongs here rather than at each call site: this is the single
+    choke point every free-text field passes through, so a new field cannot
+    reintroduce the leak by forgetting to call it.
+    """
+    cleaned = _class_paths_in_text(redact_secrets(text))
     if find_probable_secret_leaks(cleaned):
         return None
     return cleaned

@@ -387,3 +387,23 @@ def test_mine_repairs_separates_retries_from_repairs():
     assert mined["repairs"] == []
     assert mined["retries"]
     assert mined["retries"][0]["failing_step"] == "bash:flaky"
+
+
+def test_free_text_paths_are_classed_not_leaked() -> None:
+    """A captured error message is prose with paths inside it, not a path token.
+
+    `classify_path` only ever saw whole tokens, so raw absolute paths rode
+    through error fingerprints into a committed artifact and tripped the repo's
+    own public-safety scan. Path classing now happens in `_safe`, the single
+    choke point every free-text field passes through.
+    """
+    from procmine.normalize import _safe, error_fingerprint
+
+    leaky = '{"output": "/Users/someone/HermesWork/repos/secret-project/tool.py"}'
+    assert "/Users/" not in (error_fingerprint(leaky) or "")
+    assert "secret-project" not in (error_fingerprint(leaky) or "")
+
+    cleaned = _safe("error: cannot open /Users/someone/.ocbrain/ocbrain.sqlite")
+    assert cleaned is not None
+    assert "/Users/" not in cleaned
+    assert "<path:" in cleaned
