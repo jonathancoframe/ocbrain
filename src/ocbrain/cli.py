@@ -110,7 +110,14 @@ from ocbrain.mcp_v1 import (
     search_v1,
 )
 from ocbrain.retrieve import retrieve
-from ocbrain.scope import ScopeContext, ScopeTag, global_scope, resolve_write_scope
+from ocbrain.scope import (
+    DEFAULT_GLOBAL_SCOPE_ID,
+    SCOPE_TYPES,
+    ScopeContext,
+    ScopeTag,
+    global_scope,
+    resolve_write_scope,
+)
 from ocbrain.text import (
     compact_whitespace,
     find_probable_secret_leaks,
@@ -1138,6 +1145,30 @@ def build_parser() -> argparse.ArgumentParser:
     correct.add_argument("--author", default="human:jonathan")
     correct.add_argument("--hard", action="store_true")
     correct.set_defaults(func=cmd_event_correct)
+    scope_promote = commands.add_parser(
+        "scope-promote",
+        help="Move approved durable beliefs to a wider scope (never a wider egress)",
+    )
+    scope_promote.add_argument("--belief-id", action="append", default=[])
+    scope_promote.add_argument(
+        "--select-durable-preferences",
+        action="store_true",
+        help=(
+            "also promote every current, served workspace wiki_fact whose lifecycle is "
+            "durable and whose category is preference/decision/workflow/system"
+        ),
+    )
+    scope_promote.add_argument("--to-scope-type", choices=sorted(SCOPE_TYPES))
+    scope_promote.add_argument("--to-scope-id")
+    scope_promote.add_argument(
+        "--approved-by",
+        required=True,
+        help="the human accountable for widening these beliefs; recorded in the event",
+    )
+    scope_promote.add_argument("--reason")
+    scope_promote.add_argument("--dry-run", action="store_true")
+    scope_promote.set_defaults(func=cmd_scope_promote)
+
     forget = commands.add_parser("event-forget", help="Append a tombstone")
     forget.add_argument("--target", required=True)
     forget.add_argument("--mode", choices=["soft", "shred"], default="soft")
@@ -2331,6 +2362,123 @@ def cmd_event_forget(args: argparse.Namespace) -> int:
     )
     conn.commit()
     output(args, {"event_id": event_id, "kind": "tombstone_recorded", "counts": counts(conn)})
+    return 0
+
+
+# A workspace-scoped durable wiki fact in one of these categories is doctrine:
+# it describes how the operator works, not what one project is doing. Left in
+# `project:workspace` it is invisible to every other project, which is how a
+# brain ends up with 97 beliefs that most retrievals cannot reach.
+DURABLE_PREFERENCE_CATEGORIES = ("preference", "decision", "workflow", "system")
+DURABLE_PREFERENCE_SQL = """
+SELECT belief_id FROM current_beliefs
+WHERE scope_id='project:workspace' AND status='current' AND serve=1
+  AND belief_type='wiki_fact'
+  AND json_extract(attributes_json, '$.lifecycle')='durable'
+  AND json_extract(attributes_json, '$.category') IN (?, ?, ?, ?)
+ORDER BY belief_id
+"""
+
+
+def cmd_scope_promote(args: argparse.Namespace) -> int:
+    """Emit the `scope_promoted` event the projector has always known how to apply.
+
+    The event, its projection, and its rebuild path all shipped; only a way to
+    write one was missing, which is why zero beliefs in a real brain are global.
+
+    A promotion widens *reach* and never *egress*. Each belief keeps its own
+    visibility and egress_policy, so a `local_only` belief promoted to
+    `global:doctrine` becomes recallable from every project on this machine and
+    is still refused for hosted delivery — `_delivery_sql('hosted_model')`
+    requires `egress_policy='hosted_ok'`, which the promotion does not grant.
+    """
+    conn = open_db(args)
+    if not is_core_v1(conn):
+        return compatibility_refusal(
+            args, "scope-promote", "scope promotion requires an event-authoritative v1 core"
+        )
+    scope_type = args.to_scope_type
+    scope_id = args.to_scope_id
+    belief_ids = list(dict.fromkeys(args.belief_id))
+    if args.select_durable_preferences:
+        selected = conn.execute(DURABLE_PREFERENCE_SQL, DURABLE_PREFERENCE_CATEGORIES).fetchall()
+        belief_ids.extend(str(row["belief_id"]) for row in selected)
+        belief_ids = list(dict.fromkeys(belief_ids))
+        scope_type = scope_type or "global"
+        scope_id = scope_id or DEFAULT_GLOBAL_SCOPE_ID
+    if not belief_ids:
+        output(args, {"action": "scope-promote", "status": "no_beliefs_selected", "promoted": []})
+        return 0
+    if not scope_type or not scope_id:
+        output(
+            args,
+            {
+                "action": "scope-promote",
+                "status": "blocked",
+                "reason": "target_scope_required",
+                "detail": "pass --to-scope-type and --to-scope-id, or --select-durable-preferences",
+            },
+        )
+        return 2
+
+    promoted: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    missing: list[str] = []
+    for belief_id in belief_ids:
+        belief = get_core_v1_belief(conn, belief_id)
+        if belief is None or belief.get("status") != "current":
+            missing.append(belief_id)
+            continue
+        current = belief["scope"]
+        # Carry visibility and egress through verbatim. A promotion that also
+        # relaxed them would be an egress decision wearing a scope decision's
+        # clothes, and nothing downstream would show the difference.
+        target = ScopeTag(
+            scope_type,
+            scope_id,
+            visibility=str(current["visibility"]),
+            egress_policy=str(current["egress_policy"]),
+            provenance="scope_promoted",
+        )
+        if str(current["scope_type"]) == scope_type and str(current["scope_id"]) == scope_id:
+            unchanged.append(belief["canonical_id"])
+            continue
+        entry = {
+            "belief_id": belief["canonical_id"],
+            "from_scope": {"scope_type": current["scope_type"], "scope_id": current["scope_id"]},
+            "to_scope": target.to_dict(),
+        }
+        if not args.dry_run:
+            entry["event_id"] = append_core_event(
+                conn,
+                "scope_promoted",
+                {
+                    "schema_version": "ocbrain.scope-promotion.v1",
+                    "subject": {"kind": "belief", "id": belief["canonical_id"]},
+                    "belief_id": belief["canonical_id"],
+                    "scope": target.to_dict(),
+                    "approved_by": args.approved_by,
+                    "reason": args.reason,
+                },
+                writer="ocbrain-cli",
+                project=True,
+            )
+        promoted.append(entry)
+    if not args.dry_run:
+        conn.commit()
+    output(
+        args,
+        {
+            "action": "scope-promote",
+            "status": "planned" if args.dry_run else "applied",
+            "dry_run": bool(args.dry_run),
+            "approved_by": args.approved_by,
+            "promoted": promoted,
+            "unchanged": unchanged,
+            "missing": missing,
+            "counts": v1_counts(conn),
+        },
+    )
     return 0
 
 

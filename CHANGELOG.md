@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Add `ocbrain scope-promote`, the missing emitter for the `scope_promoted`
+  event. The kind, its projection, and its rebuild path all shipped; nothing ever
+  wrote one, which is why a real brain holds zero global beliefs. `--approved-by`
+  is required — widening a belief's audience is a human decision the ledger has
+  to be able to name — and `--select-durable-preferences` picks the current,
+  served workspace `wiki_fact` rows whose lifecycle is `durable` and whose
+  category is preference/decision/workflow/system. A promotion widens reach and
+  never egress: each belief carries its own visibility and egress policy through,
+  so a `local_only` belief promoted to `global:doctrine` becomes recallable from
+  every project on this machine and is still refused for hosted delivery.
+- Stamp curator claim scope mechanically instead of always using the running
+  project. A durable `preference` claim is doctrine — as true in one project as
+  the next — and stamping it into `project:<whatever ran the curator>` is what
+  leaves a workspace scope nobody else can reach. The model never chooses this;
+  it supplies a category and lifecycle that are already range-checked, and
+  letting it name a scope would make the visibility boundary an injection
+  target. The dedup lookup now also searches `global:doctrine`, so a promoted
+  fact is updated rather than re-minted once per project.
 - Retry a retrieval across scopes when the scoped pass returns nothing at all,
   and declare it in `coverage.scope_fallback`. `cross_scope` is an opt-in almost
   no caller sends, so a question the brain could answer from a neighbouring
