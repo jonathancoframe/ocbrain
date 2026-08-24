@@ -46,10 +46,14 @@ PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
 BUDGET_SECONDS="${OCBRAIN_PROMOTE_BUDGET_SECONDS:-1800}"
 
-# Which hygiene classes may apply unattended. `expired` is unambiguous;
-# `unused` and `unhelpful` are heuristics, and `unhelpful` additionally refuses
-# to act until a feedback watermark has been set.
-HYGIENE_CLASSES="${OCBRAIN_HYGIENE_CLASSES:---class expired --class unused --class unhelpful}"
+# Which hygiene classes may apply unattended. `expired` and `redundant` are
+# unambiguous — the first acts on an explicit supersession or a passed
+# valid_until, the second only on same-scope restatements above the token
+# threshold, keeping the newest. `unused` and `unhelpful` are heuristics, and
+# `unhelpful` additionally refuses to act until a feedback watermark has been
+# set. `redundant` was missing here, which is why duplicate wiki facts
+# accumulated to a quarter of the serving corpus while the loop reported clean.
+HYGIENE_CLASSES="${OCBRAIN_HYGIENE_CLASSES:---class expired --class redundant --class unused --class unhelpful}"
 # Report-only by default. Set OCBRAIN_HYGIENE_APPLY=1 to let it retire beliefs;
 # every retraction is soft and undoable with `ocbrain hygiene --restore`.
 HYGIENE_APPLY="${OCBRAIN_HYGIENE_APPLY:-0}"
@@ -60,6 +64,20 @@ HYGIENE_APPLY="${OCBRAIN_HYGIENE_APPLY:-0}"
 # repaired belief), and OCBRAIN_DESLOP_JUDGE=1 to add the actionability pass.
 DESLOP_APPLY="${OCBRAIN_DESLOP_APPLY:-0}"
 DESLOP_JUDGE="${OCBRAIN_DESLOP_JUDGE:-0}"
+# Volume eviction is a separate decision from belief repair, and needs its own
+# switch: OCBRAIN_DESLOP_APPLY only ever reached the findings run, so the volume
+# pass could never act however it was set. Evicted rows come back only from
+# `ocbrain sync --full`, which this loop does not run, so it stays off by
+# default.
+DESLOP_VOLUME_APPLY="${OCBRAIN_DESLOP_VOLUME_APPLY:-0}"
+
+# Snapshot before mutating. Once per UTC day rather than hourly: the core is
+# ~150MB and this job runs every hour. Uses the SQLite online-backup API, so it
+# is safe against the live WAL. Rotation only ever touches the auto- family,
+# leaving hand-made pre-* backups alone.
+PROMOTE_BACKUP="${OCBRAIN_PROMOTE_BACKUP:-1}"
+BACKUP_DIR="${OCBRAIN_BACKUP_DIR:-$HOME/.ocbrain/backups}"
+BACKUP_KEEP="${OCBRAIN_BACKUP_KEEP:-7}"
 
 echo "== $(date -u +%FT%TZ) brain-promote start =="
 
@@ -108,6 +126,26 @@ serving_count() {
 before="$(serving_count)"
 echo "serving beliefs before: $before"
 
+# 0. Daily snapshot, before anything below can retire or rewrite a belief.
+if [[ "$PROMOTE_BACKUP" == "1" ]]; then
+  snap="$BACKUP_DIR/ocbrain-auto-$(date -u +%Y%m%d).sqlite"
+  if [[ -f "$snap" ]]; then
+    echo "backup for today already present: $snap"
+  else
+    mkdir -p "$BACKUP_DIR"
+    if "$PY" -c 'import sys; from ocbrain.fsutil import snapshot_sqlite; snapshot_sqlite(sys.argv[1], sys.argv[2])' "$DB" "$snap"; then
+      echo "backup written: $snap"
+      # Keep the newest $BACKUP_KEEP auto snapshots; never touch pre-*/manual ones.
+      ls -1t "$BACKUP_DIR"/ocbrain-auto-*.sqlite 2>/dev/null \
+        | tail -n "+$((BACKUP_KEEP + 1))" \
+        | while read -r old; do rm -f -- "$old" && echo "rotated out: $old"; done
+    else
+      echo "backup failed; refusing to run mutating steps this cycle"
+      exit 1
+    fi
+  fi
+fi
+
 # 1. Curate. Digest-gated, so this is a no-op (and free) when nothing changed.
 run_with_budget "$BUDGET_SECONDS" \
   "$PY" "$REPO/scripts/wiki-curator.py" \
@@ -139,7 +177,11 @@ if [[ "$DESLOP_APPLY" == "1" ]]; then
 fi
 "$PY" -m ocbrain.cli "${deslop_args[@]}" \
   || echo "deslop step failed; continuing"
-"$PY" -m ocbrain.cli --db "$DB" deslop --volume \
+deslop_volume_args=(--db "$DB" deslop --volume)
+if [[ "$DESLOP_VOLUME_APPLY" == "1" ]]; then
+  deslop_volume_args+=(--apply)
+fi
+"$PY" -m ocbrain.cli "${deslop_volume_args[@]}" \
   || echo "deslop volume report failed; continuing"
 
 # 4. Rematerialize the wiki. A full rebuild + atomic swap is what removes pages
