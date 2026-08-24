@@ -366,6 +366,14 @@ class RetrievalConfig:
     feedback_weight: float = 0.125
     feedback_clamp: float = 0.25
     feedback_prior_observations: float = 3.0
+    # When a scoped retrieval returns nothing at all, retry once across scopes
+    # rather than abstaining on a technicality. Most callers never learn that
+    # `cross_scope` exists, and a brain that holds the answer under a
+    # neighbouring project is not the same thing as a brain that does not know.
+    # The retry changes reach only: every abstention gate is re-applied, and a
+    # cross-scope item carries scope_weight 0.15 against a scoped item's 1.25, so
+    # it can never displace a scoped hit. Turn it off to keep strict isolation.
+    scope_fallback_enabled: bool = True
 
 
 @dataclass(frozen=True)

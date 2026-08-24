@@ -154,6 +154,18 @@ def auto_compile_evidence(
     return belief_id
 
 
+def _scope_fallback_enabled() -> bool:
+    """Whether an empty scoped pass may retry across scopes.
+
+    Fails open to the shipped default: a malformed config must not decide a
+    serving policy by accident.
+    """
+    try:
+        return bool(load_config().retrieval.scope_fallback_enabled)
+    except Exception:  # noqa: BLE001 - config problems must not break serving
+        return True
+
+
 def build_context_v1(
     conn: sqlite3.Connection,
     query: str,
@@ -163,6 +175,68 @@ def build_context_v1(
     cross_scope: bool,
     delivery_target: str = LOCAL_MODEL_TARGET,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build one context packet, retrying across scopes only when it is empty.
+
+    ``cross_scope`` is an opt-in almost no caller knows to send, so a query the
+    brain could answer from a neighbouring project abstained instead. When the
+    scoped pass returns nothing at all, run it once more across scopes and say so
+    in ``coverage.scope_fallback``.
+
+    This is a reach change, not a quality change. The second pass is the same
+    primitive with the same floors, redundancy filter, and dedup; it widens which
+    rows are candidates and nothing else. There is no merge: a scoped pass that
+    returned anything is returned untouched, so scoped results are never diluted.
+    When the retry is also empty, the caller gets the scoped packet's own
+    accounting rather than the wider pass's, because that is the accounting that
+    describes their scope.
+    """
+    packet, handles = _context_pass(
+        conn,
+        query,
+        context=context,
+        limit=limit,
+        cross_scope=cross_scope,
+        delivery_target=delivery_target,
+    )
+    if packet["items"] or cross_scope or not _scope_fallback_enabled():
+        return _enforce_context_packet_limit(packet, handles)
+    coverage = packet["coverage"]
+    fallback = {
+        "mode": "cross_scope_auto",
+        "first_pass_eligible_count": int(coverage["ranking"].get("eligible_count") or 0),
+        "first_pass_excluded_scope_count": int(coverage.get("excluded_scope_count") or 0),
+    }
+    wider, wider_handles = _context_pass(
+        conn,
+        query,
+        context=context,
+        limit=limit,
+        cross_scope=True,
+        delivery_target=delivery_target,
+    )
+    if wider["items"]:
+        # Keep reporting what the CALLER asked for; the retry is coverage detail,
+        # not a rewrite of their request.
+        wider["cross_scope"] = bool(cross_scope)
+        packet, handles = wider, wider_handles
+    packet["coverage"]["scope_fallback"] = fallback
+    return _enforce_context_packet_limit(packet, handles)
+
+
+def _context_pass(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    context: ScopeContext,
+    limit: int,
+    cross_scope: bool,
+    delivery_target: str = LOCAL_MODEL_TARGET,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One retrieval pass, packaged but not yet budgeted.
+
+    The packet-limit enforcement is deliberately left to the caller so a
+    fallback marker can be added before the byte accounting is settled.
+    """
     _require_v1(conn)
     delivery_target = normalize_delivery_target(delivery_target)
     raw = search_core_v1(
@@ -258,7 +332,7 @@ def build_context_v1(
             "ranking": dict(raw.get("ranking") or {}),
         },
     }
-    return _enforce_context_packet_limit(packet, handles)
+    return packet, handles
 
 
 def record_context_v1(

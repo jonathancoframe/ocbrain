@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Retry a retrieval across scopes when the scoped pass returns nothing at all,
+  and declare it in `coverage.scope_fallback`. `cross_scope` is an opt-in almost
+  no caller sends, so a question the brain could answer from a neighbouring
+  project abstained on a technicality instead. The retry is reach only: it is the
+  same primitive with the same dense floors, multi-term lexical bar, redundancy
+  filter, and dedup, so a question nothing answers still comes back empty. There
+  is no merge — a scoped pass that returned anything is returned untouched, and a
+  cross-scope item carries scope_weight 0.15 against a scoped item's 1.25, so it
+  could not displace a scoped hit even if there were. The top-level `cross_scope`
+  keeps reporting what the caller asked for. `retrieval.scope_fallback_enabled`
+  turns it off for strict isolation.
 - Match scopes by canonical spelling instead of exact string equality. Callers
   name their own scope, so one project arrived as `coframe-brain`,
   `coframe_brain__v2`, `Coframe Brain`, and five other spellings, each of which
