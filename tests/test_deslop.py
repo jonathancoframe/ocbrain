@@ -758,6 +758,62 @@ def test_splitting_a_current_belief_gives_each_child_an_expiry(tmp_path: Path) -
     conn.close()
 
 
+def test_a_local_repair_runs_with_no_credentials_configured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stamp is applied locally, so an absent API key must not stop it.
+
+    The sibling test below asserts the same behaviour but passes on any machine
+    that happens to have a key configured, which is how a run that resolved
+    credentials eagerly still looked green locally and failed in CI. Here the
+    key is guaranteed missing, so the assertion can only pass if the credential
+    path is never reached.
+    """
+    monkeypatch.setattr("ocbrain.curator.load_env_value", lambda *_args, **_kwargs: "")
+
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed(
+        conn,
+        belief_id="belief_current",
+        body="The runner ai.hermes.gateway holds 42 leases.",
+        attributes={"lifecycle": "current", "key": "runner-state"},
+    )
+    conn.commit()
+    conn.close()
+
+    assert cli_main(["--db", str(db_path), "deslop", "--mechanical-only", "--apply"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [r["action"] for r in payload["repairs"]] == ["stamp"]
+
+
+def test_a_judged_run_still_demands_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferring resolution must not silently disable the guard.
+
+    The judged pass genuinely calls a model, so a missing key there is still a
+    hard, loud failure rather than a quietly skipped stage.
+    """
+    monkeypatch.setattr("ocbrain.curator.load_env_value", lambda *_args, **_kwargs: "")
+
+    db_path = tmp_path / "core.sqlite"
+    conn = connect(db_path)
+    init_core_v1(conn)
+    _seed(
+        conn,
+        belief_id="belief_current",
+        body="The runner ai.hermes.gateway holds 42 leases.",
+        attributes={"lifecycle": "current", "key": "runner-state"},
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY"):
+        cli_main(["--db", str(db_path), "deslop", "--apply"])
+
+
 def test_a_missing_expiry_is_stamped_without_a_hosted_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

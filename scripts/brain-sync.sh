@@ -105,12 +105,30 @@ run_with_budget "$HARVEST_BUDGET_SECONDS" \
   --project "$SYNC_PROJECT" --privacy-scope "$SYNC_PRIVACY_SCOPE" \
   --batch-size "$SYNC_BATCH_SIZE" --evidence-only
 
-# 4. Agent memory/instruction files.
+# 4. Agent memory/instruction files. The two ~/.hermes entries are the retired
+# single-gateway home; the fleet now keeps one home per agent profile, each with
+# its own SOUL.md and memories/, and none of those were ever imported.
+MEMORY_PATHS=(
+  "$HOME/.claude/CLAUDE.md"
+  "$HOME/.codex/AGENTS.md"
+  "$HOME/.hermes/SOUL.md"
+  "$HOME/.hermes/memories"
+)
+# Test each candidate rather than passing a glob. import-memory drops a missing
+# directory silently, but an unmatched glob keeps its literal '*' through path
+# selection and is only rejected later, as an unreadable-path skip on every run.
+# A profile need not have both, and an empty memories/ is normal (togepicoframe
+# has one today); import-memory sweeps *.md, so the .lock files beside them and
+# the credentials in the profile root are never candidates.
+for profile_dir in "$HOME/.hermes/profiles"/*/; do
+  profile_dir="${profile_dir%/}"
+  [[ -f "$profile_dir/SOUL.md" ]] && MEMORY_PATHS+=("$profile_dir/SOUL.md")
+  [[ -d "$profile_dir/memories" ]] && MEMORY_PATHS+=("$profile_dir/memories")
+done
+echo "import-memory paths: ${#MEMORY_PATHS[@]}"
+
 "$PY" -m ocbrain.cli --db "$DB" import-memory \
-  "$HOME/.claude/CLAUDE.md" \
-  "$HOME/.codex/AGENTS.md" \
-  "$HOME/.hermes/SOUL.md" \
-  "$HOME/.hermes/memories" \
+  "${MEMORY_PATHS[@]}" \
   --project "$SYNC_PROJECT" --privacy-scope "$SYNC_PRIVACY_SCOPE" --evidence-only
 
 # 5. Reconcile core projections. `sync` refuses past its --max-events bound

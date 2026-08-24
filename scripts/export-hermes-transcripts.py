@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 """Export Hermes session transcripts (state.db) to JSONL files for ocbrain harvest.
 
-Hermes keeps its real transcript store in ``~/.hermes/state.db`` (SQLite),
-which ocbrain's file-based harvest cannot read directly. This exporter dumps
-each session to ``~/.hermes/sessions/export/hermes-<session_id>.jsonl`` — a
-path below ``.hermes`` so ``history_runtime()`` attributes it to ``hermes``.
+Hermes keeps its real transcript store in SQLite, which ocbrain's file-based
+harvest cannot read directly. This exporter dumps each session to
+``~/.hermes/sessions/export/hermes-<session_id>.jsonl`` — a path below
+``.hermes`` so ``history_runtime()`` attributes it to ``hermes``.
+
+There are two stores, and both must be swept. The single legacy
+``~/.hermes/state.db`` was the whole fleet until the gateways moved to one home
+per agent profile under ``~/.hermes/profiles/<name>/state.db``. Exporting only
+the legacy path fails silently — it still finds the frozen sessions, still
+reports ``unchanged``, and never mentions the profiles it did not look at — so
+every profile is swept on every run and reported by name.
+
+Profile sessions land in a per-profile subdirectory
+(``.../export/<profile>/hermes-<session_id>.jsonl``). ``history_files``
+recurses, and ``history_runtime`` derives the runtime from the ``.hermes`` path
+component, so the subdirectory needs no harvest-side change and keeps the
+runtime ``hermes``. Session ids embed their creation time and do not collide
+across stores, but the subdirectory keeps the legacy filenames untouched
+regardless.
 
 Writes are content-compared before replacing, so unchanged sessions keep their
 mtime and ocbrain's fingerprint gate skips them on recurring runs.
 
-Usage: export-hermes-transcripts.py [--db PATH] [--out DIR] [--max-file-bytes N]
+Usage: export-hermes-transcripts.py [--db PATH] [--out DIR]
+                                    [--profiles-root DIR | --no-profiles]
+                                    [--max-file-bytes N]
 """
 
 from __future__ import annotations
@@ -22,6 +39,7 @@ from pathlib import Path
 
 DEFAULT_DB = Path.home() / ".hermes" / "state.db"
 DEFAULT_OUT = Path.home() / ".hermes" / "sessions" / "export"
+DEFAULT_PROFILES_ROOT = Path.home() / ".hermes" / "profiles"
 
 
 def iso(ts: float | None) -> str | None:
@@ -70,19 +88,22 @@ def write_if_changed(path: Path, text: str) -> bool:
     return True
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--max-file-bytes", type=int, default=200_000)
-    args = parser.parse_args()
+def export_db(
+    db_path: Path,
+    out_dir: Path,
+    max_bytes: int,
+    profile: str | None = None,
+) -> dict[str, int]:
+    """Export every non-empty session in one state.db. Returns write counts.
 
-    if not args.db.exists():
-        print(json.dumps({"exported": 0, "reason": f"no state.db at {args.db}"}))
-        return 0
-
-    args.out.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    The source is opened read-only: these are live gateway databases and the
+    exporter must never take a write lock on one. ``profile`` is stamped into
+    the ``_meta`` line so the owning agent survives in the evidence body as well
+    as in the source path, and is omitted entirely for the legacy store so its
+    existing exports stay byte-identical.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         sessions = conn.execute(
             "SELECT id, source, display_name, model, started_at, ended_at, message_count "
@@ -99,14 +120,64 @@ def main() -> int:
                 "ended_at": iso(ended),
                 "message_count": msg_count,
             }
-            text = export_session(conn, sid, meta, args.max_file_bytes)
-            if write_if_changed(args.out / f"hermes-{sid}.jsonl", text):
+            if profile is not None:
+                meta["profile"] = profile
+            text = export_session(conn, sid, meta, max_bytes)
+            if write_if_changed(out_dir / f"hermes-{sid}.jsonl", text):
                 exported += 1
             else:
                 unchanged += 1
     finally:
         conn.close()
-    print(json.dumps({"exported": exported, "unchanged": unchanged, "out": str(args.out)}))
+    return {"exported": exported, "unchanged": unchanged}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--profiles-root", type=Path, default=DEFAULT_PROFILES_ROOT)
+    parser.add_argument(
+        "--no-profiles",
+        action="store_true",
+        help="sweep only --db, for single-store invocation",
+    )
+    parser.add_argument("--max-file-bytes", type=int, default=200_000)
+    args = parser.parse_args()
+
+    payload: dict = {
+        "exported": 0,
+        "unchanged": 0,
+        "legacy": None,
+        "profiles": {},
+        "errors": [],
+        "out": str(args.out),
+    }
+
+    def record(result: dict[str, int]) -> dict[str, int]:
+        payload["exported"] += result["exported"]
+        payload["unchanged"] += result["unchanged"]
+        return result
+
+    if args.db.exists():
+        payload["legacy"] = record(export_db(args.db, args.out, args.max_file_bytes))
+    else:
+        payload["legacy"] = {"exported": 0, "unchanged": 0, "reason": f"no state.db at {args.db}"}
+
+    if not args.no_profiles:
+        for profile_db in sorted(args.profiles_root.glob("*/state.db")):
+            name = profile_db.parent.name
+            # One sick profile must not cost us the other four: a gateway
+            # mid-migration, a permissions change, or a corrupt page should
+            # show up as a named error, not as an aborted sweep.
+            try:
+                result = export_db(profile_db, args.out / name, args.max_file_bytes, profile=name)
+            except (sqlite3.Error, OSError) as exc:
+                payload["errors"].append({"profile": name, "error": str(exc)})
+                continue
+            payload["profiles"][name] = record(result)
+
+    print(json.dumps(payload))
     return 0
 
 
