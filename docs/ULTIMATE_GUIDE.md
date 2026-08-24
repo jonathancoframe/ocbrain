@@ -516,6 +516,8 @@ ocbrain event-ingest --body "Never weaken rules to clear red." --global-doctrine
 ocbrain event-compile --belief-id belief:red-rule --body "Never weaken rules to clear red." --global-doctrine --approve
 ocbrain event-correct --target-layer belief --target-id belief:red-rule --op pin --hard
 ocbrain event-forget --target belief:red-rule --mode shred --reason "no longer serve"
+ocbrain scope-promote --select-durable-preferences --approved-by human:you --dry-run
+ocbrain scope-promote --belief-id belief:red-rule --to-scope-type global --to-scope-id global:doctrine --approved-by human:you
 ocbrain event-dream --project bountiful --target local_model --record-egress
 ocbrain event-teacher-request --project bountiful --query "Bountiful"
 ocbrain event-proposals --project bountiful
@@ -541,6 +543,16 @@ ocbrain mcp --allow-writes
 current knowledge into the event projection. It classifies each row into a
 project, confidential personal-finance/client scope, global doctrine, or
 quarantined legacy scope and returns sampled items plus total counts.
+
+`scope-promote` emits the `scope_promoted` event. It widens *reach* and never
+*egress*: each belief keeps its own visibility and egress policy, so a
+`local_only` belief promoted to `global:doctrine` becomes recallable from every
+project on this machine and is still refused for hosted delivery.
+`--approved-by` is required, because widening a belief's audience is a human
+decision the ledger has to be able to name. `--select-durable-preferences`
+picks the current, served workspace `wiki_fact` rows whose lifecycle is
+`durable` and whose category is `preference`, `decision`, `workflow`, or
+`system`; pair it with `--dry-run` first.
 
 `event-forget --mode shred` is a serving-layer crypto-shred receipt: the
 projection redacts the belief body and evidence ids, while the append-only ledger

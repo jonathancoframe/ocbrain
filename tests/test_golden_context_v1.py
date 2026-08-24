@@ -96,6 +96,12 @@ def test_golden_context_and_source_contract(
     monkeypatch.delenv("OCBRAIN_VECTOR_DB", raising=False)
     monkeypatch.delenv("OCBRAIN_EMBED_MODEL", raising=False)
     monkeypatch.delenv("OCBRAIN_EMBED_DIMENSIONS", raising=False)
+    # Both sides of the empty-result scope fallback are part of the contract:
+    # the default retry, and the opt-out that keeps strict scope isolation.
+    monkeypatch.setenv(
+        "OCBRAIN_RETRIEVAL_SCOPE_FALLBACK_ENABLED",
+        "true" if case.get("scope_fallback_enabled", True) else "false",
+    )
     conn = _seed_dataset(tmp_path)
     expected = case["expected"]
     context_response = handle_request(
@@ -140,6 +146,9 @@ def test_golden_context_and_source_contract(
     assert packet["coverage"]["unavailable_sources"] == []
     if case["delivery_target"] == "hosted_model":
         assert packet["coverage"]["excluded_sample"] == []
+    # A retry across scopes is always declared. Its absence is equally a
+    # contract: a scoped pass that answered must not have widened anything.
+    assert packet["coverage"].get("scope_fallback") == expected.get("scope_fallback")
 
     if "ids_ordered" in expected:
         assert item_ids == expected["ids_ordered"]

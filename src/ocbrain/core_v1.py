@@ -24,7 +24,7 @@ from typing import Any
 
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
-from ocbrain.scope import ScopeContext, ScopeTag, scope_match
+from ocbrain.scope import ScopeContext, ScopeTag, matching_stored_scope_ids, scope_match
 
 CORE_V1_APPLICATION_ID = 0x4F434231  # ASCII-ish "OCB1"
 CORE_V1_USER_VERSION = 10_000
@@ -1605,7 +1605,13 @@ def search_core_v1(
     """
     context = context or ScopeContext()
     fts = _normalize_fts_query(query)
-    compatible = sorted(context.compatible_scope_ids())
+    # Stored scope ids are immutable, so the caller's canonical spelling is not
+    # enough on its own: widen the IN-list to the stored spellings that resolve
+    # to a scope this caller already names. Purely a reach change — every gate
+    # below still applies to whatever the wider prefilter admits.
+    compatible = matching_stored_scope_ids(
+        conn, "current_beliefs", context.compatible_scope_ids()
+    )
     placeholders = ",".join("?" for _ in compatible)
     scope_sql = f"(cb.scope_type='global' OR cb.scope_id IN ({placeholders}))"
     scope_params: list[Any] = list(compatible)

@@ -366,6 +366,39 @@ class RetrievalConfig:
     feedback_weight: float = 0.125
     feedback_clamp: float = 0.25
     feedback_prior_observations: float = 3.0
+    # When a scoped retrieval returns nothing at all, retry once across scopes
+    # rather than abstaining on a technicality. Most callers never learn that
+    # `cross_scope` exists, and a brain that holds the answer under a
+    # neighbouring project is not the same thing as a brain that does not know.
+    # The retry changes reach only: every abstention gate is re-applied, and a
+    # cross-scope item carries scope_weight 0.15 against a scoped item's 1.25, so
+    # it can never displace a scoped hit. Turn it off to keep strict isolation.
+    scope_fallback_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class ScopesConfig:
+    """Operator vocabulary for scope ids: folding and an alias table.
+
+    Callers name their own scope. The same project therefore arrives spelled a
+    dozen ways ("Coframe Brain", "coframe-brain", "coframe_brain__v2"), and scope
+    matching is exact string equality, so every spelling that is not the stored
+    one reaches nothing. ``fold_enabled`` collapses case and separator noise;
+    ``aliases`` handles the rest, where two genuinely different names mean the
+    same scope.
+
+    ``aliases`` maps a FOLDED, fully prefixed scope id to the canonical fully
+    prefixed id, e.g. ``{"project:coframe-brain": "project:coframe"}``. An alias
+    may rename a scope but never re-type it: a mapping whose target carries a
+    different ``type:`` prefix is ignored, so the table can never be used to
+    promote a project belief into ``global:doctrine`` behind the ledger's back.
+
+    Ships EMPTY. This repo is public and real project names are operator data;
+    an empty table reproduces today's exact-match behavior.
+    """
+
+    aliases: dict[str, str] = field(default_factory=dict)
+    fold_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -408,6 +441,7 @@ class DeslopConfig:
 @dataclass(frozen=True)
 class OcbrainConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    scopes: ScopesConfig = field(default_factory=ScopesConfig)
     curator: CuratorConfig = field(default_factory=CuratorConfig)
     deslop: DeslopConfig = field(default_factory=DeslopConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
