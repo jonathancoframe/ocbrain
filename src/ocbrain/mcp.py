@@ -66,6 +66,7 @@ from ocbrain.scope import (
     LOCAL_MODEL_TARGET,
     ScopeContext,
     ScopeTag,
+    fold_scope_dict,
     normalize_delivery_target,
 )
 from ocbrain.shared_context import (
@@ -1969,7 +1970,11 @@ def scope_from_arguments(arguments: dict[str, Any]) -> ScopeTag | None:
     value = coerce_object_arg(arguments.get("scope"), "scope")
     if value is None:
         return None
-    return ScopeTag.from_dict(value)
+    # Canonicalize the client's spelling here, at the argument boundary, and
+    # nowhere deeper. ``ScopeTag.from_dict`` also runs during projection replay
+    # and over stored handle scopes, where an alias-dependent rewrite would make
+    # a ledger refold depend on today's config.
+    return ScopeTag.from_dict(fold_scope_dict(value))
 
 
 def decoded_array_arg(value: Any) -> Any:

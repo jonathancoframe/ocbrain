@@ -369,6 +369,31 @@ class RetrievalConfig:
 
 
 @dataclass(frozen=True)
+class ScopesConfig:
+    """Operator vocabulary for scope ids: folding and an alias table.
+
+    Callers name their own scope. The same project therefore arrives spelled a
+    dozen ways ("Coframe Brain", "coframe-brain", "coframe_brain__v2"), and scope
+    matching is exact string equality, so every spelling that is not the stored
+    one reaches nothing. ``fold_enabled`` collapses case and separator noise;
+    ``aliases`` handles the rest, where two genuinely different names mean the
+    same scope.
+
+    ``aliases`` maps a FOLDED, fully prefixed scope id to the canonical fully
+    prefixed id, e.g. ``{"project:coframe-brain": "project:coframe"}``. An alias
+    may rename a scope but never re-type it: a mapping whose target carries a
+    different ``type:`` prefix is ignored, so the table can never be used to
+    promote a project belief into ``global:doctrine`` behind the ledger's back.
+
+    Ships EMPTY. This repo is public and real project names are operator data;
+    an empty table reproduces today's exact-match behavior.
+    """
+
+    aliases: dict[str, str] = field(default_factory=dict)
+    fold_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class CuratorConfig:
     # Which evidence the wiki curator may send to a model, and which model.
     #
@@ -408,6 +433,7 @@ class DeslopConfig:
 @dataclass(frozen=True)
 class OcbrainConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    scopes: ScopesConfig = field(default_factory=ScopesConfig)
     curator: CuratorConfig = field(default_factory=CuratorConfig)
     deslop: DeslopConfig = field(default_factory=DeslopConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)

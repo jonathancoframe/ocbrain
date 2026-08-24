@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Match scopes by canonical spelling instead of exact string equality. Callers
+  name their own scope, so one project arrived as `coframe-brain`,
+  `coframe_brain__v2`, `Coframe Brain`, and five other spellings, each of which
+  reached nothing. `project`, `repo`, and `client` are now folded (lowercased,
+  separator runs collapsed to `-`) once in `ScopeContext.__post_init__`, which
+  every entry point already goes through, and an operator `scopes.aliases` table
+  maps the remaining genuinely-different names onto one id. Stored rows are never
+  rewritten: the search prefilter widens its `IN (...)` list to the stored
+  spellings that resolve to a scope the caller already names, and `scope_match`
+  folds the same way so a row the SQL admitted is not zeroed by the ranker.
+  Task and session ids stay trim-only — they are machine-minted and
+  high-cardinality, so folding them risks collapsing two distinct ids into one —
+  and a path-shaped component is left alone because `repo` is routinely a
+  filesystem path that `Path(...).resolve()` has to still find. `ScopeTag` itself
+  never folds: it runs during projection replay and over stored handle scopes,
+  where an alias-dependent rewrite would make a ledger refold depend on today's
+  config. The alias table ships empty, so a fresh install behaves exactly as
+  before, and an alias may rename a scope but never re-type one — promotion to
+  `global` stays a `scope_promoted` event with a named approver.
+
 - Preserve the last curator input digest when a non-curator wiki rematerialization
   replaces `state.json`. The promote script rematerializes after every run; losing
   that digest made an unchanged next cycle call the hosted model again instead of
