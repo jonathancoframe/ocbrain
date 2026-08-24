@@ -60,17 +60,17 @@ def test_mcp_tools_are_knowledge_first(tmp_path):
     assert by_name["brain.feedback"]["annotations"]["destructiveHint"] is False
     assert by_name["brain.feedback"]["annotations"]["readOnlyHint"] is False
 
+    # Plain dialect for unnamed clients: only semantically required fields are
+    # required, and optional properties keep their declared types. The strict
+    # all-keys-required shape is served only to clients that name a strict
+    # harness at initialize (see test_mcp_schema_contract_v1).
     search_schema = by_name["brain.search"]["inputSchema"]
-    assert search_schema["additionalProperties"] is False
-    assert set(search_schema["required"]) == set(search_schema["properties"])
-    # Optional fields carry nullability on the type union itself, never as an
-    # anyOf wrapper: wrapped properties lose their type in some client
-    # harnesses, whose models then guess at the wire shape.
-    assert set(search_schema["properties"]["limit"]["type"]) == {"integer", "null"}
+    assert search_schema.get("additionalProperties") is None
+    assert search_schema["required"] == ["query"]
+    assert search_schema["properties"]["limit"]["type"] == "integer"
     context_object = search_schema["properties"]["context"]
-    assert set(context_object["type"]) == {"object", "null"}
-    assert context_object["additionalProperties"] is False
-    assert set(context_object["required"]) == set(context_object["properties"])
+    assert context_object["type"] == "object"
+    assert "required" not in context_object
 
 
 def test_mcp_write_tools_are_opt_in(tmp_path):
