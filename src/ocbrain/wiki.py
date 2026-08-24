@@ -146,15 +146,22 @@ def materialize_wiki(conn, wiki_dir: Path, *, run: dict[str, Any]) -> int:
     # A non-curator rebuild (for example after hygiene) must not erase the digest
     # that makes the next unchanged curator cycle a no-op. Preserve only that
     # cursor; the rest of state.json should continue to describe this run.
-    if "input_digest" not in effective_run:
+    # ``projects`` is the multi-project form of the same cursor, one digest per
+    # curated scope; ``input_digest`` is the flat pre-multi-project shape.
+    if not ({"input_digest", "projects"} & set(effective_run)):
         prior_state_path = wiki_dir / "state.json"
         try:
             prior_state = json.loads(prior_state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             prior_state = {}
-        prior_digest = prior_state.get("input_digest") if isinstance(prior_state, dict) else None
+        if not isinstance(prior_state, dict):
+            prior_state = {}
+        prior_digest = prior_state.get("input_digest")
         if isinstance(prior_digest, str) and prior_digest:
             effective_run["input_digest"] = prior_digest
+        prior_projects = prior_state.get("projects")
+        if isinstance(prior_projects, dict) and prior_projects:
+            effective_run["projects"] = prior_projects
     temp_dir = Path(
         tempfile.mkdtemp(prefix=f".{wiki_dir.name}-build-", dir=wiki_dir.parent)
     )

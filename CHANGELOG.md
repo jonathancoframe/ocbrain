@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Curate every configured project scope, not one pinned project. The curator
+  compiled whichever single project the promote script pinned, which on one real
+  brain reached 5 of 574 curator-eligible objects while 535 closeout summaries
+  sat in ~40 other project scopes; every hourly run for six days logged
+  `unchanged_no_api_call` against a wiki that had frozen. `curator.projects` now
+  names the scopes to compile, and on that corpus three configured scopes reach
+  509 of 568 eligible rows. The loop lives inside `wiki-curator.py` rather than
+  in the caller because `state.json` is one file per wiki directory: a shell loop
+  over `--project` would overwrite the previous project's digest and make every
+  cycle re-bill a hosted call for every project. Each project carries its own
+  digest under `projects`, a legacy flat `input_digest` migrates onto the
+  `workspace` entry so an existing install keeps its short-circuit, and a project
+  with fewer than `curator.min_evidence_per_project` eligible objects is reported
+  as `skipped_thin_project` instead of billed. One JSON line per project plus a
+  roll-up; the wiki is materialized once, after the loop.
 - Keep a doctrine fact at doctrine scope when a curator run rewords it. An
   approved proposal writes its scope onto the belief, so a claim the curator
   typed as project-scoped demoted the `global:doctrine` fact it restated. Only a

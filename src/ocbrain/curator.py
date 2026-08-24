@@ -40,7 +40,12 @@ from ocbrain.scope import DEFAULT_GLOBAL_SCOPE_ID, matching_stored_scope_ids
 from ocbrain.text import is_restatement
 
 CURATOR_VERSION = "wiki-curator-v2"
-WIKI_STATE_SCHEMA = "ocbrain.wiki-state.v1"
+WIKI_STATE_SCHEMA = "ocbrain.wiki-state.v2"
+
+# The project every pre-multi-project run curated. A flat ``input_digest`` in an
+# existing ``state.json`` was that project's digest, so it migrates onto this key
+# rather than being discarded, which would re-bill the first cycle after upgrade.
+LEGACY_STATE_PROJECT = "workspace"
 
 ELIGIBLE_KINDS = frozenset(
     {
@@ -311,6 +316,30 @@ def input_digest(evidence: list[dict[str, Any]], existing: list[dict[str, Any]])
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def project_digests(state: Any) -> dict[str, str]:
+    """Per-project input digests from a wiki ``state.json``, legacy shape included.
+
+    ``state.json`` held one flat ``input_digest`` back when the curator only ever
+    ran against a single pinned project. Reading that value as the legacy
+    project's digest is what keeps the first cycle after an upgrade free: discard
+    it and every already-curated project bills a hosted call again.
+    """
+    if not isinstance(state, dict):
+        return {}
+    projects = state.get("projects")
+    if isinstance(projects, dict):
+        digests: dict[str, str] = {}
+        for name, entry in projects.items():
+            digest = entry.get("input_digest") if isinstance(entry, dict) else entry
+            if isinstance(digest, str) and digest:
+                digests[str(name)] = digest
+        return digests
+    legacy = state.get("input_digest")
+    if isinstance(legacy, str) and legacy:
+        return {LEGACY_STATE_PROJECT: legacy}
+    return {}
 
 
 def build_user_prompt(
@@ -843,6 +872,7 @@ __all__ = [
     "ELIGIBLE_KINDS",
     "FORBIDDEN_EGRESS_POLICIES",
     "FORBIDDEN_VISIBILITIES",
+    "LEGACY_STATE_PROJECT",
     "PROVIDER_DEFAULTS",
     "SYSTEM_PROMPT",
     "WIKI_STATE_SCHEMA",
@@ -853,6 +883,7 @@ __all__ = [
     "input_digest",
     "load_env_value",
     "now_iso",
+    "project_digests",
     "record_curation_egress",
     "request_claims",
     "request_structured",
