@@ -125,6 +125,46 @@ Acceptance requires evidence from the core database:
 An honestly empty context packet is not a full source-expansion acceptance. Seed
 or migrate at least one scoped, serving belief with source evidence first.
 
+## Closeout chains
+
+A second closeout on the same task is a continuation, not a duplicate. Two
+fields make that legible, and both are optional:
+
+- **`parent_closeout_id`** — the closeout this one continues. Validated against
+  `task_closeouts.id`. An id that does not resolve is recorded in the receipt
+  with `chain.parent_unresolved: true` rather than refused: a closeout must
+  never be lost because a parent id was mistyped.
+- **`chain.previous_in_chain`** — returned, not supplied. It is the most recent
+  closeout already filed against the same *normalized* `task_ref`, so an agent
+  gets chain continuity without having to carry an id between sessions.
+
+`task_ref` is stored verbatim forever. The chain key is a folded copy of it
+(`task_ref_norm`): trimmed, internal whitespace collapsed, the wrapper prefixes
+`ocbrain:` and `task:` stripped, length-bounded, and **case-preserved** —
+`COFASC-292` and `cofasc-292` are two different tasks, because this column
+carries Linear ids and raw UUIDs. Both columns are nullable and are never
+backfilled, so a chain begins at the first closeout written by a server that
+has them; every earlier row keeps a NULL and joins nothing.
+
+### Cross-system references are bare closeout ids
+
+When another system stores a reference to a closeout — a task-tracker field, an
+agent-control spine, a status file — the value must be the **bare id**:
+
+```text
+close_8d0e85a097b69e4a          correct
+ocbrain:close_8d0e85a097b69e4a  wrong; will not resolve
+```
+
+`parent_closeout_id` folds the `ocbrain:` and `task:` wrappers off a *task_ref*,
+not off an id, and every lookup in this server matches `task_closeouts.id`
+exactly. A spine that writes both spellings resolves only the bare half of its
+references — on the current agent-control spine, 63 of 85. Store one form.
+
+The same rule applies in reverse to the receipt: `evidence.artifact_ref` on a
+closeout summary is written as `closeout:<bare id>`, so the prefix belongs to
+OCBrain's own URI scheme and never to the id itself.
+
 ## Client instruction block
 
 Use this compact policy in Codex `AGENTS.md`, Claude `CLAUDE.md`, and OpenClaw

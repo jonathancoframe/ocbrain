@@ -1346,6 +1346,7 @@ def closeout_v1(
     outcomes: list[dict[str, Any]],
     awaiting: str | None,
     actor: str,
+    parent_closeout_id: str | None = None,
     provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     # Report the writing standard back to whoever wrote the summary. Reporting
@@ -1379,6 +1380,7 @@ def closeout_v1(
         outcomes=outcomes,
         awaiting=awaiting,
         actor=actor,
+        parent_closeout_id=parent_closeout_id,
         provenance=provenance,
     )
     # Always record the summary as scoped evidence, under the shared continuity
