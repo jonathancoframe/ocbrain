@@ -48,12 +48,12 @@ def history_runtime(path: Path) -> str:
         return "codex"
     if ".claude" in parts or "claude-home" in parts:
         return "claude"
-    if ".openclaw" in parts:
-        return "openclaw"
     if ".hermes" in parts or "hermes-home" in parts:
         return "hermes"
     if "cursor" in parts or ".cursor" in parts or "cursor-home" in parts:
         return "cursor"
+    if ".openclaw" in parts:
+        return "openclaw"
     return "unknown"
 
 
