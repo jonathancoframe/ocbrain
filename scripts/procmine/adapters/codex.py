@@ -33,8 +33,10 @@ from pathlib import Path
 from ..normalize import (
     Trace,
     TraceEvent,
+    admit_token_edges,
     arg_signature,
     error_fingerprint,
+    provenance_tokens,
     result_class,
     shell_signature,
 )
@@ -108,6 +110,10 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
     order: list[str] = []
     results: dict[str, str] = {}
     errors: dict[str, str] = {}
+    # Raw values, tokenized on sight and discarded: value-provenance edge
+    # admission needs the payload, and only a digest may outlive it.
+    arg_tokens: dict[str, set[str]] = {}
+    output_tokens: dict[str, set[str]] = {}
     session_id = ""
     started: str | None = None
     ended: str | None = None
@@ -166,6 +172,9 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
                     else arg_signature(name, script)
                 )
                 calls[call_id] = (name, signature, timestamp)
+                arg_tokens[call_id] = provenance_tokens(
+                    script if isinstance(script, str) else None
+                )
                 order.append(call_id)
                 if payload.get("status") not in (None, "completed", "in_progress"):
                     results[call_id] = "error"
@@ -193,6 +202,9 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
                 else:
                     signature = arg_signature(name, arguments)
                 calls[call_id] = (name, signature, timestamp)
+                arg_tokens[call_id] = provenance_tokens(
+                    arguments if isinstance(arguments, str) else json.dumps(arguments)
+                )
                 order.append(call_id)
             elif kind in {"custom_tool_call_output", "function_call_output"}:
                 call_id = payload.get("call_id")
@@ -201,6 +213,7 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
                 text = _output_text(payload.get("output"))
                 outcome = result_class(text=text)
                 results[call_id] = outcome
+                output_tokens[call_id] = provenance_tokens(text)
                 if outcome in _BAD:
                     fingerprint = error_fingerprint(text)
                     if fingerprint:
@@ -214,8 +227,10 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
                 if not isinstance(call_id, str):
                     call_id = f"mcp-{len(order)}"
                 calls[call_id] = (f"mcp:{tool}", signature, timestamp)
+                arg_tokens[call_id] = provenance_tokens(json.dumps(invocation.get("arguments")))
                 order.append(call_id)
                 outcome = payload.get("result")
+                output_tokens[call_id] = provenance_tokens(json.dumps(outcome)[:20_000])
                 if isinstance(outcome, dict) and "Err" in outcome:
                     detail = str(outcome.get("Err"))
                     results[call_id] = result_class(is_error=True, text=detail)
@@ -240,10 +255,14 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
 
     seen: set[str] = set()
     events: list[TraceEvent] = []
+    edge_tokens: list[tuple[set[str], set[str]]] = []
     for call_id in order:
         if call_id in seen:
             continue
         seen.add(call_id)
+        edge_tokens.append(
+            (arg_tokens.get(call_id, set()), output_tokens.get(call_id, set()))
+        )
         name, signature, timestamp = calls[call_id]
         events.append(
             TraceEvent(
@@ -264,14 +283,25 @@ def parse_codex_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | Non
         cwd=cwd,
         events=events,
         truncated=truncated,
+        edges=admit_token_edges(edge_tokens),
     )
 
 
-def iter_codex_traces(roots: list[Path] | None = None) -> Iterator[Trace]:
+def codex_files(roots: list[Path] | None = None) -> list[Path]:
+    """Every rollout this adapter would read, in a stable order."""
+    found: list[Path] = []
     for base in roots or CODEX_ROOTS:
-        if not base.exists():
-            continue
-        for path in sorted(base.rglob("*.jsonl")):
-            trace = parse_codex_file(path)
-            if trace is not None:
-                yield trace
+        if base.exists():
+            found.extend(sorted(base.rglob("*.jsonl")))
+    return found
+
+
+def parse_codex_traces(path: Path) -> Iterator[Trace]:
+    trace = parse_codex_file(path)
+    if trace is not None:
+        yield trace
+
+
+def iter_codex_traces(roots: list[Path] | None = None) -> Iterator[Trace]:
+    for path in codex_files(roots):
+        yield from parse_codex_traces(path)

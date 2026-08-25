@@ -13,15 +13,24 @@ than shipped. A signature that leaks a token is worse than no signature.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 from ocbrain.text import find_probable_secret_leaks, redact_secrets
 
 HOME = os.path.expanduser("~")
+
+# Bump whenever anything in this module changes the *content* of a cached trace
+# — a new signature rule, a wider redaction, a different result class. The
+# incremental extract cache keys on the source file's fingerprint, which cannot
+# see a code change: without this, hardening the redactor would leave every
+# already-cached segment carrying the old, less-redacted text forever.
+NORMALIZER_VERSION = "3"
 
 # Ordered longest-prefix-first: the first match wins, so the specific
 # directories must precede the generic ``<path:home>``.
@@ -161,6 +170,43 @@ def _class_paths_in_text(text: str) -> str:
     return _PATH_IN_TEXT.sub(lambda match: classify_path(match.group(0)), text)
 
 
+# Private identifiers that are not secrets and are not publishable either. The
+# path classer above only catches these inside a filesystem path; a captured
+# error message names them in prose, which is how
+# `host="10.x.x.x"; user="first_last_com"` reached a committed artifact in this
+# repository and passed the public-safety scan (whose built-in patterns look for
+# credentials, not for infrastructure).
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# The OS Login spelling of a work email: `first_last_com`.
+_OSLOGIN_USER = re.compile(r"\b[a-z][a-z0-9]*_[a-z0-9]+_(?:com|org|net|io|dev|ai)\b", re.I)
+_ACCOUNT_NAME = os.path.basename(HOME)
+# Guard on length: a short or generic home directory name ("root", "runner")
+# would class half the corpus.
+_LOCAL_ACCOUNT = (
+    re.compile(rf"\b{re.escape(_ACCOUNT_NAME)}\b", re.I) if len(_ACCOUNT_NAME) >= 6 else None
+)
+
+
+def _class_private_identifiers(text: str) -> str:
+    cleaned = _IPV4.sub("<ip>", text)
+    cleaned = _OSLOGIN_USER.sub("<user>", cleaned)
+    if _LOCAL_ACCOUNT is not None:
+        cleaned = _LOCAL_ACCOUNT.sub("<user>", cleaned)
+    return cleaned
+
+
+def scrub_artifact_text(text: str) -> str:
+    """Class every private identifier in text bound for a shared artifact.
+
+    Signatures and fingerprints already pass through :func:`_safe`. This is for
+    the *assembled* documents — the atlas report and ``procedures.json`` — whose
+    envelopes carry paths the miner itself produced: a cache path, a state path,
+    an adapter summary. Those never went through a signature, so they never went
+    through the redactor either.
+    """
+    return _class_private_identifiers(_class_paths_in_text(text))
+
+
 def _safe(text: str) -> str | None:
     """Redact, class any embedded path, then refuse what still trips the detector.
 
@@ -168,7 +214,7 @@ def _safe(text: str) -> str | None:
     choke point every free-text field passes through, so a new field cannot
     reintroduce the leak by forgetting to call it.
     """
-    cleaned = _class_paths_in_text(redact_secrets(text))
+    cleaned = _class_private_identifiers(_class_paths_in_text(redact_secrets(text)))
     if find_probable_secret_leaks(cleaned):
         return None
     return cleaned
@@ -518,6 +564,101 @@ def error_fingerprint(text: str | None) -> str | None:
     return cleaned[:_FINGERPRINT_CHARS] or None
 
 
+# --- value-provenance edge admission --------------------------------------
+#
+# Adjacency mining says "B followed A", which is true of anything that happens
+# twice. Value provenance says "B consumed something A produced", which is the
+# claim a dependency edge is actually making. The published comparison puts
+# provenance-admitted edges around 0.93 F1 against roughly 0.71 for adjacency,
+# and the gap is entirely false edges adjacency cannot rule out.
+#
+# Admission is deliberately narrow. A token has to be long enough not to be a
+# coincidence, and rare enough in the session that its appearance in the next
+# call's arguments is not just the same repo path everyone types. Anything that
+# does not clear both bars is `suspected`, which is recorded and imposes no
+# ordering constraint at all. Nothing here stores a token: only its SHA-256
+# prefix, so an edge stays auditable without the cache carrying a payload.
+
+PROVENANCE_MIN_TOKEN = 12
+# The producer and one consumer. A token in a third call is ambient — a repo
+# root, a branch name, a file everyone touches — and proves nothing.
+PROVENANCE_MAX_CALLS = 2
+# Bound the scan: a 4 MB command output would otherwise cost more to tokenize
+# than the whole rest of the adapter.
+PROVENANCE_MAX_CHARS = 20_000
+PROVENANCE_MAX_TOKENS = 400
+_PROVENANCE_TOKEN = re.compile(rf"[^\s\"'`,;()\[\]{{}}<>|]{{{PROVENANCE_MIN_TOKEN},}}")
+
+
+def provenance_tokens(text: str | None) -> set[str]:
+    """Long, delimiter-free runs from one call's text, bounded in both directions."""
+    if not text:
+        return set()
+    found: set[str] = set()
+    for token in _PROVENANCE_TOKEN.findall(text[:PROVENANCE_MAX_CHARS]):
+        if len(set(token)) < 3:
+            # `------------`, `============`: punctuation rules, not values.
+            continue
+        found.add(token)
+        if len(found) >= PROVENANCE_MAX_TOKENS:
+            break
+    return found
+
+
+def token_sha(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def admit_value_edges(calls: list[tuple[str | None, str | None]]) -> list[dict[str, Any]]:
+    """Classify each adjacent pair as a ``hard`` or ``suspected`` edge.
+
+    ``calls`` is ``[(args_text, output_text)]`` in step order, **pre-redaction**:
+    this has to run where the raw values still exist, which is why it lives here
+    and is called from the adapters rather than from the miner. Only the token
+    digest survives.
+
+    A runtime whose adapter cannot supply raw output — the hermes legacy export
+    never stored arguments at all — passes ``None`` and gets `suspected` edges
+    only. That shortfall is reported rather than papered over.
+    """
+    return admit_token_edges(
+        [(provenance_tokens(args), provenance_tokens(output)) for args, output in calls]
+    )
+
+
+def admit_token_edges(token_sets: list[tuple[set[str], set[str]]]) -> list[dict[str, Any]]:
+    """The same admission over pre-tokenized calls.
+
+    Adapters call this so they can tokenize and discard each raw payload as it
+    streams past, rather than holding a whole session's outputs in memory to
+    decide edges at the end.
+    """
+    seen: Counter[str] = Counter()
+    for args_tokens, output_tokens in token_sets:
+        seen.update(args_tokens | output_tokens)
+
+    edges: list[dict[str, Any]] = []
+    for index in range(len(token_sets) - 1):
+        produced = token_sets[index][1]
+        consumed = token_sets[index + 1][0]
+        unique = sorted(
+            token
+            for token in produced & consumed
+            if seen[token] <= PROVENANCE_MAX_CALLS
+        )
+        edge: dict[str, Any] = {
+            "producer_idx": index,
+            "consumer_idx": index + 1,
+            "admission": "hard" if unique else "suspected",
+        }
+        if unique:
+            # One witness is enough and keeps the cache line small; the longest
+            # is the least likely to be an accident.
+            edge["token_sha"] = token_sha(max(unique, key=len))
+        edges.append(edge)
+    return edges
+
+
 @dataclass(slots=True)
 class TraceEvent:
     """One normalized tool call inside a session."""
@@ -554,6 +695,9 @@ class Trace:
     cwd: str | None
     events: list[TraceEvent] = field(default_factory=list)
     truncated: bool = False
+    # Adjacent-pair edges, each admitted `hard` on value provenance or left
+    # `suspected`. Empty for an adapter that cannot see raw values.
+    edges: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -570,16 +714,24 @@ class Trace:
             "truncated": self.truncated,
             "n_events": len(self.events),
             "events": [event.as_dict() for event in self.events],
+            "edges": self.edges,
         }
 
 
 __all__ = [
+    "PROVENANCE_MAX_CALLS",
+    "PROVENANCE_MIN_TOKEN",
     "Trace",
     "TraceEvent",
+    "admit_token_edges",
+    "admit_value_edges",
     "arg_signature",
     "classify_path",
+    "provenance_tokens",
     "result_class",
+    "scrub_artifact_text",
     "shell_signature",
     "step_class",
+    "token_sha",
     "_RESULT_CLASSES",
 ]
