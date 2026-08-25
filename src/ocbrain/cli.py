@@ -1876,8 +1876,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
         # ingest/closeout/retrieval logging from Codex/Claude/Cursor/Hermes)
         # then fails with "database is locked". Per-file commits bound the
         # writer window to one file's actual DB writes; the slow redaction
-        # of the next file happens outside any transaction. Same rationale
-        # as DatasetWriteBatch for the dataset miners.
+        # of the next file happens outside any transaction.
         if core_v1:
             store_v1_history_fingerprints(conn, current_fingerprints)
         conn.commit()

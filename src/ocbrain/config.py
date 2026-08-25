@@ -1,19 +1,25 @@
 """ocbrain configuration surface.
 
-One config module for every v0.2 tunable (spec §3, resolution R1). The public
-entry point is :func:`load_config`, which layers, in order:
+Four sections, one per thing that actually reads configuration: ``retrieval``
+(the ``search_core_v1`` ranking gates), ``scopes`` (scope folding and the alias
+table), ``curator`` (``scripts/wiki-curator.py``), and ``deslop`` (the
+write-time closeout gate). There were seventeen; the other thirteen configured
+subsystems that were deleted or were never read at all.
+
+The public entry point is :func:`load_config`, which layers, in order:
 
 1. hard-coded defaults (the section dataclasses below),
 2. an optional JSON file at ``$OCBRAIN_CONFIG`` (default
    ``~/.ocbrain/ocbrain.config.json``, with legacy checkout fallback),
 3. ``OCBRAIN_<SECTION>_<FIELD>`` environment overrides.
 
-``DatasetConfig`` is the ``dataset`` section here — there is deliberately no
-separate ``dataset/config.py`` (R1). The single shared ``correction.threshold``
-key (R1/R2) lives on :class:`CorrectionConfig`.
+A section or key the file names but this module does not define is skipped, not
+an error. Operator config files outlive the fields they were written against,
+and a brain that refuses to start because of a retired key is worse than one
+that ignores it.
 
-Secrets are never stored: ``JudgeConfig.api_key_env`` holds the *name* of an
-environment variable, never its value.
+Secrets are never stored: where a section names an API key it holds the *name*
+of an environment variable, never its value.
 """
 
 from __future__ import annotations

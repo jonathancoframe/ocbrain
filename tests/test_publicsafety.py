@@ -256,7 +256,7 @@ def test_plist_still_subject_to_placement_and_denylist(repo: Path) -> None:
 
 
 def test_entropy_pathcheck_excluded_unit() -> None:
-    assert ps.entropy_pathcheck_excluded("ops/com.jonathangu.ocbrain_ops.autopilot.light.plist")
+    assert ps.entropy_pathcheck_excluded("ops/com.example.agent.plist")
     assert not ps.entropy_pathcheck_excluded("src/ocbrain/cli.py")
 
 
