@@ -135,14 +135,18 @@ agent-reported.
 ## Admin profile
 
 The default client registration uses `runtime`. Launch `--profile admin` only
-for an explicit local lifecycle task. Admin adds correction, proposal decision
-and listing, preview, egress preview, and tombstone operations.
+for an explicit local lifecycle task. Admin adds six tools — correction,
+proposal decision, proposal listing, preview, egress preview, and the tombstone
+operation — for fourteen in total.
 
 `--allow-writes` is a deprecated alias for `--profile admin`. It is not a no-op
 and should not appear in ordinary runtime registrations.
 
-Admin does not add hosted teacher, training, scheduler, watchdog, or
-mark-stale tools. Separate authority is still required for external or
+Admin adds no hosted teacher, training, scheduler, or watchdog tool. There is no
+`brain.mark_stale`: it was advertised but never dispatchable, and it is now
+removed rather than fixed. Marking a belief superseded is a CLI operation
+(`ocbrain hygiene --supersede <belief_id> <successor_id>`), which the `expired`
+class then retires. Separate authority is still required for external or
 irreversible action.
 
 ## Handling conflicts

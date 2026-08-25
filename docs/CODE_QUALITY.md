@@ -21,11 +21,11 @@ finding is a regression someone just introduced, not debt someone inherited.
 
 Two categories are deliberately **out**:
 
-- **`C90` (mccabe complexity).** At `max-complexity=5` the repo reports ~212
-  violations; at 10 it still reports dozens. Several are irreducible without
+- **`C90` (mccabe complexity).** At `max-complexity=5` the repo reports 138
+  violations; at 10 it still reports 39. Several are irreducible without
   redesigning the projector and the ranker — `search_core_v1` and
   `project_core_v1` are genuinely branchy because the domain is.
-- **`S` (bandit).** ~40 findings, nearly all deliberate: parameterised SQL built
+- **`S` (bandit).** 39 findings, nearly all deliberate: parameterised SQL built
   from fixed local constants, `urllib` calls that exist so the core stays
   dependency-free, `subprocess` in the doctor.
 
@@ -35,7 +35,7 @@ advice instead.
 ## The advisory pass (report only)
 
 ```bash
-scripts/code-quality.sh                      # src/ocbrain + packages + scripts
+scripts/code-quality.sh                      # src/ocbrain + scripts
 scripts/code-quality.sh src/ocbrain/curator.py
 ```
 
@@ -76,15 +76,24 @@ rule found a real smell and proposed the wrong remedy.
 
 ### Standing advisory count
 
-Roughly 30 extended-ruff findings and ~66 slop findings remain, dominated by:
+The v2 deletion took two whole packages out of the tree, so these counts moved.
+Re-measured against the current `src/ocbrain` and `scripts`, the extended ruff
+pass reports 44 findings:
 
 | Finding | Count | Disposition |
 |---|---|---|
-| `PERF401` manual-list-comprehension | 13 | Real; each needs a rewrite with test coverage |
-| `RUF001`/`RUF002` ambiguous unicode | 7 | Em dashes in prose. Correct as written |
-| `slop-py-long-comment` | ~36 | Mixed: some narration to compress, some load-bearing rationale that belongs in docs |
-| `slop-py-except-swallow-default` | 13 | Mostly deliberate degradation paths that are documented in place |
-| `slop-py-section-banner` | 12 | Cheap to remove; a file needing chapters may need splitting |
+| `RUF100` unused-noqa | 29 | **Not real.** These are the `# noqa: S310` / `# noqa: BLE001` suppressions that only look unused because `S` and `BLE` are not in this narrowed selection. See the warning above |
+| `PERF401` manual-list-comprehension | 6 | Real; each needs a rewrite with test coverage |
+| `RUF022`, `SIM102`, `SIM103`, `SIM114`, `SIM118`, `RUF007` | 8 total | Judgement calls; read each one |
+| `RUF002` ambiguous unicode | 1 | An em dash in a docstring. Correct as written |
+
+So fifteen findings are worth reading and twenty-nine are an artifact of the
+narrowed selection.
+
+The `opengrep` slop counts are not re-measured here — the tool is optional and
+external, and its ruleset lives outside the repo. Run
+`scripts/code-quality.sh` yourself for a current number; the previous reading of
+~66 was taken before the deletion and covered `packages/` as well.
 
 Fixing these is welcome. Doing it in one sweep is not — the value is in the
-reading, and a 300-file mechanical diff destroys the review.
+reading, and a large mechanical diff destroys the review.

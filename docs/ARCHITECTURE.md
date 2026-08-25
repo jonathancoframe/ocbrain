@@ -89,7 +89,7 @@ tombstoned.
 
 ## 4. Scope is mechanical
 
-Scope is part of every evidence object and belief:
+Scope is part of every evidence object and belief. `SCOPE_TYPES` is:
 
 - global doctrine;
 - project;
@@ -97,8 +97,19 @@ Scope is part of every evidence object and belief:
 - client;
 - task;
 - session;
-- personal-finance;
 - conservatively quarantined legacy-unscoped data.
+
+`personal_finance` used to be an eighth type. No row ever carried it, so it is
+gone from `SCOPE_TYPES` and from the published MCP enums. `session` was a
+candidate for the same treatment and was deliberately kept: one stored evidence
+event in the shipped ledger carries `scope_type="session"`, and dropping the
+value would make `ScopeTag` refuse that event and break projection replay. No
+client can request a session scope.
+
+`VISIBILITIES` is `internal`, `confidential`, `secret`. `public` was published
+for two years and never once written, so it went with `personal_finance`.
+`EGRESS_POLICIES` is unchanged: `hosted_ok`, `local_only`, `approval_required`,
+`prohibited`.
 
 Visibility and egress policy are separate dimensions. Matching scope controls
 local retrieval; egress policy controls whether content may leave the machine.
@@ -176,26 +187,44 @@ Runtime writes are narrow and append-only: evidence, retrieval feedback, and
 task outcome receipts. They do not directly promote a durable belief.
 
 The admin profile adds local preview, egress preview, proposal listing/decision,
-correction, and tombstone tools. `--allow-writes` is a deprecated alias for this
-profile, not a no-op. Hosted teacher, stale marking, training, and watchdog
-controls are not core MCP tools.
+correction, and tombstone tools — fourteen tools in total. `--allow-writes` is a
+deprecated alias for this profile, not a no-op. Hosted teacher, training, and
+watchdog controls are not core MCP tools.
 
-## 8. Optional companion packages
+`brain.mark_stale` was published in the tool list and is gone. It was
+undispatchable: `tools_for_profile` returns `RUNTIME_TOOLS` for the runtime
+profile and `RUNTIME_TOOLS | ADMIN_ONLY_TOOLS` for admin, and `brain.mark_stale`
+was in neither set, so every call reached the unknown-tool branch. Supersession
+is done with `ocbrain hygiene --supersede`, which the `expired` class then acts
+on.
 
-The source tree produces three distributions:
+## 8. One distribution
 
-- `ocbrain` — strict core and MCP;
-- `ocbrain-training` — local dataset/audit/training preparation;
-- `ocbrain-ops` — manual legacy operations and watchdog diagnostics.
+The source tree produces exactly one distribution, `ocbrain`, with two console
+scripts that both dispatch to `ocbrain.cli:main`. Nothing extends the CLI from
+outside the wheel; there is no companion entry-point mechanism.
 
-The companions have independent stores at `~/.ocbrain/training.sqlite` and
-`~/.ocbrain/ops.sqlite`. They may inspect a core snapshot read-only or submit
-evidence through the core boundary. They are never imported by the core MCP,
-never queried as memories, and install no recurring schedule.
+Two companion distributions used to exist. `ocbrain-training` held dataset
+mining, grading, and pilot-packet preparation; `ocbrain-ops` held autopilot,
+stallcheck, the judge, the embedder daemon, loop ingest, and legacy maintenance.
+Both are deleted. The decisive evidence was their own stores: every ops table —
+`autopilot_runs`, `judge_runs`, `embed_runs`, `signal_events`,
+`harvest_watermarks`, `loop_liveness`, `family_scores`, `stall_pages`,
+`watchdog_findings` — held zero rows.
 
-Legacy companion mutators require an explicit `--legacy-db`. The presence of an
-API credential, old plist, or companion install grants no hosted or scheduling
-authority.
+The companion stores declared an `egress_audits` table of their own, and that
+one is empty too. It is not the `egress_audits` listed in section 2: the core
+owns a table by the same name, `src/ocbrain/egress.py` writes it on every
+applied curation run, and it holds real rows. Only the companion copy is
+deleted.
+
+One capability was worth rescuing rather than deleting. The public-repository
+safety scanner moved into the core as `src/ocbrain/publicsafety.py`, so
+`ocbrain public-safety-check` and `ocbrain install-hooks` are ordinary
+subcommands and `ops/hooks/pre-push` runs
+`python -m ocbrain.cli public-safety-check` against a plain checkout. The three
+`com.jonathangu.ocbrain.*.plist` files that named the autopilot and stallcheck
+jobs are deleted with the code they pointed at.
 
 ## 9. Archive-first migration
 
@@ -206,8 +235,10 @@ Migration follows five non-destructive steps:
 3. Preserve the exact event prefix, then append deterministic import events for
    relational evidence, beliefs, links, lifecycle constraints, and retrieval
    snapshots.
-4. Extract training and operational rows into fresh companion databases and
-   account for every source table in the manifest.
+4. Extract the legacy source's training and operational rows into their own
+   fresh files and account for every source table in the manifest. Those tables
+   have no place in the strict v1 inventory, and a migration that silently
+   dropped them would not be accountable.
 5. Verify schema inventory, event chain, projection rebuild, FTS integrity,
    counts/hashes, foreign keys, and MCP behavior before publishing fresh paths.
 
@@ -224,8 +255,8 @@ fallback.
 
 The v1 core is accepted only when:
 
-- the core wheel imports no training or ops implementation;
-- its database has the exact strict inventory and no companion tables;
+- its database has the exact strict inventory and no legacy training or
+  operational tables;
 - the legacy event prefix is byte-for-byte preserved and the full chain verifies;
 - every imported row is represented or explicitly accounted for;
 - full projection rebuild reproduces semantic hashes and MCP responses while

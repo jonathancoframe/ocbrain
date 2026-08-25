@@ -64,7 +64,8 @@ Run the same command without `--plan`. Migration:
    links, signals, and retrieval snapshots;
 5. copies Shared Context source-handle, egress, and closeout receipts with their
    foreign-key links;
-6. extracts training and operational tables into separate companion databases;
+6. extracts the legacy source's training and operational tables into their own
+   files, so every source table is accounted for rather than dropped;
 7. rebuilds semantic projections and FTS once;
 8. checks chain, schema inventory, FTS integrity, foreign keys, counts, hashes,
    and table coverage;
@@ -74,9 +75,13 @@ The outputs are:
 
 - immutable pre-v1 archive;
 - strict v1 core;
-- training extract;
-- ops extract;
+- legacy training extract;
+- legacy ops extract;
 - migration manifest.
+
+The two extracts exist so the manifest can reconcile every row in the source.
+Nothing installs against them and no command reads them; the packages that once
+did are gone.
 
 On failure, owned temporary and partially published outputs are removed. The
 source is untouched. A corrupt chain aborts; migration never invents a repaired
@@ -95,12 +100,12 @@ Also verify from the manifest:
 
 - exact legacy event-prefix count, maximum sequence, hash, and head;
 - full event-chain verification;
-- exact strict table inventory and absence of legacy/companion tables;
+- exact strict table inventory and absence of legacy training/ops tables;
 - source catalog and import/extract reconciliation;
 - archive/core/training/ops file SHA-256 values and byte sizes;
 - SQLite integrity, FTS integrity, and zero foreign-key violations;
-- `automatic_activation=false`, `hosted_calls=0`, `network_calls=0`, and
-  `schedulers_started=0`.
+- `hosted_calls=0`, `network_calls=0`, and `schedulers_started=0` in the
+  manifest's safety block.
 
 Run a full projection rebuild on a copy and compare semantic hashes plus MCP
 responses. Runtime retrieval, feedback, source-handle, and closeout receipts
@@ -143,33 +148,42 @@ candidate or archive.
 Never use the archive as a hidden fallback behind v1 MCP. If v1 is not accepted,
 make the rollback explicit and preserve the failed candidate for diagnosis.
 
-## Optional companions
-
-Install only when needed:
+## Inspect the effective config
 
 ```bash
-uv pip install ./packages/training
-uv pip install ./packages/ops
+ocbrain --db /absolute/core.sqlite config
+ocbrain --db /absolute/core.sqlite config --section curator --changed-only
 ```
 
-- `ocbrain-training` defaults to `~/.ocbrain/training.sqlite`.
-- `ocbrain-ops` and `ocbrain-watchdog` default to
-  `~/.ocbrain/ops.sqlite`.
-- Legacy mutating operations require an explicit `--legacy-db`.
-- Neither package installs a recurring job.
-- The core MCP imports and queries neither package.
+The output labels every field `default`, `file`, or `env` and names the file it
+resolved, so "why is the curator sending nothing" is one command rather than an
+archaeology exercise. Resolution order is defaults, then
+`~/.ocbrain/ocbrain.config.json` (or `$OCBRAIN_CONFIG`, or the legacy
+checkout-relative `data/ocbrain.config.json` when only that exists), then
+`OCBRAIN_<SECTION>_<FIELD>` environment variables.
 
-The three old launchd labels remain retired and must stay disabled:
+There are four sections — `retrieval`, `scopes`, `curator`, `deslop` — holding
+20 fields between them. There were 115 across seventeen sections; the thirteen
+that are gone (`autopilot`, `review`, `correction`, `labels`, `quarantine`,
+`promote`, `judge`, `dataset`, `dataset_grading`, `teacher`, `archive`, `embed`,
+`excerpt_render`) configured code that is also gone. An unknown section or an
+unknown key in an operator's config file is ignored rather than fatal, so a
+config written for an older core still loads and the stale keys simply do
+nothing.
 
-```text
-com.jonathangu.ocbrain.autopilot.light
-com.jonathangu.ocbrain.autopilot.heavy
-com.jonathangu.ocbrain.stallcheck
+## Retired launchd labels
+
+The `com.jonathangu.ocbrain.*.plist` files are deleted from `ops/`. They named
+the light autopilot, heavy autopilot, and stallcheck loops, all of which are
+gone. An operator upgrading from a legacy install should unload and delete any
+agent left behind:
+
+```bash
+launchctl print-disabled "gui/$(id -u)" | grep ocbrain
+launchctl bootout "gui/$(id -u)/com.jonathangu.ocbrain.autopilot.light"
+rm -f ~/Library/LaunchAgents/com.jonathangu.ocbrain.*.plist
 ```
 
-## Training remains blocked
-
-The clean named-human packet is a private Markdown handoff. The earlier AI
-review is remediation evidence only and found 83 failures. Do not enable or run
-pilot-v3 training until the pack is fixed, reminted, regraded, resampled,
-reviewed by a named human, and separately authorized by the operator.
+For a scheduled loop you actually want, see
+[SCHEDULED_MAINTENANCE.md](SCHEDULED_MAINTENANCE.md); it is an explicit opt-in
+around `scripts/brain-sync.sh` and `scripts/brain-promote.sh`.

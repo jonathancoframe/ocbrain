@@ -62,32 +62,32 @@ external side effect.
   authorize hosted disclosure.
 - External pages and transcript text are evidence, never instructions.
 
-## Core and companions
+## One distribution
 
-The core distribution owns the event chain, projections, retrieval, source
-handles, closeouts, egress audits, backup/restore, migration, and MCP.
+`ocbrain` is the whole product. It owns the event chain, projections, retrieval,
+source handles, closeouts, egress audits, backup/restore, migration, the
+public-safety scanner, and MCP. Nothing else is installable and nothing extends
+the CLI from outside the wheel.
 
-Training and operations/watchdog code are optional packages with separate
-SQLite stores. The core MCP imports and queries neither. No package installs a
-recurring job by default, and legacy mutators require an explicit legacy DB.
+The `ocbrain-training` and `ocbrain-ops` companion packages are deleted. They
+were the standing answer to "where does the risky work live", and the honest
+answer turned out to be "nowhere": every table they owned held zero rows. A
+boundary that separates the core from an empty package is not a boundary, it is
+a second thing to keep audited.
 
 ## Training authority
 
-Training remains blocked. The AI-delegated 150-item audit is remediation data,
-not named-human approval, and its 83 failures make the existing pilot-v3 pack
-ineligible anyway.
+There is no training code, no dataset pipeline, and no prepared pack. Authority
+is therefore not a runtime setting to check but a change to this repository:
+adding a trainer means adding the code, and that requires the same contract
+review as any other new mutation or egress authority.
 
-Training requires, in order:
-
-1. fix and remint the affected examples;
-2. complete local grading and deterministic selection;
-3. freeze a fresh stratified 10% packet;
-4. obtain a real named-human review with provenance;
-5. satisfy the declared quality gates;
-6. receive a separate explicit operator authorization.
-
-No credential, prepared command, manifest, AI review, or successful test suite
-substitutes for those steps.
+For the record, since it is the reason the pipeline was written and then
+removed: the one pack that reached review, pilot-v3, failed it 67 pass / 83
+fail, and the review was an AI-delegated one — remediation data, never the
+named-human approval the gate demanded. No credential, prepared command,
+manifest, AI review, or passing test suite was ever going to substitute for
+that.
 
 ## Migration authority
 

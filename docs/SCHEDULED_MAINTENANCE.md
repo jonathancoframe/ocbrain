@@ -17,11 +17,13 @@ document exists to prevent:
 | `scripts/brain-sync.sh` | Harvests local agent transcripts and memory files into the ledger as **evidence only** | No |
 | `scripts/brain-promote.sh` | Compiles evidence into servable beliefs, retires stale ones, rebuilds the wiki and the dense index | Yes — step 1 only |
 
-`brain-sync.sh` never promotes anything. It passes `--evidence-only`, and
-`automatic_activation` is off by default, so a brain running only the harvester
-accumulates evidence that no retrieval can ever return. That is the state a real
-deployment was found in: a healthy write path, ~1,900 evidence objects, and a
-serving corpus frozen for two weeks at whatever was last curated by hand.
+`brain-sync.sh` never promotes anything. It passes `--evidence-only`, and there
+is no automatic promotion path at all — the `automatic_activation` flag that
+once existed is deleted, having produced 239 `auto_compiled` beliefs that were
+all later retracted. So a brain running only the harvester accumulates evidence
+that no retrieval can ever return. That is the state a real deployment was found
+in: a healthy write path, ~1,900 evidence objects, and a serving corpus frozen
+for two weeks at whatever was last curated by hand.
 
 ## brain-sync.sh — harvest
 
@@ -41,16 +43,23 @@ A 15-minute interval suits a machine in daily use.
 
 ## brain-promote.sh — promote and retire
 
-Six ordered stages: curate → hygiene → deslop → rematerialize wiki → lint →
-rebuild vectors. Each continues on failure so one bad stage cannot strand the
-rest.
+A daily snapshot, then five ordered stages: curate → hygiene → rematerialize
+wiki → lint → rebuild vectors. Each continues on failure so one bad stage cannot
+strand the rest. The snapshot runs once per UTC day rather than hourly, through
+the SQLite online-backup API so it is safe against the live WAL, and a failed
+snapshot aborts the cycle before anything can retire or rewrite a belief.
 
-**Step 1 is the only hosted call by default**, and it is digest-gated per
-project: a project whose eligible evidence has not changed since the last run is
-skipped without contacting the provider, and a cycle where nothing moved is
-therefore free. That is what makes an hourly schedule reasonable across many
-project scopes. Deslop runs mechanical-only unless you opt in, so it stays free
-and its findings are reproducible across runs.
+There used to be a sixth stage, `ocbrain deslop`, between hygiene and the wiki
+rebuild. It is gone. Across 155 consecutive hourly runs it reported
+`actionable: 0, repairs: [], judged: false` every time, because the same rules
+already fire one layer earlier as the curator's write-time gate. See
+[DESLOP.md](DESLOP.md) for where those rules live now.
+
+**The curate step is the only hosted call**, and it is digest-gated per project:
+a project whose eligible evidence has not changed since the last run is skipped
+without contacting the provider, and a cycle where nothing moved is therefore
+free. That is what makes an hourly schedule reasonable across many project
+scopes.
 
 Which projects get curated is `curator.projects` in your config, not a pin in
 the script. Set it to the scopes you actually work in:
@@ -74,11 +83,17 @@ Environment:
 | `OCBRAIN_PROMOTE_PROVIDER` | `anthropic` | Also `openai`, `moonshot` |
 | `OCBRAIN_PROMOTE_PROJECT` | unset | Set it to curate exactly one scope for a one-off run; unset uses `curator.projects` |
 | `OCBRAIN_PROMOTE_MAX_BELIEFS` | `24` | Upper bound per run; fewer is better |
-| `OCBRAIN_HYGIENE_CLASSES` | all three | e.g. `--class expired` to restrict |
+| `OCBRAIN_HYGIENE_CLASSES` | `--class expired --class redundant` | Both surviving classes. Narrow it to one, e.g. `--class expired` |
 | `OCBRAIN_HYGIENE_APPLY` | `0` (report only) | `1` lets the sweep retire beliefs |
-| `OCBRAIN_DESLOP_JUDGE` | `0` | `1` adds the actionability pass — one hosted call per cycle |
-| `OCBRAIN_DESLOP_APPLY` | `0` (report only) | `1` lets it repair — one hosted call per repaired belief |
 | `OCBRAIN_PROMOTE_BUDGET_SECONDS` | `1800` | Ceiling on the curate stage |
+| `OCBRAIN_PROMOTE_BACKUP` | `1` | `0` skips the daily snapshot |
+| `OCBRAIN_BACKUP_DIR` | `~/.ocbrain/backups` | Snapshot destination |
+| `OCBRAIN_BACKUP_KEEP` | `7` | Auto snapshots retained; hand-made `pre-*` backups are never rotated |
+| `OCBRAIN_WIKI_DIR` | `<db dir>/wiki` | Materialization target |
+
+`OCBRAIN_HYGIENE_CLASSES` defaulting to both classes matters. `redundant` was
+once missing from the default, and duplicate wiki facts accumulated to a quarter
+of the serving corpus while the loop reported clean every hour.
 
 The API key is read from the environment, falling back to `~/.common`. Only the
 variable *name* is ever configured; the value is never persisted by OCBrain.
@@ -87,8 +102,10 @@ An hourly interval is ample — evidence arrives at human pace.
 
 ### What the curator sends
 
-Only evidence with `public`/`internal` visibility and `hosted_ok` egress policy,
-in a configured project scope, bounded to 4,000 characters per body. A scope
+Only evidence with `internal` visibility and `hosted_ok` egress policy, in a
+configured project scope, bounded to 4,000 characters per body. The list used to
+read `public`/`internal`; `public` visibility is gone from `VISIBILITIES`
+entirely, because it was published for two years and never once written. A scope
 matches by canonical spelling, so evidence a client stored as `Coframe Brain` is
 reached by the project named `coframe-brain`; widening only ever adds spellings
 of a project already on the list. Raw transcripts are
@@ -103,45 +120,37 @@ invents a citation produces no belief.
 
 ### What the sweep retires
 
-Three classes, each separately counted so a run reports *why* it acted:
+Two classes, each separately counted so a run reports *why* it acted:
 
 - `expired` — past `valid_until`, or marked `superseded_by`. Unambiguous, and the
   only class permitted to retire a curated wiki fact.
-- `unused` — never returned by any retrieval, older than `--min-age-days`.
-- `unhelpful` — net-negative retrieval feedback. **Refuses to run until a
-  watermark is set** (`ocbrain hygiene --set-watermark`), and then counts only
-  feedback recorded after it. Verdicts collected while a ranker was serving a
-  belief for unrelated queries describe the ranker, not the belief; acting on
-  them retires good facts for the ranker's mistakes. Set the watermark after any
-  ranking change.
+- `redundant` — a same-scope restatement of a fact a newer belief already
+  carries, above `--restatement-threshold` token overlap. Keeps the newest.
 
-### What deslop reports
-
-Two things, and neither is a deletion:
-
-- **Belief findings.** The mechanical rules (`fused-claims`,
-  `temporal-in-durable`, `current-without-expiry`, `no-checkable-content`) plus,
-  with `OCBRAIN_DESLOP_JUDGE=1`, the model-judged `unactionable` rule. With
-  `OCBRAIN_DESLOP_APPLY=1` findings are repaired by rewriting or splitting; a
-  repair may only subtract or reorganize the original's own words, and one that
-  adds a token is rejected before anything is written.
-  `deslop.max_repairs_per_run` caps an unattended run.
-- **Volume.** Session transcripts are imported as a sliding window, so an append
-  mints a fresh evidence row for the same transcript. The report names how many
-  projection rows and megabytes that costs. `deslop --volume --apply` evicts
-  them, and `ocbrain sync --full` refolds every row from the ledger — a cache
-  eviction, not a deletion. See [DESLOP.md](DESLOP.md).
-
-Only *enforced* rules and the judged verdict may act unattended. Advisory
-findings report and wait for a human, because a rule that cannot distinguish a
-defect from a judgement call must not retire a belief on its own.
+Two more classes, `unused` and `unhelpful`, were removed. Neither selected a
+single belief across 155 scheduled runs. `unused` retired anything absent from
+`retrieval_items` after 30 days, which punishes a correct fact for being rarely
+needed; `unhelpful` refused to act at all until an operator set a feedback
+watermark, and no operator ever set one, so the whole watermark subsystem
+existed to keep a class permanently disabled. `ocbrain hygiene --set-watermark`,
+`--min-age-days`, `--min-feedback-observations`, and `--unhelpful-threshold` are
+gone with them; `--apply`, `--restore`, `--batch-cap`, `--restatement-threshold`,
+and `--supersede` all remain.
 
 Retirement is always a **soft** retraction, undoable with
 `ocbrain hygiene --restore <belief_id>`. A hard retraction would permanently
-block the belief id, and because auto-compiled ids are content-addressed that
+block the belief id, and because compiled belief ids are content-addressed that
 would block all future identical content. Pinned beliefs and curated wiki facts
 are never touched outside the `expired` class, and `--batch-cap` bounds a run
 while reporting the remainder rather than silently dropping it.
+
+### Keeping what is promoted well-written
+
+The slop rules still run, but not from this script. They are a write-time gate
+inside the curator's `validate_claims`, a `slop_findings` block in every closeout
+receipt, and a check in `scripts/wiki-lint.py` at stage 4 above. Nothing in the
+promote loop needs to sweep for them. [DESLOP.md](DESLOP.md) has the rule table
+and the measurements.
 
 ## Installing on macOS (launchd)
 
@@ -201,7 +210,12 @@ the brain is in the write-only state described at the top of this document.
 
 No autopilot, no hosted judge, no training, no stale-marking daemon, and no
 promotion inside the MCP surface. Promotion stays out of the client-facing tool
-set: `decide_proposal_v1` is admin-only, and these scripts are the only
-unattended writers. `packages/ops` maintenance (`prune_knowledge`,
-`archive_unreferenced_catalog`) operates on the **legacy** `knowledge` table and
-raises `no such table: knowledge` against a v1 core — use `ocbrain hygiene`.
+set: `decide_proposal_v1` is admin-only, and these two scripts are the only
+unattended writers.
+
+The `packages/ops` maintenance commands that used to be mentioned here
+(`prune_knowledge`, `archive_unreferenced_catalog`, and the `prune` / `heal` /
+`liveness-check` subcommands) are deleted. They operated on the legacy
+`knowledge` table and raised `no such table: knowledge` against a v1 core, so
+the only correct advice was already "use `ocbrain hygiene`" — which is now the
+only option.

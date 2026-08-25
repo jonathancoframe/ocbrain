@@ -33,7 +33,7 @@ work?" without trusting prose.
 | --- | --- | --- |
 | `schema_version` | yes | `ocbrain.skill_telemetry.v1` |
 | `kind` | yes | one of the kinds below |
-| `skill_id` | yes | stable skill identifier (e.g. `ocbrain-ops`) |
+| `skill_id` | yes | stable skill identifier (e.g. `repo-release-check`) |
 | `source_commit` | locator* | git commit the skill was built/loaded from |
 | `tree_sha256` | locator* | sha256 over the skill's file tree (canonical order) |
 | `skill_uri` | locator* | resolvable URI for the exact artifact |
@@ -67,7 +67,7 @@ work?" without trusting prose.
 {
   "schema_version": "ocbrain.skill_telemetry.v1",
   "kind": "skill_outcome",
-  "skill_id": "ocbrain-ops",
+  "skill_id": "repo-release-check",
   "source_commit": "a5b35db",
   "tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "runtime": "hermes",

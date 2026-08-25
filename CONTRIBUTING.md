@@ -25,6 +25,10 @@ OCBrain currently supports Python 3.11+ on macOS and Linux. WSL is expected to
 work but is not part of the dated release-acceptance proof. Native Windows is
 not currently supported. The core has no third-party runtime dependencies.
 
+There is one distribution and one editable install. The `ocbrain-ops` and
+`ocbrain-training` companion packages under `packages/` are gone, so no second
+`pip install -e ./packages/...` line belongs in a setup guide any more.
+
 ```bash
 git clone https://github.com/YOUR-USER/ocbrain.git
 cd ocbrain
@@ -32,7 +36,6 @@ git remote add upstream https://github.com/jonathangu/ocbrain.git
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/python -m pip install -e ./packages/ops
 ```
 
 Create a focused branch:
@@ -73,10 +76,14 @@ used as training data.
 The optional repository hook runs the public-safety scanner before a push:
 
 ```bash
-scripts/install-hooks.sh
+scripts/install-hooks.sh          # or: .venv/bin/ocbrain install-hooks
 ```
 
-Installing the hook changes only this checkout. You can also run the same check
+Installing the hook changes only this checkout: it symlinks `ops/hooks/pre-push`
+into `.git/hooks/`, and that hook shells out to
+`python -m ocbrain.cli public-safety-check` with `PYTHONPATH` pointed at `src`.
+The scanner is core code (`src/ocbrain/publicsafety.py`), so the hook works from
+a plain checkout with nothing extra installed. You can also run the same check
 directly:
 
 ```bash
