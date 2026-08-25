@@ -31,6 +31,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from procmine.runtimes import canonical_runtime
+
 BRAIN_DB = Path(os.path.expanduser("~/.ocbrain/ocbrain.sqlite"))
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -111,7 +113,9 @@ class Episode:
     summary: str
     runtime_raw: str | None
     runtime: str
+    runtime_slug: str | None
     session_id: str | None
+    session_hint: str | None
     project: str | None
     repo: str | None
     grade: str
@@ -121,6 +125,7 @@ class Episode:
     n_artifacts: int
     resolvable_verifier_uris: int
     resolvable_artifact_uris: int
+    session_source: str = "model_reported"
     trace_id: str | None = None
     trace_runtime: str | None = None
     join_tier: str = "unjoined"
@@ -132,7 +137,8 @@ class Episode:
             key: getattr(self, key)
             for key in (
                 "closeout_id", "closed_at", "task_ref", "status", "summary",
-                "runtime_raw", "runtime", "session_id", "project", "repo",
+                "runtime_raw", "runtime", "runtime_slug", "session_id",
+                "session_hint", "session_source", "project", "repo",
                 "grade", "grade_rank", "n_verifiers", "n_verifiers_failed",
                 "n_artifacts", "resolvable_verifier_uris",
                 "resolvable_artifact_uris", "trace_id", "trace_runtime",
@@ -193,9 +199,16 @@ def load_episodes(db_path: Path | None = None) -> list[Episode]:
     path = db_path or BRAIN_DB
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
+        # `client_session_hint` only exists on cores written after
+        # server-captured provenance landed. Probe rather than assume: this
+        # miner is pointed at old snapshots as often as at the live core.
+        columns = {row[1] for row in conn.execute("pragma table_info(task_closeouts)")}
+        hint_column = "client_session_hint" if "client_session_hint" in columns else "NULL"
+        runtime_key_column = "client_runtime_key" if "client_runtime_key" in columns else "NULL"
         rows = conn.execute(
             "select id, closed_at, task_ref, status, summary, runtime, session_id, "
-            "context_json, artifact_refs_json, verifier_refs_json, provenance_json "
+            "context_json, artifact_refs_json, verifier_refs_json, provenance_json, "
+            f"{hint_column}, {runtime_key_column} "
             "from task_closeouts order by closed_at"
         ).fetchall()
     finally:
@@ -205,6 +218,7 @@ def load_episodes(db_path: Path | None = None) -> list[Episode]:
     for (
         closeout_id, closed_at, task_ref, status, summary, runtime_raw, session_id,
         context_json, artifact_json, verifier_json, provenance_json,
+        session_hint, runtime_key,
     ) in rows:
         verifier_refs = _json_list(verifier_json)
         artifact_refs = _json_list(artifact_json)
@@ -219,7 +233,14 @@ def load_episodes(db_path: Path | None = None) -> list[Episode]:
             provenance = json.loads(provenance_json) if provenance_json else {}
         except Exception:
             provenance = {}
-        effective_session = session_id or provenance.get("session_id") or context.get("session")
+        # The server-observed hint outranks anything the model typed: it came
+        # from the MCP child's own environment, and on Claude Code it is
+        # byte-identical to the transcript filename this episode wants to join
+        # to. It is still only harness-attested -- see ocbrain.provenance -- so
+        # the model-supplied value is kept beside it, not overwritten.
+        reported_session = session_id or provenance.get("session_id") or context.get("session")
+        effective_session = session_hint or reported_session
+        session_source = "server_observed" if session_hint else "model_reported"
         effective_runtime = runtime_raw or provenance.get("runtime") or context.get("runtime")
         episodes.append(
             Episode(
@@ -229,8 +250,11 @@ def load_episodes(db_path: Path | None = None) -> list[Episode]:
                 status=status,
                 summary=summary,
                 runtime_raw=effective_runtime,
-                runtime=normalize_runtime(effective_runtime),
+                runtime=normalize_runtime(runtime_key or effective_runtime),
+                runtime_slug=canonical_runtime(runtime_key or effective_runtime),
                 session_id=effective_session or None,
+                session_hint=session_hint or None,
+                session_source=session_source,
                 project=context.get("project") if isinstance(context, dict) else None,
                 repo=context.get("repo") if isinstance(context, dict) else None,
                 grade=grade,

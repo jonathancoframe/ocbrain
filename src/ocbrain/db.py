@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ocbrain.ids import content_hash, stable_id
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.text import find_probable_injection, find_probable_secret_leaks
 
 DEFAULT_DB_PATH = Path(os.environ.get("OCBRAIN_DB", "~/.ocbrain/ocbrain.sqlite")).expanduser()
@@ -111,7 +112,11 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   session_id TEXT,
   feedback_source TEXT,
   feedback_at TEXT,
-  served_at TEXT NOT NULL
+  served_at TEXT NOT NULL,
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT,
+  provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_knowledge_outcome_served
   ON retrieval_uses(knowledge_id, outcome, served_at);
@@ -439,7 +444,10 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   verifier_refs_json TEXT NOT NULL,
   provenance_json TEXT NOT NULL,
   receipt_json TEXT NOT NULL,
-  content_hash TEXT NOT NULL UNIQUE
+  content_hash TEXT NOT NULL UNIQUE,
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
@@ -637,6 +645,20 @@ _V4_RETRIEVAL_USE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("feedback_source", "TEXT"),
     ("feedback_at", "TEXT"),
 )
+# Server-observed caller identity, mirroring the v1 core. ``session_id`` above
+# stays the model-supplied string; these are what the process saw for itself.
+# See ocbrain.provenance for what each one is worth.
+_V5_RETRIEVAL_USE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("server_connection_id", "TEXT"),
+    ("client_session_hint", "TEXT"),
+    ("client_runtime_key", "TEXT"),
+    ("provenance_json", "TEXT"),
+)
+_V5_TASK_CLOSEOUT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("server_connection_id", "TEXT"),
+    ("client_session_hint", "TEXT"),
+    ("client_runtime_key", "TEXT"),
+)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -696,6 +718,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         _ensure_column(conn, "dataset_exports", column, decl)
     for column, decl in _V4_RETRIEVAL_USE_COLUMNS:
         _ensure_column(conn, "retrieval_uses", column, decl)
+    for column, decl in _V5_RETRIEVAL_USE_COLUMNS:
+        _ensure_column(conn, "retrieval_uses", column, decl)
+    for column, decl in _V5_TASK_CLOSEOUT_COLUMNS:
+        _ensure_column(conn, "task_closeouts", column, decl)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dsx_grade ON dataset_examples(dataset, grade_score)"
     )
@@ -1645,8 +1671,18 @@ def log_retrieval_use(
     served_ids: list[str] | tuple[str, ...] | None = None,
     session_id: str | None = None,
     feedback_source: str | None = None,
+    provenance: Provenance | None = None,
 ) -> str:
+    """Append a read receipt on the legacy v0 core.
+
+    The v1 twin is ``core_v1.record_core_v1_retrieval``. Both now record the
+    server-observed ``provenance`` beside the model-supplied ``runtime`` and
+    ``session_id``; this path never canonicalized the runtime at all, so the
+    two write paths finally agree on what a caller identity is.
+    """
     created_at = now_iso()
+    observed = provenance or EMPTY_PROVENANCE
+    observed_payload = observed.to_dict()
     served_ids_json = json.dumps(list(served_ids or []), sort_keys=True, separators=(",", ":"))
     sequence = conn.execute("SELECT COUNT(*) FROM retrieval_uses").fetchone()[0]
     retrieval_id = stable_id(
@@ -1667,9 +1703,10 @@ def log_retrieval_use(
         INSERT INTO retrieval_uses (
           id, knowledge_id, served_to_runtime, task_ref, outcome, note,
           query_text, served_ids_json, session_id, feedback_source, feedback_at,
-          served_at
+          served_at, server_connection_id, client_session_hint,
+          client_runtime_key, provenance_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
@@ -1684,6 +1721,12 @@ def log_retrieval_use(
             feedback_source,
             created_at if feedback_source else None,
             created_at,
+            observed.server_connection_id,
+            observed.client_session_hint,
+            observed.client_runtime_key,
+            json.dumps(observed_payload, sort_keys=True, separators=(",", ":"))
+            if observed_payload
+            else None,
         ),
     )
     return retrieval_id

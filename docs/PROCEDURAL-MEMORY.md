@@ -314,10 +314,21 @@ belief in the same scope would not be.
 
 ## 9. What would have to be true to ship this
 
-1. **The join has to stop being reconstructed.** 44% join yield, 38 identity
-   joins out of 1,105. Either `brain.closeout` starts recording the runtime's
-   real session id, or procedures stay a research artifact. This is one field and
-   it is the highest-leverage change in the whole design.
+1. **The join has to stop being reconstructed.** ~~44% join yield, 38 identity
+   joins out of 1,105.~~ **Landed for new rows.** The server no longer asks the
+   model who it is: at `initialize` it mints a `server_connection_id` and reads
+   the MCP child's own environment, and `task_closeouts` /`retrieval_uses` carry
+   `client_session_hint` beside the model-supplied `session_id`
+   (`src/ocbrain/provenance.py`). On Claude Code that hint is byte-identical to
+   the transcript filename `claude_code.py:47` keys on, so the identity tier
+   joins directly. Three caveats the design keeps visible rather than papering
+   over: the hint is harness-attested and never server-verified; its stability
+   across `/resume`, `/clear`, and compaction is unverified; and a subagent
+   inherits its parent's id, so a stamped hint resolves to the parent
+   transcript. Hermes multiplexes every session over one MCP child per gateway
+   profile and cannot supply a session id at all — its consolation is an exact
+   `client_runtime_key` from `OCBRAIN_CLIENT`. **No backfill**: `task_closeouts`
+   is append-only, so the historical corpus still needs the tiered join.
 2. **Cursor needs a real exporter.** 57 cursor closeouts, 0 traces, because
    `scripts/export-cursor-chats.py` exports chat bubbles and not the tool log.
 3. **A scheduled miner**, alongside the curator and `ocbrain hygiene`, since

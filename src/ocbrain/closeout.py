@@ -7,6 +7,7 @@ from typing import Any
 from ocbrain.db import now_iso
 from ocbrain.events import canonical_json
 from ocbrain.ids import content_hash, stable_id
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.scope import ScopeContext
 
 CLOSEOUT_SCHEMA_VERSION = "ocbrain.closeout.v1"
@@ -33,8 +34,18 @@ def record_closeout(
     outcomes: list[dict[str, Any]] | None = None,
     awaiting: str | None = None,
     actor: str = "agent",
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
-    """Append a generic execution outcome receipt without promoting knowledge."""
+    """Append a generic execution outcome receipt without promoting knowledge.
+
+    ``provenance`` is what the server observed about the connection that sent
+    the closeout; ``context.session`` and ``context.runtime`` remain what the
+    model said. Both are recorded, separately, because only one of them can be
+    trusted and the receipt should say which. The observed fields join into the
+    hashed provenance block, so two byte-identical closeouts written from two
+    different connections are two distinct receipts rather than a UNIQUE
+    collision on ``content_hash``.
+    """
     task_ref = _required_text(task_ref, "task_ref")
     summary = _required_text(summary, "summary")
     actor = _required_text(actor, "actor")
@@ -56,12 +67,15 @@ def record_closeout(
     verification_status = _verification_status(verifiers)
     resolved = context or ScopeContext()
     closed_at = now_iso()
-    provenance = {
+    observed = provenance or EMPTY_PROVENANCE
+    provenance_block: dict[str, Any] = {
         "source": "agent_reported",
         "actor": actor,
         "runtime": resolved.runtime or "mcp",
         "session_id": resolved.session,
         "reported_at": closed_at,
+        # Named so nobody has to read this file to know which half is a claim.
+        "server_observed": observed.to_dict(),
     }
     base_receipt: dict[str, Any] = {
         "schema_version": CLOSEOUT_SCHEMA_VERSION,
@@ -82,7 +96,7 @@ def record_closeout(
         "verification_status": verification_status,
         "awaiting": awaiting.strip() if awaiting and awaiting.strip() else None,
         "context": resolved.to_dict(),
-        "provenance": provenance,
+        "provenance": provenance_block,
     }
     digest = content_hash(canonical_json(base_receipt))
     closeout_id = stable_id("close", task_ref, closed_at, digest)
@@ -93,9 +107,10 @@ def record_closeout(
           id, schema_version, closed_at, task_ref, status, summary,
           decision_impact, decision_note, awaiting, runtime, session_id,
           context_json, artifact_refs_json, verifier_refs_json, provenance_json,
-          receipt_json, content_hash
+          receipt_json, content_hash,
+          server_connection_id, client_session_hint, client_runtime_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             closeout_id,
@@ -107,14 +122,17 @@ def record_closeout(
             decision_impact,
             base_receipt["decision"]["note"],
             base_receipt["awaiting"],
-            provenance["runtime"],
-            provenance["session_id"],
+            provenance_block["runtime"],
+            provenance_block["session_id"],
             canonical_json(base_receipt["context"]),
             canonical_json(artifacts),
             canonical_json(verifiers),
-            canonical_json(provenance),
+            canonical_json(provenance_block),
             canonical_json(receipt),
             digest,
+            observed.server_connection_id,
+            observed.client_session_hint,
+            observed.client_runtime_key,
         ),
     )
     for retrieval_use_id in retrieval_ids:

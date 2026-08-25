@@ -33,6 +33,7 @@ from ocbrain.core_v1 import (
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
 from ocbrain.ids import stable_id
+from ocbrain.provenance import Provenance
 from ocbrain.scope import (
     HOSTED_MODEL_TARGET,
     LOCAL_MODEL_TARGET,
@@ -342,6 +343,7 @@ def record_context_v1(
     *,
     context: ScopeContext,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> str:
     delivery_target = normalize_delivery_target(delivery_target)
     retrieval_id = record_core_v1_retrieval(
@@ -353,6 +355,7 @@ def record_context_v1(
         task_ref=context.task or f"brain.context:{packet['query']}",
         session_id=context.session,
         packet_schema=CONTEXT_SCHEMA_VERSION,
+        provenance=provenance,
     )
     issue_source_handles(conn, handles, retrieval_use_id=retrieval_id)
     return retrieval_id
@@ -784,6 +787,7 @@ def search_v1(
     limit: int,
     cross_scope: bool,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     exact_matches = exact_lookup_v1(
         conn,
@@ -825,6 +829,7 @@ def search_v1(
             task_ref=context.task or f"brain.search:{payload['query']}",
             session_id=context.session,
             packet_schema="ocbrain.search.v1",
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_id
         payload["retrieval_use_status"] = "recorded"
@@ -856,6 +861,7 @@ def search_v1(
         task_ref=context.task or f"brain.search:{payload['query']}",
         session_id=context.session,
         packet_schema="ocbrain.search.v1",
+        provenance=provenance,
     )
     issue_source_handles(conn, handles, retrieval_use_id=retrieval_id)
     bind_retrieval_id_v1(payload, retrieval_id)
@@ -1321,6 +1327,7 @@ def closeout_v1(
     outcomes: list[dict[str, Any]],
     awaiting: str | None,
     actor: str,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     # Report the writing standard back to whoever wrote the summary. Reporting
     # rather than refusing is the default: the curator gate already stops slop
@@ -1353,6 +1360,7 @@ def closeout_v1(
         outcomes=outcomes,
         awaiting=awaiting,
         actor=actor,
+        provenance=provenance,
     )
     # Always record the summary as scoped evidence, under the shared continuity
     # scope so a closeout written while one client worked is curatable and
