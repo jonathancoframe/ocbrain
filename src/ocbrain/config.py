@@ -438,9 +438,6 @@ class DeslopConfig:
     # the receipt as `slop_findings` so the writer sees them either way; turn
     # this on once you trust the rules against your own corpus.
     reject_closeout_slop: bool = False
-    # Repairs applied per unattended `ocbrain deslop --apply` run. A cap means a
-    # rule that starts over-firing damages a handful of beliefs, not the corpus.
-    max_repairs_per_run: int = 8
 
 
 @dataclass(frozen=True)

@@ -69,9 +69,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         "vector-build",
         "vector-status",
     }
-    # Covered in tests/test_hygiene.py, tests/test_config_surface.py, and
-    # tests/test_deslop.py, including their CLI routes.
-    hygiene_acceptance = {"hygiene", "config", "deslop"}
+    # Covered in tests/test_hygiene.py and tests/test_config_surface.py,
+    # including their CLI routes.
+    hygiene_acceptance = {"hygiene", "config"}
     # Covered in tests/test_scope_promote_cli.py, including the projection
     # rebuild and the egress boundary.
     scope_acceptance = {"scope-promote"}

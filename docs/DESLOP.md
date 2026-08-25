@@ -2,18 +2,16 @@
 
 A knowledge store accumulates slop the way a codebase does, and it costs more:
 every badly-written belief spends a retrieval slot and drags unrelated material
-into answers. `ocbrain deslop` is the linter for stored knowledge.
+into answers. Deslop is the linter for stored knowledge.
 
-The structure is borrowed from code linting deliberately — **a gate that sits at
-zero**, so a finding is a regression, plus **an advisory pass whose findings are
-judgement calls**, so nobody auto-applies them.
-
-```bash
-ocbrain --db ~/.ocbrain/ocbrain.sqlite deslop --mechanical-only   # free, deterministic
-ocbrain --db ~/.ocbrain/ocbrain.sqlite deslop                     # adds the judged rule
-ocbrain --db ~/.ocbrain/ocbrain.sqlite deslop --apply             # repair the findings
-ocbrain --db ~/.ocbrain/ocbrain.sqlite deslop --volume            # re-windowed evidence
-```
+It is a **write-time gate, not a sweep.** There was once an `ocbrain deslop`
+command that re-ran these rules over the served corpus and offered to repair
+what it found. Across 155 consecutive hourly runs it reported `actionable: 0,
+repairs: [], judged: false` — every time. That is not a broken rule set; it is
+the rules working one layer earlier. The same rules fired 34 `unverified_quote`,
+8 `slop:fused-claims`, and 7 `slop:temporal-in-durable` rejections from inside
+the curator, before a bad claim was ever stored. A sweep over an already-gated
+corpus finds nothing by construction, so the sweep is gone and the gate stayed.
 
 ## What counts as slop
 
@@ -30,18 +28,22 @@ Two beliefs, both receipt-shaped, illustrate it:
 | "The durable task-DAG kernel is implemented and verified: one task is registered and exclusively leased…" | fine | states a durable system property |
 | "Built, visually verified, and evidence-sealed an 18-page founder report…" | **21 good / 33 bad**, worst in the corpus | records that a thing happened once |
 
+That second row is what the deleted `unactionable` rule existed to catch, and it
+is the honest reason it went: answering "would a reader act differently for
+knowing this?" needs a model, a model pass needs a corpus to sweep, and the
+sweep never had anything to act on.
+
 ## The rules
 
-| Rule | Fires on | Repair | Enforced |
-|---|---|---|---|
-| `fused-claims` | >1 semicolon, or >3 sentences | split | yes |
-| `temporal-in-durable` | "now"/"currently"/"is implemented" with `lifecycle: durable` | rewrite | yes |
-| `current-without-expiry` | `lifecycle: current` with no `valid_until` | **stamp** | yes |
-| `no-checkable-content` | no path, identifier, flag, figure, or named entity | drop | **no** |
-| `unactionable` | model judgement: would a reader act differently? | drop | judged |
+| Rule | Fires on | Enforced |
+|---|---|---|
+| `fused-claims` | >1 semicolon, or >3 sentences | yes |
+| `temporal-in-durable` | "now"/"currently"/"is implemented" with `lifecycle: durable` | yes |
+| `current-without-expiry` | `lifecycle: current` with no `valid_until` | yes |
+| `no-checkable-content` | no path, identifier, flag, figure, or named entity | **no** |
 
-**Enforced** rules gate writes and may be repaired unattended. A rule earns that
-only by being precise enough that a firing is a defect rather than an opinion.
+**Enforced** rules gate writes. A rule earns that only by being precise enough
+that a firing is a defect rather than an opinion.
 
 `no-checkable-content` deliberately does not qualify. A capitalised proper noun
 at the start of a sentence is indistinguishable from a common word by pattern
@@ -60,59 +62,18 @@ Two calibration notes, both from being wrong first:
   is the precise version of the same concern: it reads lifecycle metadata rather
   than guessing from prose.
 
-## Repair, not deletion
-
-A fused belief holds several real facts badly packaged. Splitting it keeps the
-knowledge and fixes the packaging. The safety rule is mechanical:
-
-> **A repair may only subtract or reorganize, never add.**
-
-Every significant token in the repaired body — or the union of the split bodies —
-must already appear in the original. A repair that introduces a token is rejected
-before anything is written. This is what makes rewriting safe *without*
-re-verifying the evidence the original cited: a repair cannot introduce a claim
-the original did not make. The curator's verbatim-quote gate cannot apply here,
-because a repaired belief derives from a belief rather than from evidence.
-
-Each action reuses machinery that already exists, so nothing invents new event
-semantics and every outcome is reversible:
-
-- **rewrite** re-proposes the same key, updating the belief in place.
-- **split** mints one belief per fact — each inheriting the original's
-  `evidence_ids`, so `brain.source` keeps working — then supersedes the original.
-  The existing `expired` hygiene class retires it on the next sweep, so a bad
-  split is visible next to its source before the original goes away.
-- **stamp** writes the missing expiry and leaves the body untouched. This repair
-  never reaches a model: the prose is fine, only the lifecycle bookkeeping is
-  missing, so sending it to be rewritten would spend a hosted call to change the
-  one thing that is not wrong.
-- **drop** soft-retracts, exactly as hygiene does.
-
-Two failures found by running this against the live corpus rather than reasoning
-about it:
-
-- **A split of a `current` belief with no expiry minted N children that each also
-  lacked one**, so repairing nine `fused-claims` findings turned nine
-  `current-without-expiry` findings into thirteen. Repairs now stamp the expiry on
-  a `current` belief that has none. The expiry is metadata, not body text, so this
-  does not touch the subtractive gate.
-- **An in-place repair re-derived the belief id from the key**, which only works
-  for beliefs the wiki curator minted. Anything compiled by another path has an id
-  that formula does not reproduce, so five of thirteen stamps forked a duplicate
-  and left the original serving. In-place repairs now reuse the belief's own
-  canonical id.
-
-`ocbrain hygiene --restore <belief_id>` undoes any of them.
-
 ## Prevention at write time
 
 Cleanup is the expensive path. The curator prompt *already* forbade fusing facts
 and already forbade turning a completion receipt into eternal truth — and nothing
-enforced it. A rule that lives only in a prompt is a suggestion.
+enforced it. A rule that lives only in a prompt is a suggestion. Three callers
+turn these rules into gates:
 
 - **Curator:** `validate_claims` runs the enforced rules and rejects a slop claim
   with the rule id as the reason, which the existing `rejected` census reports.
-  `current-without-expiry` is excluded there because the expiry is assigned later.
+  `current-without-expiry` is excluded there because the expiry is assigned later
+  by `claim_valid_until`, so checking it during validation would reject every
+  well-formed `current` claim.
 - **Closeouts:** `closeout_v1` reports findings in the receipt as
   `slop_findings`. It **reports rather than refuses** by default: a rejected
   closeout throws away the client's work, and closeout summaries are the single
@@ -138,51 +99,28 @@ Measured on one real brain: **2,176 history rows across 1,292 files**, with sing
 files holding 102 and 89 rows that share one identical head — for files no longer
 on disk.
 
-**Prevention.** `import_source_v1` compares the candidate's first 2,000
-characters against the newest evidence for the same `(source_uri, kind)`. On a
-match it adopts the stored window wholesale — id *and* body — so the belief also
-compares unchanged and the import is a true no-op. Reusing only the id would
-still re-propose the belief every harvest, appending the transcript to the ledger
-a second time. Calibrated against the live corpus: at 2,000 characters the gate
-catches exactly the re-windowed rows (102 → 1, 89 → 1) and keeps all 476 genuine
-head changes, which are rotated or rewritten files whose new content is real.
+`import_source_v1` prevents it. It compares the candidate's first 2,000
+characters against the newest evidence for the same `(source_uri, kind)` via
+`rewindowed_evidence_id`. On a match it adopts the stored window wholesale — id
+*and* body — so the belief also compares unchanged and the import is a true
+no-op. Reusing only the id would still re-propose the belief every harvest,
+appending the transcript to the ledger a second time. Calibrated against the live
+corpus: at 2,000 characters the gate catches exactly the re-windowed rows
+(102 → 1, 89 → 1) and keeps all 476 genuine head changes, which are rotated or
+rewritten files whose new content is real.
 
-**Reversible eviction.** `deslop --volume --apply` drops projection rows that are
-all three of: not the newest for their `(source_uri, kind)`, not named by an
-issued context handle, and not cited by a belief. On the live brain that is 892
-rows / 14.0MB. This is a **cache eviction, not a deletion** — `evidence_objects`
-is derived, and `ocbrain sync --full` refolds every row from the ledger. Verified
-end to end: 2,578 rows → evict 892 → 1,686 → `sync --full` → 2,578 exactly, with
-handle expansion unchanged at every step.
-
-An issued handle names its evidence inside `locator_json`, not in `object_id` —
-`object_id` holds the belief the evidence supports. Matching the wrong column
-makes the exemption silently protect nothing.
+There was also a reversible `deslop --volume --apply` eviction that dropped
+superseded projection rows and let `sync --full` refold them. It worked, and it
+is gone with the rest of the command: prevention already caps the growth, and
+evidence bodies are never indexed — `search_documents` holds beliefs only — so
+the residual volume costs disk, not retrieval quality.
 
 **What is not done, and why.** The ledger cannot be compacted. The append-only
 triggers, the `prev_hash`/`event_hash` chain, and `body_hash` covering the full
-`body_json` make the duplicated transcript text in `evidence_recorded` load
-bearing: removing or slimming any event invalidates every event after it and
-makes the projection unbuildable. Exporting a fresh ledger without those events
-would forfeit scope tags, egress policies, every belief, every correction, and
-every closeout — and would let previously retracted beliefs become freshly
-compilable, because `compilation_block_reason` reads `brain_events` directly.
-Not a trade worth making for 41MB.
-
-Worth stating plainly: **evidence bodies are never indexed.** `search_documents`
-holds beliefs only. That volume costs disk, not retrieval quality, which is why
-prevention plus reversible eviction is proportionate and projection surgery is
-not.
-
-## In the scheduled loop
-
-`scripts/brain-promote.sh` runs deslop mechanically after hygiene, so a scheduled
-cycle stays free and its findings are reproducible. Opt in further with:
-
-```bash
-OCBRAIN_DESLOP_JUDGE=1   # add the actionability pass (one hosted call per cycle)
-OCBRAIN_DESLOP_APPLY=1   # repair findings (one hosted call per repaired belief)
-```
-
-`deslop.max_repairs_per_run` caps an unattended run, so a rule that starts
-over-firing damages a handful of beliefs rather than the corpus.
+`body_json` all depend on the duplicated transcript text in `evidence_recorded`
+staying byte-for-byte where it is: removing or slimming any event invalidates
+every event after it and makes the projection unbuildable. Exporting a fresh
+ledger without those events would forfeit scope tags, egress policies, every
+belief, every correction, and every closeout — and would let previously retracted
+beliefs become freshly compilable, because `compilation_block_reason` reads
+`brain_events` directly. Not a trade worth making for 41MB.

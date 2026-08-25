@@ -8,11 +8,10 @@
 # other half of the loop:
 #
 #   1. curate   — compile eligible evidence into wiki facts (hosted model call)
-#   2. hygiene  — retire expired / never-retrieved / badly-judged beliefs
-#   3. deslop   — report badly-written beliefs and re-windowed evidence volume
-#   4. wiki     — rematerialize the wiki, which is also what deletes orphan pages
-#   5. lint     — post-condition check on the materialized tree
-#   6. vectors  — rebuild the dense sidecar so new facts are semantically findable
+#   2. hygiene  — retire expired and redundant beliefs
+#   3. wiki     — rematerialize the wiki, which is also what deletes orphan pages
+#   4. lint     — post-condition check on the materialized tree
+#   5. vectors  — rebuild the dense sidecar so new facts are semantically findable
 #
 # NOT installed by default. OCBrain ships no scheduler; an operator opts in by
 # loading a launchd agent (see docs/SCHEDULED_MAINTENANCE.md). Step 1 is the only
@@ -55,30 +54,21 @@ PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
 BUDGET_SECONDS="${OCBRAIN_PROMOTE_BUDGET_SECONDS:-1800}"
 
-# Which hygiene classes may apply unattended. `expired` and `redundant` are
-# unambiguous — the first acts on an explicit supersession or a passed
-# valid_until, the second only on same-scope restatements above the token
-# threshold, keeping the newest. `unused` and `unhelpful` are heuristics, and
-# `unhelpful` additionally refuses to act until a feedback watermark has been
-# set. `redundant` was missing here, which is why duplicate wiki facts
+# Which hygiene classes may apply unattended. Both are unambiguous: `expired`
+# acts on an explicit supersession or a passed valid_until, `redundant` only on
+# same-scope restatements above the token threshold, keeping the newest.
+# `redundant` was once missing here, which is why duplicate wiki facts
 # accumulated to a quarter of the serving corpus while the loop reported clean.
-HYGIENE_CLASSES="${OCBRAIN_HYGIENE_CLASSES:---class expired --class redundant --class unused --class unhelpful}"
+HYGIENE_CLASSES="${OCBRAIN_HYGIENE_CLASSES:---class expired --class redundant}"
 # Report-only by default. Set OCBRAIN_HYGIENE_APPLY=1 to let it retire beliefs;
 # every retraction is soft and undoable with `ocbrain hygiene --restore`.
 HYGIENE_APPLY="${OCBRAIN_HYGIENE_APPLY:-0}"
 
-# Deslop runs mechanical-only here, so the scheduled loop stays free and
-# deterministic: no hosted call, same findings for the same corpus. Set
-# OCBRAIN_DESLOP_APPLY=1 to let it repair (that DOES make hosted calls, one per
-# repaired belief), and OCBRAIN_DESLOP_JUDGE=1 to add the actionability pass.
-DESLOP_APPLY="${OCBRAIN_DESLOP_APPLY:-0}"
-DESLOP_JUDGE="${OCBRAIN_DESLOP_JUDGE:-0}"
-# Volume eviction is a separate decision from belief repair, and needs its own
-# switch: OCBRAIN_DESLOP_APPLY only ever reached the findings run, so the volume
-# pass could never act however it was set. Evicted rows come back only from
-# `ocbrain sync --full`, which this loop does not run, so it stays off by
-# default.
-DESLOP_VOLUME_APPLY="${OCBRAIN_DESLOP_VOLUME_APPLY:-0}"
+# The deslop steps that used to sit here are gone. Across 155 consecutive
+# hourly runs the belief sweep reported `actionable: 0, repairs: [], judged:
+# false` every single time: the mechanical rules do fire, but as the curator's
+# write-time gate, before a bad claim is ever stored. Re-running them over an
+# already-gated corpus found nothing, by construction.
 
 # Snapshot before mutating. Once per UTC day rather than hourly: the core is
 # ~150MB and this job runs every hour. Uses the SQLite online-backup API, so it
@@ -175,26 +165,7 @@ fi
 "$PY" -m ocbrain.cli "${hygiene_args[@]}" \
   || echo "hygiene step failed; continuing"
 
-# 3. Report knowledge-slop, and the projection volume spent on re-windowed
-# transcripts. Mechanical-only unless the operator opts into the judged pass, so
-# by default this step is free and its findings are reproducible.
-deslop_args=(--db "$DB" deslop)
-if [[ "$DESLOP_JUDGE" != "1" ]]; then
-  deslop_args+=(--mechanical-only)
-fi
-if [[ "$DESLOP_APPLY" == "1" ]]; then
-  deslop_args+=(--apply)
-fi
-"$PY" -m ocbrain.cli "${deslop_args[@]}" \
-  || echo "deslop step failed; continuing"
-deslop_volume_args=(--db "$DB" deslop --volume)
-if [[ "$DESLOP_VOLUME_APPLY" == "1" ]]; then
-  deslop_volume_args+=(--apply)
-fi
-"$PY" -m ocbrain.cli "${deslop_volume_args[@]}" \
-  || echo "deslop volume report failed; continuing"
-
-# 4. Rematerialize the wiki. A full rebuild + atomic swap is what removes pages
+# 3. Rematerialize the wiki. A full rebuild + atomic swap is what removes pages
 # for beliefs retired above; retirements outside a curate run leave orphans until
 # this happens.
 "$PY" - "$DB" "$WIKI_DIR" <<'PYEOF' || echo "wiki rematerialize failed; continuing"
@@ -213,12 +184,12 @@ finally:
     conn.close()
 PYEOF
 
-# 5. Post-condition check on the tree we just wrote. Non-zero means findings, so
+# 4. Post-condition check on the tree we just wrote. Non-zero means findings, so
 # surface them in the log rather than swallowing the exit code.
 "$PY" "$REPO/scripts/wiki-lint.py" "$WIKI_DIR" --db "$DB" \
   || echo "wiki-lint reported findings (see above)"
 
-# 6. Rebuild the dense sidecar so newly promoted facts are semantically findable.
+# 5. Rebuild the dense sidecar so newly promoted facts are semantically findable.
 # Retrieval degrades to lexical-only against a stale sidecar, so a promote that
 # skipped this would leave new knowledge half-reachable.
 "$PY" -m ocbrain.cli --db "$DB" vector-build \
