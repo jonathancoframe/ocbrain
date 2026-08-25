@@ -40,7 +40,8 @@ Ordinary clients may:
 - search, digest, or fetch a serving object through lifecycle/scope gates;
 - report retrieval usefulness;
 - append narrowly scoped evidence;
-- append an outcome closeout.
+- append an outcome closeout;
+- supersede one serving belief they have proved wrong, within the limits below.
 
 Ordinary clients may not directly promote belief, widen scope, call hosted
 models, start training, schedule maintenance, page an operator, or perform a
@@ -50,6 +51,33 @@ The admin profile adds local correction, proposal-decision, preview, and
 tombstone controls. Admin mode is explicit and local. It still does not imply
 authority for hosted egress, training, scheduling, package publication, or an
 external side effect.
+
+## Agent supersession
+
+Supersession is a **named, scope-bound, rate-limited correction**. It is not
+unattended promotion, and the distinction is what makes it safe to put in the
+runtime profile:
+
+- **Named.** Every supersession records the calling actor, the server-minted
+  connection id, and the harness-attested session hint on both the correction
+  event and its evidence. An anonymous supersession is not possible.
+- **Scope-bound.** The replacement inherits the superseded belief's scope
+  byte-for-byte. There is no argument, and no configuration, that lets a
+  supersession widen reach or move a fact into doctrine. Promotion remains a
+  separate `scope_promoted` event with a named approver.
+- **Bounded in authority.** Confidence is capped at `min(old, 0.7)`. A newer
+  claim does not outrank an older one merely by arriving later.
+- **Rate-limited.** A caller has a bounded number of direct supersessions per
+  24 hours. Overflow is routed to review, never refused: an agent always has
+  somewhere to put a correction.
+- **Reviewed where it matters.** Doctrine and pinned beliefs are never replaced
+  unattended. Those become an undecided proposal that only `brain.proposal_decide`
+  can complete, and `brain.digest` reports the queue depth so it cannot silently
+  accumulate. An operator may route *every* supersession to review with
+  `OCBRAIN_SUPERSEDE_TIER=pending_all`.
+- **Additive.** Nothing is deleted. The superseded belief keeps its body, its
+  evidence, its feedback, and its retrieval history; only its service stops, and
+  its era is stamped so a reader can tell what was true when.
 
 ## Scope and privacy
 

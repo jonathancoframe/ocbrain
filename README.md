@@ -307,7 +307,7 @@ verification; it is not training data.
 
 ## MCP profiles
 
-The default runtime profile has eight tools:
+The default runtime profile has nine tools:
 
 - `brain.context` — stable `ocbrain.context.v1` packet with coverage,
   exclusions, contradictions, and source handles;
@@ -317,10 +317,13 @@ The default runtime profile has eight tools:
   helpers;
 - `brain.feedback` — retrieval usefulness only;
 - `brain.ingest` — narrowly scoped evidence, never direct belief promotion;
-- `brain.closeout` — append-only `ocbrain.closeout.v1` outcome receipt.
+- `brain.closeout` — append-only `ocbrain.closeout.v1` outcome receipt;
+- `brain.supersede` — replace one serving belief with a corrected one, in its
+  own scope, atomically. The only runtime write that changes what is served,
+  and the only correction shape that does not subtract from the corpus.
 
 The admin profile adds six more: preview, egress preview, durable correction,
-proposal decision, proposal listing, and the tombstone control. Fourteen tools
+proposal decision, proposal listing, and the tombstone control. Fifteen tools
 is the whole surface. There is no hosted teacher, training, or scheduler tool,
 and `brain.mark_stale` is gone — it was published for two years and could never
 be dispatched, because `tools_for_profile` returned it for no profile.

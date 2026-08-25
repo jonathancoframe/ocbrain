@@ -179,24 +179,32 @@ them.
 The runtime profile is the ordinary agent surface:
 
 ```text
-brain.context  brain.source  brain.search  brain.digest
-brain.get      brain.feedback brain.ingest brain.closeout
+brain.context  brain.source  brain.search     brain.digest
+brain.get      brain.feedback brain.ingest    brain.closeout
+brain.supersede
 ```
 
-Runtime writes are narrow and append-only: evidence, retrieval feedback, and
-task outcome receipts. They do not directly promote a durable belief.
+Runtime writes are narrow and append-only: evidence, retrieval feedback, task
+outcome receipts, and one correction shape. They do not directly promote a
+durable belief.
+
+`brain.supersede` is the exception that proves the rule. It compiles a
+replacement belief, so it looks like promotion — but it can only replace a
+belief that is already serving, only inside that belief's own scope, only at
+`min(old_confidence, 0.7)`, and only a bounded number of times per caller per
+day. Doctrine, pinned beliefs, and rate-cap overflow route to an undecided
+proposal instead, which only the admin profile can decide. There is no path
+through it that widens scope or creates a belief where none existed.
 
 The admin profile adds local preview, egress preview, proposal listing/decision,
-correction, and tombstone tools — fourteen tools in total. `--allow-writes` is a
+correction, and tombstone tools — fifteen tools in total. `--allow-writes` is a
 deprecated alias for this profile, not a no-op. Hosted teacher, training, and
 watchdog controls are not core MCP tools.
 
 `brain.mark_stale` was published in the tool list and is gone. It was
 undispatchable: `tools_for_profile` returns `RUNTIME_TOOLS` for the runtime
 profile and `RUNTIME_TOOLS | ADMIN_ONLY_TOOLS` for admin, and `brain.mark_stale`
-was in neither set, so every call reached the unknown-tool branch. Supersession
-is done with `ocbrain hygiene --supersede`, which the `expired` class then acts
-on.
+was in neither set, so every call reached the unknown-tool branch.
 
 ## 8. One distribution
 
