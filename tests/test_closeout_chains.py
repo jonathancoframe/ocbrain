@@ -190,10 +190,28 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
     conn = connect(path)
     init_core_v1(conn)
     # Simulate the pre-chain shape by dropping the columns from a fresh core.
+    #
+    # The triggers have to come off first and go back on after. SQLite re-parses
+    # every schema entry that references a table when a column is dropped, and
+    # builds older than the one this was written on reject the append-only
+    # triggers during that pass ("error in table task_closeouts after drop
+    # column: incomplete input"). Dropping a column is only a fixture detail
+    # here, so the test must not depend on which SQLite the runner ships.
     conn.execute("DROP INDEX IF EXISTS idx_task_closeouts_chain")
+    triggers = [
+        row[0]
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='task_closeouts'"
+        )
+        if row[0]
+    ]
+    for name in ("task_closeouts_no_update", "task_closeouts_no_delete"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
     for column in ("parent_closeout_id", "task_ref_norm"):
         conn.execute(f"ALTER TABLE task_closeouts DROP COLUMN {column}")
     conn.execute("ALTER TABLE retrieval_uses DROP COLUMN task_ref_norm")
+    for statement in triggers:
+        conn.execute(statement)
     conn.execute(
         """
         INSERT INTO task_closeouts (
