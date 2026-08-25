@@ -7,7 +7,7 @@
       "hermes": "full: per-profile state.db assistant.tool_calls + tool-role results",
       "hermes-legacy": "partial: export JSONL records the tool name but not its arguments"
     },
-    "cache_path": "/private/tmp/claude-501/-Users-jonathancoframe/3ebe3a24-6162-4af2-a4ee-4e8c1de121f7/scratchpad/traces.jsonl",
+    "cache_path": "<path:tmp:jsonl>",
     "cursor_shortfall": {
       "files": 5,
       "messages": 226,
@@ -1316,7 +1316,7 @@
         "hermes": 2177
       },
       "calls": 2177,
-      "claim": "`tool:process` fails 644 of 2177 calls (30%) across 97 sessions; the dominant failure class is `error` (644). Most common message (33x): \"{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat\". The recurring next move is `bash:ssh -o <chain>` (29 times, succeeding 97%).",
+      "claim": "`tool:process` fails 644 of 2177 calls (30%) across 97 sessions; the dominant failure class is `error` (644). Most common message (33x): \"{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"<ip>\\\"; user=\\\"<user>\\\"; keys=[\\\"<pat\". The recurring next move is `bash:ssh -o <chain>` (29 times, succeeding 97%).",
       "dominant_failure_class": "error",
       "failure_rate": 0.296,
       "failures": 644,
@@ -1332,7 +1332,7 @@
       "top_errors": [
         {
           "count": 33,
-          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat"
+          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"<ip>\\\"; user=\\\"<user>\\\"; keys=[\\\"<pat"
         },
         {
           "count": 17,
@@ -3457,7 +3457,7 @@
       "top_errors": [
         {
           "count": 33,
-          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"10.23.15.216\\\"; user=\\\"jonathan_coframe_com\\\"; keys=[\\\"<pat"
+          "message": "{\"status\": \"timeout\", \"command\": \"uv run --with paramiko python -c 'import paramiko,time,sys; host=\\\"<ip>\\\"; user=\\\"<user>\\\"; keys=[\\\"<pat"
         },
         {
           "count": 17,
