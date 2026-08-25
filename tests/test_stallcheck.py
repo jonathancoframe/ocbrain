@@ -833,7 +833,7 @@ def test_mcp_retries_on_database_locked(monkeypatch):
 
     calls = {"n": 0}
 
-    def flaky_call_tool(conn, params, *, profile="runtime"):
+    def flaky_call_tool(conn, params, *, profile="runtime", provenance=None):
         calls["n"] += 1
         if calls["n"] < 3:
             raise sqlite3.OperationalError("database is locked")
@@ -854,7 +854,7 @@ def test_mcp_retries_on_database_locked(monkeypatch):
 def test_mcp_reraises_after_exhausting_retries(monkeypatch):
     from ocbrain import mcp
 
-    def always_locked(conn, params, *, profile="runtime"):
+    def always_locked(conn, params, *, profile="runtime", provenance=None):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(mcp, "call_tool", always_locked)
@@ -868,7 +868,7 @@ def test_mcp_non_lock_error_not_retried(monkeypatch):
 
     calls = {"n": 0}
 
-    def other_error(conn, params, *, profile="runtime"):
+    def other_error(conn, params, *, profile="runtime", provenance=None):
         calls["n"] += 1
         raise sqlite3.OperationalError("no such table: widgets")
 

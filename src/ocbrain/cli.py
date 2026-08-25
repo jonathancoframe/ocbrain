@@ -27,6 +27,7 @@ from ocbrain.core_v1 import (
     get_core_v1_evidence,
     init_core_v1,
     is_core_v1,
+    migrate_core_v1_columns,
     record_core_v1_evidence,
     set_automatic_activation,
 )
@@ -1454,6 +1455,8 @@ def scope_for_privacy(project: str | None, privacy_scope: str) -> ScopeTag:
 def open_db(args: argparse.Namespace):
     conn = connect(args.db)
     if is_core_v1(conn):
+        if migrate_core_v1_columns(conn):
+            conn.commit()
         return conn
     has_tables = (
         conn.execute(

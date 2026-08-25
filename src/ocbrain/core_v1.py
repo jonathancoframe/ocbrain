@@ -24,6 +24,7 @@ from typing import Any
 
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.scope import (
     LOCAL_MODEL_TARGET,
     ScopeContext,
@@ -252,10 +253,19 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   feedback_source TEXT,
   feedback_at TEXT,
   served_at TEXT NOT NULL,
-  source_event_id TEXT REFERENCES brain_events(id)
+  source_event_id TEXT REFERENCES brain_events(id),
+  -- Server-observed caller identity. `session_id` above stays the legacy
+  -- model-supplied string; these three are what the process saw for itself.
+  -- See ocbrain.provenance for what each one is worth.
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT,
+  provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_outcome_served
   ON retrieval_uses(outcome, served_at);
+CREATE INDEX IF NOT EXISTS idx_retrieval_uses_session_hint
+  ON retrieval_uses(client_session_hint, served_at);
 
 CREATE TABLE IF NOT EXISTS retrieval_items (
   retrieval_use_id TEXT NOT NULL REFERENCES retrieval_uses(id),
@@ -325,8 +335,16 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   verifier_refs_json TEXT NOT NULL,
   provenance_json TEXT NOT NULL,
   receipt_json TEXT NOT NULL,
-  content_hash TEXT NOT NULL UNIQUE
+  content_hash TEXT NOT NULL UNIQUE,
+  -- Server-observed caller identity, mirrored out of provenance_json so the
+  -- closeout-to-transcript join is a column read. `session_id` above stays the
+  -- legacy model-supplied string. See ocbrain.provenance.
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint
+  ON task_closeouts(client_session_hint, closed_at);
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
   closeout_id TEXT NOT NULL REFERENCES task_closeouts(id),
@@ -453,11 +471,69 @@ def set_automatic_activation(conn: sqlite3.Connection, enabled: bool) -> None:
     )
 
 
+# Columns added to a v1 core after the first release. CORE_V1_SCHEMA uses
+# CREATE TABLE IF NOT EXISTS throughout, so an already-initialized core keeps
+# its original columns forever unless they are added explicitly. Additive and
+# nullable only: no rewrite, no backfill, and an older binary reading a
+# migrated core simply ignores them.
+_ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("retrieval_uses", "server_connection_id", "TEXT"),
+    ("retrieval_uses", "client_session_hint", "TEXT"),
+    ("retrieval_uses", "client_runtime_key", "TEXT"),
+    ("retrieval_uses", "provenance_json", "TEXT"),
+    ("task_closeouts", "server_connection_id", "TEXT"),
+    ("task_closeouts", "client_session_hint", "TEXT"),
+    ("task_closeouts", "client_runtime_key", "TEXT"),
+)
+
+_ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_uses_session_hint "
+    "ON retrieval_uses(client_session_hint, served_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint "
+    "ON task_closeouts(client_session_hint, closed_at)",
+)
+
+
+def migrate_core_v1_columns(conn: sqlite3.Connection) -> list[str]:
+    """Apply the additive column set to an already-initialized v1 core.
+
+    Idempotent and cheap enough to run on every open: it is one
+    ``PRAGMA table_info`` per table when there is nothing to do. Run it there
+    rather than behind a separate migrate command, because the MCP server opens
+    an existing core without calling :func:`init_core_v1` at all, and a write
+    path that referenced a column the running server had never added would fail
+    at the first ``brain.context`` after deploy.
+    """
+    added: list[str] = []
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    by_table: dict[str, set[str]] = {}
+    for table, column, decl in _ADDITIVE_CORE_V1_COLUMNS:
+        if table not in tables:
+            continue
+        if table not in by_table:
+            by_table[table] = {
+                str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+        if column in by_table[table]:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        by_table[table].add(column)
+        added.append(f"{table}.{column}")
+    if added:
+        for statement in _ADDITIVE_CORE_V1_INDEXES:
+            conn.execute(statement)
+    return added
+
+
 def init_core_v1(conn: sqlite3.Connection) -> None:
     """Initialize a fresh v1 core; refuse to layer it over legacy tables."""
     if is_core_v1(conn):
         assert_core_v1_inventory(conn)
         conn.executescript(CORE_V1_SCHEMA)
+        migrate_core_v1_columns(conn)
         return
     existing = [
         str(row[0])
@@ -1957,37 +2033,6 @@ def record_core_v1_evidence(
     return evidence_id, event_id
 
 
-# Runtimes self-report a free-text name, and the same client arrives spelled a
-# dozen ways ("codex-desktop", "Codex desktop", "Codex desktop local macOS").
-# Ungrouped, that makes per-client analytics and feedback aggregation useless.
-# Match the client where one is identifiable and keep the slug otherwise, so an
-# unrecognized runtime stays legible instead of collapsing into "unknown".
-_RUNTIME_CANONICAL_MARKERS: tuple[tuple[str, str], ...] = (
-    ("codex", "codex"),
-    ("cursor", "cursor"),
-    ("claude", "claude-code"),
-    ("hermes", "hermes"),
-    ("telegram", "telegram"),
-)
-
-
-def canonical_runtime(runtime: str | None) -> str | None:
-    """Collapse a self-reported runtime name to a stable slug.
-
-    Returns ``None`` unchanged so "not reported" stays distinct from "reported
-    but unrecognized". The raw value is preserved by callers alongside this.
-    """
-    if runtime is None:
-        return None
-    slug = "-".join(re.findall(r"[a-z0-9]+", runtime.lower()))
-    if not slug:
-        return None
-    for marker, canonical in _RUNTIME_CANONICAL_MARKERS:
-        if marker in slug:
-            return canonical
-    return slug[:64]
-
-
 def record_core_v1_retrieval(
     conn: sqlite3.Connection,
     *,
@@ -1998,13 +2043,24 @@ def record_core_v1_retrieval(
     task_ref: str | None,
     session_id: str | None,
     packet_schema: str = "ocbrain.context.v1",
+    provenance: Provenance | None = None,
 ) -> str:
+    """Append the read receipt for one served packet.
+
+    ``runtime`` and ``session_id`` are recorded verbatim as the model sent them.
+    They used to be run through a ``canonical_runtime`` collapser that guessed
+    which client a free-text string meant; that guess now lives read-side in
+    ``scripts/procmine`` where it belongs, because ``provenance`` carries what
+    the server actually observed and there is nothing left to guess about.
+
+    ``provenance`` is deliberately absent from the ``stable_id`` inputs and from
+    ``context_json``: two identical reads must stay the same read regardless of
+    which connection served them.
+    """
     rows = list(items)
     served_at = now_iso()
-    canonical = canonical_runtime(runtime)
-    if runtime is not None and runtime != canonical:
-        # Keep the operator's exact string; only the indexed column is collapsed.
-        context = {**context, "runtime_raw": runtime}
+    prov = provenance or EMPTY_PROVENANCE
+    prov_payload = prov.to_dict()
     retrieval_id = stable_id(
         "ret",
         served_at,
@@ -2018,12 +2074,14 @@ def record_core_v1_retrieval(
         """
         INSERT INTO retrieval_uses(
           id, served_to_runtime, task_ref, outcome, query_text, served_ids_json,
-          context_json, packet_schema, session_id, served_at
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?)
+          context_json, packet_schema, session_id, served_at,
+          server_connection_id, client_session_hint, client_runtime_key,
+          provenance_json
+        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
-            canonical,
+            runtime,
             task_ref,
             query,
             canonical_json(
@@ -2033,6 +2091,10 @@ def record_core_v1_retrieval(
             packet_schema,
             session_id,
             served_at,
+            prov.server_connection_id,
+            prov.client_session_hint,
+            prov.client_runtime_key,
+            canonical_json(prov_payload) if prov_payload else None,
         ),
     )
     for rank, item in enumerate(rows):
@@ -2344,6 +2406,7 @@ __all__ = [
     "get_core_v1_evidence",
     "init_core_v1",
     "is_core_v1",
+    "migrate_core_v1_columns",
     "project_core_v1",
     "rebuild_core_v1_search",
     "record_core_v1_evidence",

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Capture caller identity at the server rather than accepting the model's word
+  for it. Runtime and session were free text a model typed into `context`: 129
+  distinct `served_to_runtime` spellings, no session id at all on 44.7% of
+  retrievals and 37.4% of closeouts, and 13 closeouts that identity-join to a
+  transcript. `initialize` now mints a per-connection UUID and reads the MCP
+  child's own environment, and that value is threaded through `tools/call` and
+  `resources/read` — which never received the session state at all — down to
+  every write path. Three identities are stored separately, because only one of
+  them can be trusted and the row should say which: `server_connection_id`
+  (server-minted, authoritative, names a connection and not a conversation),
+  `client_session_hint` (`OCBRAIN_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`;
+  harness-attested and never server-verified — its stability across `/resume`,
+  `/clear` and compaction is unverified, and a Claude Code subagent inherits its
+  parent's value), and `client_runtime_key` (`OCBRAIN_CLIENT`, else `AI_AGENT`,
+  else the handshake `clientInfo.name`, with the winning source recorded). The
+  model-supplied `context.session` and `context.runtime` keep their columns and
+  are now recorded verbatim: `canonical_runtime` and the
+  `context_json["runtime_raw"]` side-channel are gone from the write path, and
+  the folder moves to `scripts/procmine/runtimes.py` where the historical corpus
+  still needs it. Provenance never joins `ScopeContext`, whose `to_dict()` feeds
+  the retrieval `stable_id`. Columns are additive and nullable, applied wherever
+  a core is opened including `serve()`; `task_closeouts` is append-only, so
+  there is no backfill and existing rows are untouched. Two connections writing
+  a byte-identical closeout now produce two receipts instead of colliding on the
+  UNIQUE `content_hash`.
+
 - Curate every configured project scope, not one pinned project. The curator
   compiled whichever single project the promote script pinned, which on one real
   brain reached 5 of 574 curator-eligible objects while 535 closeout summaries

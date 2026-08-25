@@ -26,6 +26,7 @@ from ocbrain.core_v1 import (
     CORE_V1_TABLES,
     init_core_v1,
     is_core_v1,
+    migrate_core_v1_columns,
     project_core_v1,
 )
 from ocbrain.db import connect
@@ -196,6 +197,8 @@ def sync_core(
             raise ValueError(
                 "existing database is not an initialized OCBrain ledger; run `ocbrain init` first"
             )
+        elif is_core_v1(conn) and migrate_core_v1_columns(conn):
+            conn.commit()
 
         max_rowid = int(
             conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM brain_events").fetchone()[0]
