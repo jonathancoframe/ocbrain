@@ -96,12 +96,9 @@ def test_golden_context_and_source_contract(
     monkeypatch.delenv("OCBRAIN_VECTOR_DB", raising=False)
     monkeypatch.delenv("OCBRAIN_EMBED_MODEL", raising=False)
     monkeypatch.delenv("OCBRAIN_EMBED_DIMENSIONS", raising=False)
-    # Both sides of the empty-result scope fallback are part of the contract:
-    # the default retry, and the opt-out that keeps strict scope isolation.
-    monkeypatch.setenv(
-        "OCBRAIN_RETRIEVAL_SCOPE_FALLBACK_ENABLED",
-        "true" if case.get("scope_fallback_enabled", True) else "false",
-    )
+    # Every case runs on the shipped default configuration. The contract used to
+    # certify scope isolation by switching a feature off inside the test, which
+    # meant it certified a configuration nobody ran.
     conn = _seed_dataset(tmp_path)
     expected = case["expected"]
     context_response = handle_request(
@@ -124,10 +121,19 @@ def test_golden_context_and_source_contract(
     assert packet["schema_version"] == "ocbrain.context.v1"
     assert packet["core_schema"] == "ocbrain.core.v1"
     assert packet["delivery_target"] == case["delivery_target"]
-    assert packet["cross_scope"] is case["cross_scope"]
+    # Local delivery ranks the whole corpus; hosted delivery still selects by an
+    # explicit scope IN-list. The packet says which, instead of claiming
+    # isolation it does not have.
+    assert packet["retrieval_mode"] == (
+        "ranked" if case["delivery_target"] == "local_model" else "scoped"
+    )
+    assert "cross_scope" not in packet
     assert packet["retrieval_use_status"] == "recorded"
     assert packet["coverage"]["returned"] == len(item_ids)
-    assert packet["coverage"]["excluded_scope_count"] == expected["excluded_scope_count"]
+    # What was actually served, by scope — the histogram that would have caught
+    # the outage the old excluded_scope_count was supposed to describe.
+    assert packet["coverage"]["scope_mix"] == expected["scope_mix"]
+    assert "excluded_scope_count" not in packet["coverage"]
     assert (
         packet["coverage"]["excluded_delivery_count"]
         == expected["excluded_delivery_count"]
@@ -146,9 +152,8 @@ def test_golden_context_and_source_contract(
     assert packet["coverage"]["unavailable_sources"] == []
     if case["delivery_target"] == "hosted_model":
         assert packet["coverage"]["excluded_sample"] == []
-    # A retry across scopes is always declared. Its absence is equally a
-    # contract: a scoped pass that answered must not have widened anything.
-    assert packet["coverage"].get("scope_fallback") == expected.get("scope_fallback")
+    # There is no second retrieval pass to declare any more.
+    assert "scope_fallback" not in packet["coverage"]
 
     if "ids_ordered" in expected:
         assert item_ids == expected["ids_ordered"]
@@ -198,17 +203,24 @@ def test_golden_context_and_source_contract(
     source_project = record["scope"]["scope_id"].removeprefix("project:")
     source_context = {**case["context"], "project": source_project}
     if source_project != case["context"]["project"]:
-        denied_original_scope = handle_request(
+        # A handle issued for a neighbouring project. Hosted delivery still
+        # refuses it; local delivery serves it, because the caller was already
+        # shown the item it belongs to and scope is no longer an access boundary
+        # locally. Confidentiality is, and is proven by the forbidden markers.
+        foreign = handle_request(
             conn,
             _tool_call(
                 "brain.source",
                 {"id": source_handle["id"], "context": case["context"]},
-                request_id=f"source-original-scope-denied:{case['id']}",
+                request_id=f"source-original-scope:{case['id']}",
             ),
             delivery_target=case["delivery_target"],
         )
-        assert denied_original_scope["error"]["code"] == -32001
-        assert "scope does not match" in denied_original_scope["error"]["message"]
+        if expected.get("foreign_source_denied", True):
+            assert foreign["error"]["code"] == -32001
+            assert "scope does not match" in foreign["error"]["message"]
+        else:
+            assert _payload(foreign)["object_id"] == source_item_id
     source = _payload(
         handle_request(
             conn,

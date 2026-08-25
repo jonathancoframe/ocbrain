@@ -184,9 +184,15 @@ def test_exact_lookup_does_not_match_retrieval_use_task_refs(tmp_path):
     assert "match_mode" not in second
 
 
-def test_exact_lookup_respects_scope_and_delivery_gating_for_every_kind(tmp_path):
+def test_exact_locators_resolve_locally_from_any_scope(tmp_path):
+    """An id the caller already holds resolves, whatever project they name.
+
+    Requiring the caller's context to match the record's scope meant an id
+    copied out of a handoff note resolved to nothing, which reads as "no such
+    record" rather than "not yours". Locators are not a discovery channel: the
+    caller cannot guess a stable id they were never given.
+    """
     conn, evidence_id, event_id, receipt = _seed(tmp_path)
-    local_context = ScopeContext(project="ocbrain")
     foreign_context = ScopeContext(project="other-project")
 
     first = _search(conn, receipt["id"])
@@ -202,12 +208,28 @@ def test_exact_lookup_respects_scope_and_delivery_gating_for_every_kind(tmp_path
     )
 
     for locator in locators:
-        assert exact_lookup_v1(conn, locator, context=foreign_context) == []
-        assert exact_lookup_v1(conn, locator, context=ScopeContext()) == []
+        assert exact_lookup_v1(conn, locator, context=foreign_context) != []
+        assert exact_lookup_v1(conn, locator, context=ScopeContext()) != []
 
-    # Closeout and retrieval receipts are local-only. Evidence/event hits still
-    # pass their own egress policies, which this fixture deliberately sets to
-    # local_only.
+
+def test_exact_lookup_still_gates_hosted_delivery_and_confidential_material(tmp_path):
+    conn, evidence_id, event_id, receipt = _seed(tmp_path)
+    local_context = ScopeContext(project="ocbrain")
+
+    first = _search(conn, receipt["id"])
+    locators = (
+        evidence_id,
+        event_id,
+        receipt["id"],
+        receipt["task_ref"],
+        first["retrieval_use_id"],
+        ARTIFACT_URI,
+        ARTIFACT_SHA256,
+    )
+
+    # Closeout and retrieval receipts never leave the machine. Evidence and
+    # event hits still pass their own egress policies, which this fixture
+    # deliberately sets to local_only.
     for locator in locators:
         assert (
             exact_lookup_v1(
@@ -218,6 +240,28 @@ def test_exact_lookup_respects_scope_and_delivery_gating_for_every_kind(tmp_path
             )
             == []
         )
+
+    # Widening reach did not widen confidentiality: a confidential record in
+    # another project stays invisible even to its exact id.
+    confidential_id, confidential_event = record_core_v1_evidence(
+        conn,
+        body="Confidential evidence in a project the caller did not name.",
+        kind="observation",
+        scope=ScopeTag(
+            "project",
+            "project:someone-else",
+            visibility="confidential",
+            egress_policy="local_only",
+        ),
+        writer="test",
+    )
+    conn.commit()
+    foreign_context = ScopeContext(project="other-project")
+    assert exact_lookup_v1(conn, confidential_id, context=foreign_context) == []
+    assert exact_lookup_v1(conn, confidential_event, context=foreign_context) == []
+    # Its own project still reaches it.
+    owner = ScopeContext(project="someone-else")
+    assert exact_lookup_v1(conn, confidential_id, context=owner) != []
 
 
 def test_hosted_exact_lookup_redacts_local_evidence_metadata(tmp_path):
@@ -291,10 +335,40 @@ def test_exact_lookup_inherits_scope_from_a_proposal_event(tmp_path):
     )
     assert matches[0]["id"] == decision_id
     assert matches[0]["kind"] == "event"
+
+    # The decision event carries no scope of its own; it inherits the proposal's.
+    # Make that parent confidential and the child must become unreachable too,
+    # which is what proves the walk is still consulted rather than skipped.
+    confidential_proposal = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "schema_version": "ocbrain.compilation.v1",
+            "scope": ScopeTag(
+                "project",
+                "project:someone-else",
+                visibility="confidential",
+                egress_policy="local_only",
+            ).to_dict(),
+            "subject": {"kind": "belief", "id": "belief:confidential-proposal"},
+        },
+        writer="test",
+    )
+    confidential_decision = append_core_event(
+        conn,
+        "compilation_decided",
+        {
+            "schema_version": "ocbrain.compilation-decision.v1",
+            "subject": {"kind": "proposal", "id": confidential_proposal},
+            "decision": "reject",
+        },
+        writer="test",
+    )
+    conn.commit()
     assert (
         exact_lookup_v1(
             conn,
-            decision_id,
+            confidential_decision,
             context=ScopeContext(project="other-project"),
         )
         == []

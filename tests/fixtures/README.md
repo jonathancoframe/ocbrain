@@ -9,18 +9,30 @@ They intentionally assert semantic outputs—eligible IDs, scope and delivery
 counts, contradictions, source hashes, and denial boundaries—without freezing
 scores, timestamps, receipt IDs, latency, or entire packets.
 
-Cross-scope retrieval is an explicit context-query opt-in whenever the caller's
-own scope can answer. When the scoped pass returns nothing at all, retrieval
-retries once across scopes and declares it in `coverage.scope_fallback`; the
-fixture pins both that retry and the `retrieval.scope_fallback_enabled` opt-out
-that restores strict isolation. The retry widens reach only — the private,
-confidential, and prohibited exclusion cases return empty with the marker
-present, which is what proves the delivery gates are re-applied rather than
-skipped.
+Every case runs on the shipped default configuration. Nothing here is certified
+by switching a feature off inside the test.
 
-An issued foreign source remains scoped: `brain.source` must receive context
-matching that source's project rather than inheriting authority from the handle
-alone.
+For **local** delivery scope ranks rather than filters. `local-ranked-ordering`
+is the case that pins this: two equally-relevant beliefs, one in the caller's
+project and one in a neighbour's, must both be served and the caller's own must
+come first. The same case pins the boundary that did not move — a *confidential*
+belief in that neighbouring project is absent from the packet entirely.
+
+For **hosted** delivery scope is still a filter, and the isolation cases say so.
+`hosted-scope-isolation` and `hosted-cross-scope-param-ignored` both return
+empty for a foreign belief; the second also pins that the deprecated
+`cross_scope` argument no longer widens anything. `hosted-private-exclusion` and
+`hosted-local-only-never-egresses` prove the egress gates: confidential and
+`local_only` material never reaches a hosted model.
+
+`coverage.scope_mix` reports what was actually served, by scope. It replaced
+`excluded_scope_count`, which counted rows a filter dropped and would have read
+zero forever once the filter was gone.
+
+An issued source handle carries no authority of its own. Hosted expansion still
+requires context matching the source's project; local expansion of a
+neighbouring project's handle succeeds, because the caller was already served
+the item it belongs to.
 
 Run the focused gate with:
 

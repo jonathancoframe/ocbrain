@@ -600,22 +600,27 @@ def test_v1_initialize_teaches_the_shared_context_closeout_contract(tmp_path):
 
 def test_v1_get_enforces_scope_and_context_does_not_ignore_at_ts(tmp_path):
     conn = _seed_v1(tmp_path)
-    denied = handle_request(
-        conn,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "brain.get",
-                "arguments": {
-                    "id": "belief:shared-context",
-                    "context": {"project": "bountiful"},
+    # Locally, a belief fetched by its exact id resolves from any project. The
+    # caller already holds the id, and scope is a ranking signal rather than an
+    # access boundary for local delivery.
+    from_another_project = _payload(
+        handle_request(
+            conn,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "brain.get",
+                    "arguments": {
+                        "id": "belief:shared-context",
+                        "context": {"project": "bountiful"},
+                    },
                 },
             },
-        },
+        )
     )
-    assert "scope does not match" in denied["error"]["message"]
+    assert from_another_project["canonical_id"] == "belief:shared-context"
 
     allowed = _payload(
         handle_request(

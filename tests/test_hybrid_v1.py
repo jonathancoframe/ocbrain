@@ -768,7 +768,7 @@ def test_context_reports_scope_and_delivery_inventory_without_leaking_hosted_sam
     )
 
     assert packet["items"] == []
-    assert packet["coverage"]["excluded_scope_count"] == 1
+    assert packet["coverage"]["scope_mix"] == {}
     assert packet["coverage"]["excluded_delivery_count"] == 2
     assert packet["coverage"]["exclusion_count_basis"] == "current_serving_inventory"
     assert packet["coverage"]["ranking"]["eligible_count"] == 1
@@ -820,11 +820,13 @@ def test_sql_prefilters_match_global_and_client_scope_semantics(tmp_path: Path) 
     assert [item["id"] for item in exact_client["items"]] == [
         "curated:global:alternate"
     ]
-    assert exact_client["coverage"]["excluded_scope_count"] == 0
+    assert exact_client["coverage"]["scope_mix"] == {"global:alternate": 1}
     assert exact_client["coverage"]["excluded_delivery_count"] == 1
     assert exact_client["coverage"]["ranking"]["eligible_count"] == 1
     assert "PRIVATE_CLIENT_SCOPE_SENTINEL" not in json.dumps(exact_client)
 
+    # ``cross_scope`` is accepted and ignored. Hosted delivery keeps its scope
+    # IN-list either way, so a foreign caller still sees only global material.
     cross_scope, _handles = build_context_v1(
         conn,
         "Scope SQL sentinel private client",
@@ -836,7 +838,7 @@ def test_sql_prefilters_match_global_and_client_scope_semantics(tmp_path: Path) 
     assert [item["id"] for item in cross_scope["items"]] == [
         "curated:global:alternate"
     ]
-    assert cross_scope["coverage"]["excluded_scope_count"] == 1
+    assert cross_scope["coverage"]["scope_mix"] == {"global:alternate": 1}
     assert cross_scope["coverage"]["excluded_delivery_count"] == 0
     assert cross_scope["coverage"]["ranking"]["eligible_count"] == 1
     assert "PRIVATE_CLIENT_SCOPE_SENTINEL" not in json.dumps(cross_scope)

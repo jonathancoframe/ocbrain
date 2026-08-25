@@ -154,88 +154,25 @@ def auto_compile_evidence(
     return belief_id
 
 
-def _scope_fallback_enabled() -> bool:
-    """Whether an empty scoped pass may retry across scopes.
-
-    Fails open to the shipped default: a malformed config must not decide a
-    serving policy by accident.
-    """
-    try:
-        return bool(load_config().retrieval.scope_fallback_enabled)
-    except Exception:  # noqa: BLE001 - config problems must not break serving
-        return True
-
-
 def build_context_v1(
     conn: sqlite3.Connection,
     query: str,
     *,
     context: ScopeContext,
     limit: int,
-    cross_scope: bool,
+    cross_scope: bool = False,
     delivery_target: str = LOCAL_MODEL_TARGET,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Build one context packet, retrying across scopes only when it is empty.
+    """Build one context packet. One retrieval, one ranking, no retry.
 
-    ``cross_scope`` is an opt-in almost no caller knows to send, so a query the
-    brain could answer from a neighbouring project abstained instead. When the
-    scoped pass returns nothing at all, run it once more across scopes and say so
-    in ``coverage.scope_fallback``.
+    Local retrieval ranks the whole serving corpus by scope affinity, so there is
+    no narrower pass that could come back empty and need widening. The empty-case
+    retry this used to run existed only to patch a filter that no longer exists;
+    it fired on 6.75% of queries and cost a second full retrieval to recover a
+    fraction of what the filter had discarded.
 
-    This is a reach change, not a quality change. The second pass is the same
-    primitive with the same floors, redundancy filter, and dedup; it widens which
-    rows are candidates and nothing else. There is no merge: a scoped pass that
-    returned anything is returned untouched, so scoped results are never diluted.
-    When the retry is also empty, the caller gets the scoped packet's own
-    accounting rather than the wider pass's, because that is the accounting that
-    describes their scope.
-    """
-    packet, handles = _context_pass(
-        conn,
-        query,
-        context=context,
-        limit=limit,
-        cross_scope=cross_scope,
-        delivery_target=delivery_target,
-    )
-    if packet["items"] or cross_scope or not _scope_fallback_enabled():
-        return _enforce_context_packet_limit(packet, handles)
-    coverage = packet["coverage"]
-    fallback = {
-        "mode": "cross_scope_auto",
-        "first_pass_eligible_count": int(coverage["ranking"].get("eligible_count") or 0),
-        "first_pass_excluded_scope_count": int(coverage.get("excluded_scope_count") or 0),
-    }
-    wider, wider_handles = _context_pass(
-        conn,
-        query,
-        context=context,
-        limit=limit,
-        cross_scope=True,
-        delivery_target=delivery_target,
-    )
-    if wider["items"]:
-        # Keep reporting what the CALLER asked for; the retry is coverage detail,
-        # not a rewrite of their request.
-        wider["cross_scope"] = bool(cross_scope)
-        packet, handles = wider, wider_handles
-    packet["coverage"]["scope_fallback"] = fallback
-    return _enforce_context_packet_limit(packet, handles)
-
-
-def _context_pass(
-    conn: sqlite3.Connection,
-    query: str,
-    *,
-    context: ScopeContext,
-    limit: int,
-    cross_scope: bool,
-    delivery_target: str = LOCAL_MODEL_TARGET,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One retrieval pass, packaged but not yet budgeted.
-
-    The packet-limit enforcement is deliberately left to the caller so a
-    fallback marker can be added before the byte accounting is settled.
+    ``cross_scope`` is accepted and ignored, so the five live clients that pass
+    it keep working unchanged. It is deprecated in the tool schema.
     """
     _require_v1(conn)
     delivery_target = normalize_delivery_target(delivery_target)
@@ -300,13 +237,25 @@ def _context_pass(
             }
         )
     handles = _dedupe_handles(handles)
+    # Recomputed from what survived delivery gating rather than reusing the
+    # ranker's mix, so the histogram describes the packet the caller is holding.
+    scope_mix: dict[str, int] = {}
+    for item in items:
+        scope_id = str((item.get("scope") or {}).get("scope_id") or "unknown")
+        scope_mix[scope_id] = scope_mix.get(scope_id, 0) + 1
     packet = {
         "schema_version": CONTEXT_SCHEMA_VERSION,
         "core_schema": CORE_V1_SCHEMA_VERSION,
         "delivery_target": delivery_target,
         "query": query[:MAX_CONTEXT_QUERY_CHARS],
         "resolved_context": context.to_dict(),
-        "cross_scope": bool(cross_scope),
+        # Local packets are ranked over the whole corpus; hosted packets are
+        # still selected by an explicit scope IN-list. Saying which one produced
+        # this packet is honest in a way that ``cross_scope: false`` was not,
+        # since that claimed isolation on packets holding cross-scope items.
+        "retrieval_mode": (
+            "ranked" if delivery_target == LOCAL_MODEL_TARGET else "scoped"
+        ),
         "at_ts": None,
         "items": items,
         "contradictions": _explicit_contradictions(conn, items),
@@ -314,7 +263,7 @@ def _context_pass(
             "requested_limit": limit,
             "returned": len(items),
             "feedback_needed": len(items) > 0,
-            "excluded_scope_count": int(raw.get("excluded_count") or 0),
+            "scope_mix": scope_mix,
             "excluded_delivery_count": (
                 int(raw.get("delivery_excluded_count") or 0) + delivery_excluded
             ),
@@ -332,7 +281,7 @@ def _context_pass(
             "ranking": dict(raw.get("ranking") or {}),
         },
     }
-    return packet, handles
+    return _enforce_context_packet_limit(packet, handles)
 
 
 def record_context_v1(
@@ -543,33 +492,15 @@ def exact_lookup_v1(
         )
 
     def _stored_context_allowed(raw: Any, *, task_ref: str | None = None) -> bool:
-        if delivery_target != LOCAL_MODEL_TARGET:
-            return False
-        try:
-            stored = json.loads(str(raw or "{}"))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return False
-        if not isinstance(stored, dict):
-            return False
-        if not any(
-            (
-                context.project,
-                context.repo,
-                context.client,
-                context.task,
-                context.session,
-            )
-        ):
-            return False
-        if (
-            context.session
-            and not any((context.project, context.repo, context.client, context.task))
-        ):
-            return str(stored.get("session") or "") == context.session
-        return _closeout_matches_context(
-            {"context": stored, "task_ref": task_ref},
-            context,
-        )
+        """Closeouts and retrieval receipts resolve by exact id, locally.
+
+        Asking for ``close_abc123`` by its id is not a topical search that might
+        stray into someone else's material: the caller already holds the
+        identifier. Requiring their live context to match the one stored on the
+        record meant a receipt id copied out of a handoff note resolved to
+        nothing. Hosted delivery still never sees these records.
+        """
+        return delivery_target == LOCAL_MODEL_TARGET
 
     def _event_scope_allowed(
         event: sqlite3.Row,

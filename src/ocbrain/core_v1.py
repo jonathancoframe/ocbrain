@@ -24,7 +24,13 @@ from typing import Any
 
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
-from ocbrain.scope import ScopeContext, ScopeTag, matching_stored_scope_ids, scope_match
+from ocbrain.scope import (
+    LOCAL_MODEL_TARGET,
+    ScopeContext,
+    ScopeTag,
+    scope_affinity,
+    scope_match,
+)
 
 CORE_V1_APPLICATION_ID = 0x4F434231  # ASCII-ish "OCB1"
 CORE_V1_USER_VERSION = 10_000
@@ -1596,30 +1602,34 @@ def search_core_v1(
     cross_scope: bool = False,
     delivery_target: str = "local_model",
 ) -> dict[str, Any]:
-    """Return scope-safe hybrid lexical/dense retrieval for ``ocbrain.context.v1``.
+    """Return hybrid lexical/dense retrieval for ``ocbrain.context.v1``.
 
     Dense vectors are a disposable loopback-only sidecar.  If it is absent or
     local inference is unavailable, retrieval remains deterministic and
-    lexical.  Lifecycle, scope, visibility, and delivery policy are applied
-    before either candidate list is ranked.
+    lexical.  Lifecycle, visibility, and delivery policy are applied before
+    either candidate list is ranked.
+
+    For LOCAL delivery scope ranks rather than selects: the whole serving corpus
+    is a candidate and ``scope_affinity`` decides the order. Hosted delivery
+    keeps its scope IN-list, because leaving the machine is a different question
+    from being relevant.
+
+    ``cross_scope`` is accepted and ignored. It is retained so that live callers
+    passing it keep working; there is no longer a narrower mode for it to widen.
     """
     context = context or ScopeContext()
     fts = _normalize_fts_query(query)
-    # Stored scope ids are immutable, so the caller's canonical spelling is not
-    # enough on its own: widen the IN-list to the stored spellings that resolve
-    # to a scope this caller already names. Purely a reach change — every gate
-    # below still applies to whatever the wider prefilter admits.
-    compatible = matching_stored_scope_ids(
-        conn, "current_beliefs", context.compatible_scope_ids()
-    )
-    placeholders = ",".join("?" for _ in compatible)
-    scope_sql = f"(cb.scope_type='global' OR cb.scope_id IN ({placeholders}))"
-    scope_params: list[Any] = list(compatible)
-    if cross_scope:
-        scope_sql = (
-            f"({scope_sql} OR (cb.scope_type NOT IN ('legacy_unscoped','client') "
-            "AND cb.visibility NOT IN ('confidential','secret')))"
-        )
+    if delivery_target == LOCAL_MODEL_TARGET:
+        # No scope prefilter. Scoping the SQL dropped, on average, 3.8 relevant
+        # beliefs per query that the caller was entitled to read, and the
+        # ranking prior already keeps neighbouring scopes in the tail.
+        scope_sql = "1"
+        scope_params: list[Any] = []
+    else:
+        compatible = sorted(context.compatible_scope_ids())
+        placeholders = ",".join("?" for _ in compatible)
+        scope_sql = f"(cb.scope_type='global' OR cb.scope_id IN ({placeholders}))"
+        scope_params = list(compatible)
     delivery_sql = _delivery_sql(delivery_target)
     visibility_counts = _serving_visibility_counts(
         conn,
@@ -1751,7 +1761,7 @@ def search_core_v1(
         return {
             "items": [],
             "excluded": [],
-            "excluded_count": visibility_counts["excluded_scope_count"],
+            "scope_mix": {},
             "delivery_excluded_count": visibility_counts["excluded_delivery_count"],
             "exclusion_count_basis": "current_serving_inventory",
             "ranking": {
@@ -1810,8 +1820,15 @@ def search_core_v1(
             egress_policy=str(row["egress_policy"]),
             provenance=str(row["scope_provenance"]),
         )
-        scope_weight = scope_match(scope, context, cross_scope=cross_scope)
+        if delivery_target == LOCAL_MODEL_TARGET:
+            scope_weight = scope_affinity(scope, context)
+        else:
+            scope_weight = scope_match(scope, context, cross_scope=cross_scope)
         if scope_weight == 0:
+            # Locally this fires for one reason only: confidential or secret
+            # material whose scope the caller did not name. Being in a different
+            # scope no longer scores zero, so this is a visibility gate, not a
+            # relevance one. Removing it would serve confidential rows.
             continue
         attributes = json.loads(row["attributes_json"] or "{}")
         confidence = float(row["confidence"] if row["confidence"] is not None else 0.65)
@@ -1878,10 +1895,19 @@ def search_core_v1(
         items.append(item)
         if len(items) >= limit:
             break
+    # What was actually served, by scope. This replaces the old
+    # ``excluded_scope_count``, which counted rows the scope filter dropped and
+    # so reported 0 forever once the filter was gone. The mix is the signal that
+    # would have caught the outage it was meant to describe: a packet that has
+    # silently stopped containing the caller's own project shows up here.
+    scope_mix: dict[str, int] = {}
+    for item in items:
+        scope_id = str((item.get("scope") or {}).get("scope_id") or "unknown")
+        scope_mix[scope_id] = scope_mix.get(scope_id, 0) + 1
     return {
         "items": items,
         "excluded": [],
-        "excluded_count": visibility_counts["excluded_scope_count"],
+        "scope_mix": scope_mix,
         "delivery_excluded_count": visibility_counts["excluded_delivery_count"],
         "exclusion_count_basis": "current_serving_inventory",
         "ranking": {
@@ -2102,9 +2128,14 @@ def _serving_visibility_counts(
 ) -> dict[str, int]:
     """Partition current serving inventory without exposing excluded objects.
 
-    These counts describe the scope and delivery gates before query ranking.
-    They are intentionally query-independent so an empty or unmatched query
-    still reports whether the supplied context can see any serving inventory.
+    These counts describe the delivery gate before query ranking. They are
+    intentionally query-independent so an empty or unmatched query still reports
+    whether the supplied context can see any serving inventory.
+
+    There is no ``excluded_scope_count`` here any more. Local delivery has no
+    scope prefilter to exclude anything, so the number was a constant zero
+    dressed up as a measurement; ``scope_mix`` reports what was actually served
+    instead.
     """
     row = conn.execute(
         f"""
@@ -2116,8 +2147,6 @@ def _serving_visibility_counts(
           WHERE cb.serve=1 AND cb.status='current'
         )
         SELECT
-          COALESCE(SUM(CASE WHEN scope_allowed=0 THEN 1 ELSE 0 END), 0)
-            AS excluded_scope_count,
           COALESCE(SUM(CASE WHEN scope_allowed=1 AND delivery_allowed=0 THEN 1 ELSE 0 END), 0)
             AS excluded_delivery_count,
           COALESCE(SUM(CASE WHEN scope_allowed=1 AND delivery_allowed=1 THEN 1 ELSE 0 END), 0)
@@ -2127,7 +2156,6 @@ def _serving_visibility_counts(
         scope_params,
     ).fetchone()
     return {
-        "excluded_scope_count": int(row["excluded_scope_count"]),
         "excluded_delivery_count": int(row["excluded_delivery_count"]),
         "eligible_count": int(row["eligible_count"]),
     }
