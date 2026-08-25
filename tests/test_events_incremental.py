@@ -51,8 +51,8 @@ _SCOPES = [
     global_scope(),
     ScopeTag("project", "project:bountiful", visibility="internal", egress_policy="hosted_ok"),
     ScopeTag(
-        "personal_finance",
-        "personal_finance:pelican",
+        "client",
+        "client:bihua",
         visibility="confidential",
         egress_policy="local_only",
     ),

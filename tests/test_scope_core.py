@@ -34,8 +34,8 @@ def seeded_scoped_core(tmp_path: Path):
         conn,
         body="Pelican options strategy references theta decay and position sizing.",
         scope=ScopeTag(
-            "personal_finance",
-            "personal_finance:pelican",
+            "project",
+            "project:pelican",
             visibility="confidential",
             egress_policy="local_only",
         ),
@@ -76,8 +76,8 @@ def seeded_scoped_core(tmp_path: Path):
         body="Pelican has options-trading beliefs about theta decay.",
         evidence_ids=["evd:pelican-options"],
         scope=ScopeTag(
-            "personal_finance",
-            "personal_finance:pelican",
+            "project",
+            "project:pelican",
             visibility="confidential",
             egress_policy="local_only",
         ),
@@ -206,8 +206,8 @@ def test_contradiction_ranking_respects_scope_boundaries(tmp_path: Path) -> None
         body="Pelican does not deploy on Fly for production.",
         evidence_ids=["evd:pelican-not-fly"],
         scope=ScopeTag(
-            "personal_finance",
-            "personal_finance:pelican",
+            "project",
+            "project:pelican",
             visibility="confidential",
         ),
         confidence=0.8,
@@ -227,7 +227,7 @@ def test_contradiction_ranking_respects_scope_boundaries(tmp_path: Path) -> None
 
     assert frozenset({"belief:bountiful-fly", "belief:bountiful-not-fly"}) in pairs
     assert all(
-        "personal_finance:pelican" not in json.dumps(item) for item in payload["contradictions"]
+        "project:pelican" not in json.dumps(item) for item in payload["contradictions"]
     )
     assert payload["contradictions"][0]["score"] >= payload["contradictions"][-1]["score"]
 
@@ -245,7 +245,7 @@ def test_hosted_egress_excludes_confidential_and_redacts_secrets(tmp_path: Path)
     rejected_ids = {item["scope"]["scope_id"] for item in payload["rejected"]}
 
     assert "client:bihua" in rejected_ids
-    assert "personal_finance:pelican" in rejected_ids
+    assert "project:pelican" in rejected_ids
     assert "sk-123456789012345678901234" not in included_text
     assert payload["audit_id"].startswith("egress_")
     assert conn.execute("SELECT COUNT(*) FROM egress_audits").fetchone()[0] == 1

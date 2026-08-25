@@ -172,7 +172,6 @@ CREATE TABLE IF NOT EXISTS evidence_objects (
   source_uri TEXT,
   artifact_uri TEXT,
   artifact_hash TEXT,
-  verifier_status TEXT,
   occurred_at TEXT,
   recorded_at TEXT NOT NULL,
   scope_type TEXT NOT NULL,
@@ -870,7 +869,6 @@ def _project_recorded_evidence(
         source_uri=body.get("artifact_ref"),
         artifact_uri=body.get("artifact_ref"),
         artifact_hash=None,
-        verifier_status="unknown",
         occurred_at=event["ts"],
         recorded_at=event["ts"],
         scope=scope,
@@ -1069,7 +1067,6 @@ def _project_legacy_evidence(
         source_uri=row.get("source_uri"),
         artifact_uri=row.get("artifact_uri"),
         artifact_hash=row.get("artifact_hash"),
-        verifier_status=row.get("verifier_status"),
         occurred_at=row.get("occurred_at"),
         recorded_at=str(row.get("ingested_at") or event["ts"]),
         scope=scope,
@@ -1370,7 +1367,6 @@ def _upsert_evidence_object(
     source_uri: str | None,
     artifact_uri: str | None,
     artifact_hash: str | None,
-    verifier_status: str | None,
     occurred_at: str | None,
     recorded_at: str,
     scope: dict[str, Any],
@@ -1392,10 +1388,10 @@ def _upsert_evidence_object(
         INSERT INTO evidence_objects(
           evidence_id, body, body_head, kind, content_hash, source_content_hash,
           source_type, source_runtime,
-          source_uri, artifact_uri, artifact_hash, verifier_status, occurred_at,
+          source_uri, artifact_uri, artifact_hash, occurred_at,
           recorded_at, scope_type, scope_id, visibility, egress_policy,
           scope_provenance, metadata_json, recorded_event_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(evidence_id) DO UPDATE SET
           body_head=COALESCE(excluded.body_head, evidence_objects.body_head),
           source_type=COALESCE(excluded.source_type, evidence_objects.source_type),
@@ -1403,7 +1399,6 @@ def _upsert_evidence_object(
           source_uri=COALESCE(excluded.source_uri, evidence_objects.source_uri),
           artifact_uri=COALESCE(excluded.artifact_uri, evidence_objects.artifact_uri),
           artifact_hash=COALESCE(excluded.artifact_hash, evidence_objects.artifact_hash),
-          verifier_status=COALESCE(excluded.verifier_status, evidence_objects.verifier_status),
           source_content_hash=COALESCE(
             excluded.source_content_hash, evidence_objects.source_content_hash
           ),
@@ -1428,7 +1423,6 @@ def _upsert_evidence_object(
             source_uri,
             artifact_uri,
             artifact_hash,
-            verifier_status,
             occurred_at,
             recorded_at,
             *_scope_values(scope),

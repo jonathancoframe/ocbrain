@@ -206,7 +206,7 @@ def resolve_selection_policy(
     elif allow_hosted_egress and "approval_required" not in egress_policies:
         egress_policies = (*egress_policies, "approval_required")
     if visibilities is None:
-        visibilities = ("public", "internal")
+        visibilities = ("internal",)
     resolved_egress = tuple(
         sorted({str(p) for p in egress_policies} - FORBIDDEN_EGRESS_POLICIES)
     )
@@ -888,7 +888,6 @@ def apply_claims(
                 "evidence_ids": claim["evidence_ids"],
                 "scope": proposal_scope,
                 "confidence": claim["confidence"],
-                "reward_band": "strong" if claim["confidence"] >= 0.8 else "moderate",
                 "attributes": attributes,
             },
             writer="wiki-curator",

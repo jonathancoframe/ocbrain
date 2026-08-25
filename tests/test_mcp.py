@@ -51,7 +51,6 @@ def test_mcp_tools_are_knowledge_first(tmp_path):
     }
     # brain.propose is deleted in v0.2 (spec §5.1-4).
     assert "brain.propose" not in names
-    assert "brain.mark_stale" not in names
     assert "brain.teacher_request" not in names
     assert by_name["brain.search"]["annotations"] == {
         "destructiveHint": False,
@@ -88,7 +87,6 @@ def test_mcp_write_tools_are_opt_in(tmp_path):
 
     # brain.propose is deleted in v0.2 (spec §5.1-4) — gone from every tool list.
     assert "brain.propose" not in names
-    assert "brain.mark_stale" not in names
     assert {
         "brain.ingest",
         "brain.forget",
@@ -389,7 +387,7 @@ def test_mcp_wiki_resource_renders_evidence(tmp_path):
     assert "Runtime integration docs were verified." in content["text"]
 
 
-def test_mcp_propose_tool_removed_and_mark_stale_ungated(tmp_path):
+def test_mcp_propose_tool_is_removed(tmp_path):
     conn = connect(tmp_path / "ocbrain.sqlite")
     init_db(conn)
     knowledge_id = upsert_knowledge(
@@ -419,46 +417,6 @@ def test_mcp_propose_tool_removed_and_mark_stale_ungated(tmp_path):
     )
     assert "error" in removed
     assert "not available in admin profile" in removed["error"]["message"]
-
-    # Runtime is read-first; destructive administrative mutation is denied.
-    stale = handle_request(
-        conn,
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "brain.mark_stale", "arguments": {"id": knowledge_id}},
-        },
-    )
-    assert stale["error"]["code"] == -32001
-
-
-def test_mcp_mark_stale_is_not_a_core_mcp_tool(tmp_path):
-    conn = connect(tmp_path / "ocbrain.sqlite")
-    init_db(conn)
-    knowledge_id = upsert_knowledge(
-        conn,
-        knowledge_type="capability",
-        gate="human",
-        slug="stale-candidate-workflow",
-        title="Stale candidate workflow",
-        status="candidate",
-        risk="high",
-    )
-    conn.commit()
-
-    stale = handle_request(
-        conn,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "brain.mark_stale", "arguments": {"id": knowledge_id}},
-        },
-        allow_writes=True,
-    )
-    assert stale["error"]["code"] == -32001
-    assert "not available in admin profile" in stale["error"]["message"]
 
 
 def test_mcp_feedback_approves_or_rejects_human_gated_knowledge(tmp_path):

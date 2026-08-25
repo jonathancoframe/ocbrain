@@ -409,7 +409,7 @@ class CuratorConfig:
     #
     # Every applied run records an egress audit naming exactly what was sent.
     egress_policies: list[str] = field(default_factory=lambda: ["hosted_ok"])
-    visibilities: list[str] = field(default_factory=lambda: ["public", "internal"])
+    visibilities: list[str] = field(default_factory=lambda: ["internal"])
     provider: str = "anthropic"
     model: str = ""  # empty means the provider's default
     max_beliefs: int = 24

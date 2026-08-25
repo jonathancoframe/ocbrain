@@ -933,7 +933,6 @@ def _evidence_for_delivery(evidence: dict[str, Any], *, delivery_target: str) ->
         "kind",
         "content_hash",
         "source_content_hash",
-        "verifier_status",
         "occurred_at",
         "recorded_at",
         "scope",

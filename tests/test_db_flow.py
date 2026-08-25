@@ -607,7 +607,7 @@ def test_event_backfill_all_classifies_and_rebuilds_once(tmp_path: Path, capsys)
 
     assert payload["imported"] == 3
     assert payload["scope_counts"] == {
-        "personal_finance:pelican": 1,
+        "legacy:unscoped": 1,
         "project:bountiful": 1,
         "project:ocbrain": 1,
     }

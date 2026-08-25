@@ -31,12 +31,10 @@ from ocbrain.db import (
     PUBLIC_SCOPES,
     connect,
     counts,
-    get_knowledge,
     init_db,
     knowledge_digest,
     link_knowledge_evidence,
     list_knowledge,
-    mark_knowledge_stale,
     search,
     upsert_evidence,
     upsert_knowledge,
@@ -335,7 +333,6 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--body", required=True)
     compile_parser.add_argument("--evidence-id", action="append", default=[])
     compile_parser.add_argument("--confidence", type=float)
-    compile_parser.add_argument("--reward-band", choices=["discard", "weak", "moderate", "strong"])
     compile_parser.add_argument("--approve", action="store_true")
     add_context_args(compile_parser)
     compile_parser.add_argument("--global-doctrine", action="store_true")
@@ -992,7 +989,6 @@ def cmd_value(args: argparse.Namespace) -> int:
                 "evidence_ids": [evidence_id],
                 "scope": scope.to_dict(),
                 "confidence": args.confidence,
-                "reward_band": None,
             },
             writer="ocbrain-cli",
         )
@@ -1189,7 +1185,6 @@ def cmd_event_compile(args: argparse.Namespace) -> int:
                 "evidence_ids": args.evidence_id,
                 "scope": scope.to_dict(),
                 "confidence": args.confidence,
-                "reward_band": args.reward_band,
             },
             writer="ocbrain-cli",
             session_id=args.session,
@@ -1222,7 +1217,6 @@ def cmd_event_compile(args: argparse.Namespace) -> int:
         evidence_ids=args.evidence_id,
         scope=scope,
         confidence=args.confidence,
-        reward_band=args.reward_band,
         session_id=args.session,
     )
     decision_id = None
@@ -1711,17 +1705,6 @@ def classify_legacy_row(row) -> dict[str, object]:
                 provenance="inferred",
             ),
             "reasons": ["matched cormorant/bihua client terms"],
-        }
-    if "pelican" in text:
-        return {
-            "scope": ScopeTag(
-                "personal_finance",
-                "personal_finance:pelican",
-                visibility="confidential",
-                egress_policy="local_only",
-                provenance="inferred",
-            ),
-            "reasons": ["matched pelican personal-finance terms"],
         }
     if "bountiful" in text or "backyard-ripe" in text:
         return {
@@ -2268,7 +2251,6 @@ def import_source_v1(
                 "evidence_ids": [evidence_id],
                 "scope": scope.to_dict(),
                 "confidence": confidence,
-                "reward_band": "moderate",
             },
             writer=f"ocbrain-import:{runtime}",
         )
@@ -2550,16 +2532,6 @@ def cmd_digest(args: argparse.Namespace) -> int:
         return 0
     scopes = None if args.include_private else PUBLIC_SCOPES
     output(args, knowledge_digest(conn, project=args.project, scopes=scopes, limit=args.limit))
-    return 0
-
-
-def cmd_mark_stale(args: argparse.Namespace) -> int:
-    conn = open_db(args)
-    if not mark_knowledge_stale(conn, args.knowledge_id, reason=args.reason):
-        raise ValueError(f"knowledge not found: {args.knowledge_id}")
-    conn.commit()
-    row = get_knowledge(conn, args.knowledge_id)
-    output(args, {"knowledge": dict(row)})
     return 0
 
 

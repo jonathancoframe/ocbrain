@@ -116,7 +116,6 @@ def compile_sealed_release(
             "evidence_ids": [evidence_id],
             "scope": scope.to_dict(),
             "confidence": candidate["confidence"],
-            "reward_band": "strong",
             "attributes": attributes,
         },
         writer=actor,

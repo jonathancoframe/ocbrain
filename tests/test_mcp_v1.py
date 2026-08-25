@@ -429,7 +429,6 @@ def test_v1_runtime_and_admin_profiles_are_distinct(tmp_path):
         "belief",
     ]
     assert "brain.teacher_request" not in admin_names
-    assert "brain.mark_stale" not in admin_names
 
 
 def test_v1_non_object_jsonrpc_frames_are_invalid_requests(tmp_path):

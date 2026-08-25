@@ -18,7 +18,6 @@ EVENT_KINDS = {
     "tombstone_recorded",
     "scope_promoted",
 }
-REWARD_BANDS = {"discard", "weak", "moderate", "strong"}
 DECISIONS = ("approve", "reject", "edit", "shadow")
 
 # Skill-usage telemetry convention (docs/SKILL_TELEMETRY.md). These are
@@ -249,7 +248,6 @@ def propose_compilation(
     confidence: float | None = None,
     teacher_model: str | None = None,
     teacher_rationale: str | None = None,
-    reward_band: str | None = None,
     writer: str = "teacher",
     session_id: str | None = None,
     check_hard_block: bool = True,
@@ -258,9 +256,6 @@ def propose_compilation(
         raise ValueError("compiled beliefs require at least one evidence id")
     if check_hard_block and hard_blocked_belief(conn, belief_id):
         raise PermissionError(f"belief is blocked by a hard correction: {belief_id}")
-    if reward_band is not None and reward_band not in REWARD_BANDS:
-        allowed = ", ".join(sorted(REWARD_BANDS))
-        raise ValueError(f"reward_band must be one of: {allowed}")
     scope_tag = scope if isinstance(scope, ScopeTag) else ScopeTag.from_dict(scope)
     return append_event(
         conn,
@@ -273,7 +268,6 @@ def propose_compilation(
             "confidence": confidence,
             "teacher_model": teacher_model,
             "teacher_rationale": teacher_rationale,
-            "reward_band": reward_band,
         },
         writer=writer,
         session_id=session_id,
@@ -826,7 +820,6 @@ def list_compilation_proposals(
                 "evidence_ids": body.get("evidence_ids") or [],
                 "teacher_model": body.get("teacher_model"),
                 "teacher_rationale": body.get("teacher_rationale"),
-                "reward_band": body.get("reward_band"),
             }
         )
     return proposals[-limit:]
@@ -901,7 +894,6 @@ def approval_packet_item(
         "belief_id": proposal["belief_id"],
         "scope": proposal["scope"],
         "confidence_band": proposal["confidence_band"],
-        "reward_band": proposal["reward_band"],
         "body": proposal["body"],
         "actions": actions,
     }

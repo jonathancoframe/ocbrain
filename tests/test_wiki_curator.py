@@ -118,7 +118,7 @@ def test_selector_enforces_visibility_egress_and_kind_boundaries(tmp_path: Path)
     init_core_v1(conn)
 
     cases = (
-        ("public hosted", "audit_finding", "public", "hosted_ok", "test"),
+        ("internal hosted", "audit_finding", "internal", "hosted_ok", "test"),
         (
             "internal approval required",
             "audit_finding",
@@ -142,8 +142,8 @@ def test_selector_enforces_visibility_egress_and_kind_boundaries(tmp_path: Path)
             "test",
         ),
         ("internal prohibited", "audit_finding", "internal", "prohibited", "test"),
-        ("raw transcript", "codex_history_file", "public", "hosted_ok", "test"),
-        ("other project", "audit_finding", "public", "hosted_ok", "other"),
+        ("raw transcript", "codex_history_file", "internal", "hosted_ok", "test"),
+        ("other project", "audit_finding", "internal", "hosted_ok", "other"),
     )
     ids: dict[str, str] = {}
     for body, kind, visibility, egress_policy, project in cases:
@@ -172,9 +172,9 @@ def test_selector_enforces_visibility_egress_and_kind_boundaries(tmp_path: Path)
         )
     }
 
-    assert default_ids == {ids["public hosted"]}
+    assert default_ids == {ids["internal hosted"]}
     assert acknowledged_ids == {
-        ids["public hosted"],
+        ids["internal hosted"],
         ids["internal approval required"],
     }
     assert ids["internal local"] not in acknowledged_ids
@@ -203,7 +203,7 @@ def test_hosted_existing_wiki_gate_never_admits_local_or_confidential(
             "test",
         ),
         ("belief:local", "local belief", "internal", "local_only", "test"),
-        ("belief:prohibited", "prohibited belief", "public", "prohibited", "test"),
+        ("belief:prohibited", "prohibited belief", "internal", "prohibited", "test"),
         (
             "belief:confidential",
             "confidential belief",
@@ -212,7 +212,7 @@ def test_hosted_existing_wiki_gate_never_admits_local_or_confidential(
             "test",
         ),
         ("belief:secret", "secret belief", "secret", "approval_required", "test"),
-        ("belief:other", "other project belief", "public", "hosted_ok", "other"),
+        ("belief:other", "other project belief", "internal", "hosted_ok", "other"),
     )
     for belief_id, body, visibility, egress_policy, project in cases:
         _seed_wiki_belief(
@@ -408,7 +408,7 @@ def test_selection_policy_floor_cannot_be_configured_away() -> None:
     assert "confidential" in visibility
 
     # Shipped default stays narrow.
-    assert resolve_selection_policy() == (("hosted_ok",), ("internal", "public"))
+    assert resolve_selection_policy() == (("hosted_ok",), ("internal",))
     # A policy that admits nothing is an error, not a silent empty selection.
     with pytest.raises(ValueError, match="admits nothing"):
         resolve_selection_policy(egress_policies=["prohibited"])
@@ -450,7 +450,7 @@ def test_widened_policy_admits_local_only_but_never_prohibited(tmp_path: Path) -
             limit=20,
             project="test",
             egress_policies=["hosted_ok", "local_only"],
-            visibilities=["public", "internal", "confidential"],
+            visibilities=["internal", "confidential"],
         )
     }
     assert widened_bodies == {"HOSTED OK INTERNAL BODY", "LOCAL ONLY INTERNAL BODY"}
@@ -892,7 +892,7 @@ def test_history_file_kinds_are_never_eligible(tmp_path: Path) -> None:
             body=f"RAW TRANSCRIPT FROM {kind} THAT MUST NEVER EGRESS",
             kind=kind,
             scope=ScopeTag(
-                "project", "project:test", visibility="public", egress_policy="hosted_ok"
+                "project", "project:test", visibility="internal", egress_policy="hosted_ok"
             ),
             writer="test",
         )
@@ -903,7 +903,7 @@ def test_history_file_kinds_are_never_eligible(tmp_path: Path) -> None:
             limit=50,
             project="test",
             egress_policies=["hosted_ok", "approval_required", "local_only"],
-            visibilities=["public", "internal", "confidential"],
+            visibilities=["internal", "confidential"],
         )
         == []
     )

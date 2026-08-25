@@ -41,7 +41,7 @@ def current_wiki_beliefs(
         filters.extend(("scope_type='project'", "scope_id=?"))
         params.append(f"project:{project}")
     if hosted_egress:
-        filters.append("visibility IN ('public', 'internal')")
+        filters.append("visibility='internal'")
         if allow_approval_required:
             filters.append("egress_policy IN ('hosted_ok', 'approval_required')")
         else:
