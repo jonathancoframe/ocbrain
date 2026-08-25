@@ -12,6 +12,7 @@
 #   3. wiki     — rematerialize the wiki, which is also what deletes orphan pages
 #   4. lint     — post-condition check on the materialized tree
 #   5. vectors  — rebuild the dense sidecar so new facts are semantically findable
+#   6. procmine — mine the trajectory corpus (opt-in: OCBRAIN_PROCMINE=1)
 #
 # NOT installed by default. OCBrain ships no scheduler; an operator opts in by
 # loading a launchd agent (see docs/SCHEDULED_MAINTENANCE.md). Step 1 is the only
@@ -194,6 +195,52 @@ PYEOF
 # skipped this would leave new knowledge half-reachable.
 "$PY" -m ocbrain.cli --db "$DB" vector-build \
   || echo "vector-build failed (is the local embedder running?); continuing"
+
+# 6. Mine procedural memory. Opt-in twice over, and off by default.
+#
+# OCBRAIN_PROCMINE=1 turns the stage on at all; OCBRAIN_PROCMINE_APPLY=1 is what
+# lets the mint write beliefs. Two switches rather than one because the two
+# risks are different: extraction reads every transcript on the machine, and
+# minting adds rows to the serving corpus. An operator may reasonably want the
+# atlas refreshed without the second.
+#
+# Extraction is incremental — unchanged source files replay from cached
+# segments under $PROCMINE_DIR/cache — so a quiet cycle costs seconds rather
+# than a full re-walk of the corpus.
+PROCMINE="${OCBRAIN_PROCMINE:-0}"
+PROCMINE_APPLY="${OCBRAIN_PROCMINE_APPLY:-0}"
+PROCMINE_DIR="${OCBRAIN_PROCMINE_DIR:-$HOME/.ocbrain/procmine}"
+PROCMINE_BUDGET_SECONDS="${OCBRAIN_PROCMINE_BUDGET_SECONDS:-1800}"
+if [[ "$PROCMINE" == "1" ]]; then
+  mkdir -p "$PROCMINE_DIR"
+  procmine_traces="$PROCMINE_DIR/traces.jsonl"
+  if run_with_budget "$PROCMINE_BUDGET_SECONDS" \
+      env PYTHONPATH="$REPO/src:$REPO/scripts" "$PY" -m procmine extract \
+        --out "$procmine_traces" --state-dir "$PROCMINE_DIR"; then
+    # Atlas refresh. Also rewrites $PROCMINE_DIR/episodes.json, the standing
+    # per-episode step-sequence artifact, so the sequences the miner computes
+    # stop being recomputed and thrown away on every run.
+    run_with_budget "$PROCMINE_BUDGET_SECONDS" \
+      env PYTHONPATH="$REPO/src:$REPO/scripts" "$PY" -m procmine atlas \
+        --traces "$procmine_traces" \
+        --brain-db "$DB" \
+        --report "$PROCMINE_DIR/PROCEDURE-ATLAS.md" \
+        --json "$PROCMINE_DIR/procedures.json" \
+        --dump-episodes "$PROCMINE_DIR/episodes.json" \
+      || echo "procmine atlas failed; continuing"
+
+    mint_args=(--traces "$procmine_traces" --brain-db "$DB")
+    if [[ "$PROCMINE_APPLY" == "1" ]]; then
+      mint_args+=(--apply)
+    fi
+    env PYTHONPATH="$REPO/src:$REPO/scripts" "$PY" -m procmine mint "${mint_args[@]}" \
+      || echo "procmine mint failed; continuing"
+  else
+    echo "procmine extract failed or was capped; skipping atlas and mint"
+  fi
+else
+  echo "procmine stage disabled (set OCBRAIN_PROCMINE=1 to enable)"
+fi
 
 after="$(serving_count)"
 echo "serving beliefs after: $after"

@@ -26,6 +26,7 @@ so the atlas can report what was refused and why.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -64,7 +65,11 @@ _STOPWORDS = {
     "two", "task", "run", "ran", "use", "used", "using", "add", "added", "now",
     "then", "also", "after", "before", "over", "under", "out", "up", "down",
     "local", "macos", "mac", "codex", "hermes", "cursor", "claude", "20260",
-    "root", "user", "jonathancoframe", "current", "default", "session", "chat",
+    "root", "user", "current", "default", "session", "chat",
+    # The operator's own account name shows up in paths, task refs, and summaries
+    # everywhere, so it carries no signal. Derived rather than hardcoded: a
+    # public repository should not name whoever happened to build the corpus.
+    os.path.basename(os.path.expanduser("~")).lower(),
 }
 _TOKEN = re.compile(r"[a-z][a-z0-9]{2,}")
 _DATEISH = re.compile(r"\b(?:20\d{6}|20\d{2}-\d{2}-\d{2}|t\d{4}z?)\b")
