@@ -109,10 +109,11 @@ The core owns:
 - egress audits;
 - local backup, restore, bounded sync, and runtime diagnostics.
 
-Training and watchdog systems are optional companions with their own operational
-stores. They may read a core snapshot or submit evidence through the core API;
-they are not additional brains, are never queried by the default MCP, and
-install no recurring schedule through the core package.
+The core is all there is. Training and watchdog code used to live in companion
+distributions with their own operational stores, described here as an outer ring
+the MCP never queried. Both are deleted, and the deletion is a simplification of
+this contract rather than a change to it: there is no second store to keep out
+of retrieval, and no recurring schedule any package can install.
 
 Cross-machine exchange is explicit and file-only. `export-bundle` accepts an
 explicit list of evidence ids, applies scope and human-export egress gates,
@@ -127,8 +128,7 @@ payload hash before touching SQLite. Its default is a database-free dry run;
 folds projections once. Sender ids are provenance only. Imported evidence is
 forced to a caller-selected project with `confidential` visibility,
 `local_only` egress, and explicit `bundle_import` provenance. Bundles never
-import beliefs, source handles, retrieval receipts, closeouts, or companion
-state.
+import beliefs, source handles, retrieval receipts, or closeouts.
 
 Migration is archive-first. The live v0.x database is opened read-only, copied
 to a verified immutable archive, transformed into fresh outputs, and never
@@ -150,7 +150,6 @@ The v1 change is complete only when all of these are true:
 - every imported evidence, belief, source link, retrieval, and correction is
   represented or explicitly accounted for in the migration manifest;
 - wiping and rebuilding projections yields the same hashes and MCP responses;
-- the core wheel contains and imports no companion implementation;
 - fresh Codex, Claude Code, and OpenClaw processes each complete
   context → source → feedback → closeout against the same core;
 - no hosted call, timer, training run, or automatic live-database activation is

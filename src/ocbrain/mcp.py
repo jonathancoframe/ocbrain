@@ -28,7 +28,6 @@ from ocbrain.db import (
     init_db,
     knowledge_digest,
     log_retrieval_use,
-    mark_knowledge_stale,
     reject_knowledge,
     render_doc_markdown,
     search,
@@ -1006,14 +1005,6 @@ def call_tool(
         )
         conn.commit()
         return text_result({"event_id": event_id, "kind": "tombstone_recorded"})
-    if name == "brain.mark_stale":
-        knowledge_id = require_string(arguments, "id")
-        reason = optional_string(arguments, "reason") or "user_request"
-        updated = mark_knowledge_stale(conn, knowledge_id, reason=reason)
-        if not updated:
-            raise ValueError(f"knowledge not found: {knowledge_id}")
-        conn.commit()
-        return text_result({"id": knowledge_id, "status": "stale"})
     raise ValueError(f"unknown tool: {name}")
 
 
@@ -1667,16 +1658,14 @@ def tool_list(
                                         "project",
                                         "repo",
                                         "client",
-                                        "personal_finance",
                                         "task",
-                                        "session",
                                         "legacy_unscoped",
                                     ],
                                 },
                                 "scope_id": {"type": "string"},
                                 "visibility": {
                                     "type": "string",
-                                    "enum": ["public", "internal", "confidential", "secret"],
+                                    "enum": ["internal", "confidential", "secret"],
                                 },
                                 "egress_policy": {
                                     "type": "string",
@@ -1951,18 +1940,6 @@ def tool_list(
                     "required": ["target"],
                 },
             },
-            {
-                "name": "brain.mark_stale",
-                "description": "Mark one knowledge row stale.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["id"],
-                },
-            },
         ]
     )
     allowed = tools_for_profile(profile)
@@ -2003,7 +1980,7 @@ def tool_list(
         "brain.get",
         "brain.proposals",
     }
-    destructive_names = {"brain.forget", "brain.mark_stale"}
+    destructive_names = {"brain.forget"}
     for tool in tools:
         name = tool["name"]
         if name in read_only_names:

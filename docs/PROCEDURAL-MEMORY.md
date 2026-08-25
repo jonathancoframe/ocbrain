@@ -86,8 +86,8 @@ scores `1.25`, cross-scope `0.15`, confidential never widens, `global` is always
 `1.0`. A procedure is scored by exactly that function with no new branch.
 
 Write scope should use `resolve_write_scope` (`src/ocbrain/scope.py:135`) with
-one deviation, and it is the deviation `auto_compile_scope`
-(`src/ocbrain/mcp_v1.py:66`) already makes for unattended promotion: prefer the
+one deviation, and it is the deviation `shared_continuity_scope`
+(`src/ocbrain/mcp_v1.py:58`) already makes for closeout summaries: prefer the
 *broadest shared* scope — project, then repo, then client — rather than the
 narrowest. The reason is stronger for procedures than for beliefs. A procedure is
 mined *from* several sessions across several runtimes; scoping it to the session
@@ -212,8 +212,8 @@ Existing machinery covers most of it:
   stable workflow does not get less true in a month.
 - **Expiry** — `attributes_json.valid_until`, swept by `_expired_targets`
   (`src/ocbrain/hygiene.py:99`). Procedures should be `lifecycle: current` with
-  a TTL, unlike auto-compiled beliefs which hardcode `durable`
-  (`src/ocbrain/mcp_v1.py:141`). A procedure describes tooling, and tooling
+  a TTL, rather than the `durable` lifecycle a curated belief carries by
+  default. A procedure describes tooling, and tooling
   changes. If the miner has not re-confirmed it in a cycle, it should expire.
 - **Supersession** — `superseded_by`, same sweep. The miner sets it when a new
   mining run replaces a procedure over the same family.
@@ -241,8 +241,7 @@ the time".
 Those are not procedures. They are **step-scoped**, they need no closeout, and
 they have three orders of magnitude more support. They fit the existing belief
 shape with no new kind at all: a one-sentence claim, a scope, evidence ids, and a
-confidence — exactly what `auto_compile_evidence` (`src/ocbrain/mcp_v1.py:135`)
-already mints.
+confidence — exactly the belief shape the curator already mints.
 
 So the mining pipeline produces two outputs at different ceremony levels:
 
@@ -251,7 +250,7 @@ So the mining pipeline produces two outputs at different ceremony levels:
 | unit | task family | one step signature |
 | needs closeouts | yes | no |
 | support on this corpus | 1 | 12 above threshold |
-| storage | `belief_type='procedure'` | ordinary auto-compiled belief |
+| storage | `belief_type='procedure'` | ordinary belief |
 | decay | TTL + supersession | re-mined each cycle |
 
 Shipping the gotcha layer first is the lower-risk path, and it is the half that

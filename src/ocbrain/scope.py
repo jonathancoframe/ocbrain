@@ -12,12 +12,16 @@ SCOPE_TYPES = {
     "project",
     "repo",
     "client",
-    "personal_finance",
     "task",
+    # No client can request a session scope any more, but one 2026 evidence
+    # event in the shipped ledger carries scope_type="session". Dropping it here
+    # would make ScopeTag refuse that event and break projection replay.
     "session",
     "legacy_unscoped",
 }
-VISIBILITIES = {"public", "internal", "confidential", "secret"}
+# "public" was published for two years and never once written; every stored row
+# is internal, confidential, or secret.
+VISIBILITIES = {"internal", "confidential", "secret"}
 EGRESS_POLICIES = {"hosted_ok", "local_only", "approval_required", "prohibited"}
 
 LOCAL_MODEL_TARGET = "local_model"
@@ -127,9 +131,9 @@ def fold_scope_component(value: Any) -> str | None:
 def fold_scope_id(scope_id: Any) -> str:
     """Fold the value half of a ``type:value`` scope id, keeping the prefix.
 
-    The prefix is left verbatim. Scope types are code-minted and several contain
-    underscores (``personal_finance``, ``legacy_unscoped``); folding those would
-    turn a valid type into one that matches nothing.
+    The prefix is left verbatim. Scope types are code-minted and one of them
+    contains an underscore (``legacy_unscoped``); folding it would turn a valid
+    type into one that matches nothing.
     """
     text = str(scope_id or "").strip()
     if not text:

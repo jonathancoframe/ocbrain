@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+
 from ocbrain import __version__
 from ocbrain.db import (
     connect,
@@ -49,7 +51,6 @@ def test_mcp_tools_are_knowledge_first(tmp_path):
     }
     # brain.propose is deleted in v0.2 (spec §5.1-4).
     assert "brain.propose" not in names
-    assert "brain.mark_stale" not in names
     assert "brain.teacher_request" not in names
     assert by_name["brain.search"]["annotations"] == {
         "destructiveHint": False,
@@ -86,7 +87,6 @@ def test_mcp_write_tools_are_opt_in(tmp_path):
 
     # brain.propose is deleted in v0.2 (spec §5.1-4) — gone from every tool list.
     assert "brain.propose" not in names
-    assert "brain.mark_stale" not in names
     assert {
         "brain.ingest",
         "brain.forget",
@@ -387,7 +387,7 @@ def test_mcp_wiki_resource_renders_evidence(tmp_path):
     assert "Runtime integration docs were verified." in content["text"]
 
 
-def test_mcp_propose_tool_removed_and_mark_stale_ungated(tmp_path):
+def test_mcp_propose_tool_is_removed(tmp_path):
     conn = connect(tmp_path / "ocbrain.sqlite")
     init_db(conn)
     knowledge_id = upsert_knowledge(
@@ -417,46 +417,6 @@ def test_mcp_propose_tool_removed_and_mark_stale_ungated(tmp_path):
     )
     assert "error" in removed
     assert "not available in admin profile" in removed["error"]["message"]
-
-    # Runtime is read-first; destructive administrative mutation is denied.
-    stale = handle_request(
-        conn,
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "brain.mark_stale", "arguments": {"id": knowledge_id}},
-        },
-    )
-    assert stale["error"]["code"] == -32001
-
-
-def test_mcp_mark_stale_is_not_a_core_mcp_tool(tmp_path):
-    conn = connect(tmp_path / "ocbrain.sqlite")
-    init_db(conn)
-    knowledge_id = upsert_knowledge(
-        conn,
-        knowledge_type="capability",
-        gate="human",
-        slug="stale-candidate-workflow",
-        title="Stale candidate workflow",
-        status="candidate",
-        risk="high",
-    )
-    conn.commit()
-
-    stale = handle_request(
-        conn,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "brain.mark_stale", "arguments": {"id": knowledge_id}},
-        },
-        allow_writes=True,
-    )
-    assert stale["error"]["code"] == -32001
-    assert "not available in admin profile" in stale["error"]["message"]
 
 
 def test_mcp_feedback_approves_or_rejects_human_gated_knowledge(tmp_path):
@@ -619,3 +579,62 @@ def test_mcp_admin_only_tool_stays_gated_for_dot_free_runtime_name(tmp_path):
 
     assert response["error"]["code"] == -32001
     assert "not available in runtime profile" in response["error"]["message"]
+
+
+# --- mcp lock-retry patch ------------------------------------------------------
+class _FakeConn:
+    def __init__(self):
+        self.rollbacks = 0
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_mcp_retries_on_database_locked(monkeypatch):
+    from ocbrain import mcp
+
+    calls = {"n": 0}
+
+    def flaky_call_tool(conn, params, *, profile="runtime", provenance=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"ok": True}
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(mcp, "call_tool", flaky_call_tool)
+    monkeypatch.setattr(mcp.time, "sleep", lambda s: sleeps.append(s))
+
+    conn = _FakeConn()
+    result = mcp._call_tool_with_lock_retry(conn, {"name": "brain.ingest"})
+    assert result == {"ok": True}
+    assert calls["n"] == 3
+    assert sleeps == [0.25, 0.25]
+    assert conn.rollbacks == 2  # rolled back before each retry
+
+
+def test_mcp_reraises_after_exhausting_retries(monkeypatch):
+    from ocbrain import mcp
+
+    def always_locked(conn, params, *, profile="runtime", provenance=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(mcp, "call_tool", always_locked)
+    monkeypatch.setattr(mcp.time, "sleep", lambda s: None)
+    with pytest.raises(sqlite3.OperationalError):
+        mcp._call_tool_with_lock_retry(_FakeConn(), {"name": "brain.ingest"})
+
+
+def test_mcp_non_lock_error_not_retried(monkeypatch):
+    from ocbrain import mcp
+
+    calls = {"n": 0}
+
+    def other_error(conn, params, *, profile="runtime", provenance=None):
+        calls["n"] += 1
+        raise sqlite3.OperationalError("no such table: widgets")
+
+    monkeypatch.setattr(mcp, "call_tool", other_error)
+    with pytest.raises(sqlite3.OperationalError):
+        mcp._call_tool_with_lock_retry(_FakeConn(), {"name": "brain.ingest"})
+    assert calls["n"] == 1  # not retried

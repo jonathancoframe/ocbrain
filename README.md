@@ -149,8 +149,15 @@ ocbrain --db /absolute/core.sqlite import-history /history/root \
 
 The generated `wiki/index.md`, `wiki/pages/`, and append-only `wiki/log.md`
 follow the raw-sources-plus-derived-wiki pattern. SQLite remains authoritative;
-the Markdown wiki is a disposable current-truth materialization. Keep
-`automatic_activation` disabled when using this sparse mode.
+the Markdown wiki is a disposable current-truth materialization.
+
+There is no automatic promotion path to disable. An `automatic_activation` flag
+once compiled closeout summaries straight into serving beliefs; it produced 239
+`auto_compiled` beliefs, all 239 were later retracted, and the flag has read
+false ever since. It and the flag's CLI subcommand are gone. Closeout summaries
+are still always recorded as evidence — that half was never the gated half —
+and promotion into a serving belief remains a curation step a human or the
+curator performs deliberately.
 
 ### Optional sealed-truth compiler
 
@@ -186,46 +193,35 @@ and conflicting pages that share a key:
 ### Retiring knowledge
 
 Compilation only grows the corpus. `ocbrain hygiene` retires beliefs that
-expired (`valid_until` / `superseded_by`), were never once retrieved, or are
-consistently judged unhelpful. It reports by default and retires only with
-`--apply`; every retirement is a soft retraction, undoable with `--restore`.
-
-The `unhelpful` class refuses to act until you set a watermark, and then counts
-only feedback recorded after it — verdicts gathered while a ranker was serving a
-belief for unrelated queries describe the ranker, not the belief. Set the
-watermark after any ranking change.
+expired (`valid_until` / `superseded_by`) and beliefs that restate a fact a
+newer one already carries in the same scope. It reports by default and retires
+only with `--apply`; every retirement is a soft retraction, undoable with
+`--restore`.
 
 ```bash
 ocbrain --db /absolute/core.sqlite hygiene                      # report
 ocbrain --db /absolute/core.sqlite hygiene --class expired --apply
-ocbrain --db /absolute/core.sqlite hygiene --set-watermark      # after a ranker change
 ocbrain --db /absolute/core.sqlite hygiene --restore belief_... # undo
 ```
 
-Note `packages/ops` maintenance (`prune_knowledge`,
-`archive_unreferenced_catalog`) targets the **legacy** `knowledge` table and
-raises `no such table: knowledge` against a v1 core. Use `ocbrain hygiene`.
+Two further classes, `unused` and `unhelpful`, were removed in v2: neither ever
+selected a belief across 155 scheduled runs, and `unhelpful` needed a feedback
+watermark no operator ever set.
 
-### Repairing knowledge
+### Keeping knowledge well-written
 
-Hygiene retires beliefs that stopped earning their place. `ocbrain deslop`
-handles the other failure: a belief that is well-formed, sourced, schema-valid,
-and still fails to function as knowledge — several facts fused into one body, a
-durable claim written in the present tense, a present-state claim that can never
-age out. It **repairs rather than deletes**, and a repair may only subtract or
-reorganize the original's own words, never add to them.
+Hygiene retires beliefs that stopped earning their place. A separate set of
+mechanical rules catches the other failure: a belief that is well-formed,
+sourced, schema-valid, and still fails to function as knowledge — several facts
+fused into one body, a durable claim written in the present tense, a
+present-state claim that can never age out.
 
-```bash
-ocbrain --db /absolute/core.sqlite deslop --mechanical-only   # free, deterministic
-ocbrain --db /absolute/core.sqlite deslop                     # adds the judged rule
-ocbrain --db /absolute/core.sqlite deslop --apply             # repair
-ocbrain --db /absolute/core.sqlite deslop --volume            # re-windowed evidence
-ocbrain --db /absolute/core.sqlite deslop --install-doctrine  # teach the standard
-```
-
-The same rules run at write time, so the curator rejects a slop claim before it
-becomes a belief and a closeout receipt reports findings back to whoever wrote
-it. See [docs/DESLOP.md](docs/DESLOP.md).
+Those rules are a **write-time gate**, not a cleanup pass. The curator rejects a
+slop claim before it becomes a belief, a closeout receipt reports findings back
+to whoever wrote it, and `scripts/wiki-lint.py` checks the materialized tree. A
+post-hoc sweep also existed and found nothing in 155 consecutive runs, because
+the gate had already done the work; it is gone. See
+[docs/DESLOP.md](docs/DESLOP.md).
 
 ### Running it continuously
 
@@ -263,36 +259,37 @@ matter.
 
 ## Safety corrections
 
-- The core is on-demand. It installs no light autopilot, heavy autopilot,
-  stallcheck, timer, pager, or recurring maintenance job.
-- Hosted judging, embedding, and teacher-package work is absent from the core
-  MCP and disabled in the preserved v0.4.1 compatibility configuration.
-- Training is paused. Local mining and audit tooling live in an optional
-  companion, but no trainer is authorized until a genuine named-human audit and
-  a separate operator decision both exist.
+- The core is on-demand. It installs no autopilot, timer, pager, or recurring
+  maintenance job.
+- Hosted judging, embedding, and teacher-package work is not in the core at all.
+  The config sections that configured them are gone along with the code.
 - `--allow-writes` is not a no-op. It is a deprecated alias for the explicit
   `--profile admin` MCP surface.
 - Migration writes only fresh paths. It never replaces or repoints the live
   database automatically.
 
-## One core, optional companions
+## One distribution
 
-| Distribution | Command | Default database | Responsibility |
+| Distribution | Commands | Default database | Responsibility |
 |---|---|---|---|
-| `ocbrain` | `ocbrain` | `~/.ocbrain/ocbrain.sqlite` | event ledger, projections, retrieval, MCP, receipts, backup/migration |
-| `ocbrain-training` | `ocbrain-training` | `~/.ocbrain/training.sqlite` | optional local curation, grading, audit, and prepared training workflows |
-| `ocbrain-ops` | `ocbrain-ops`, `ocbrain-watchdog` | `~/.ocbrain/ops.sqlite` | optional manual diagnostics and legacy operations |
+| `ocbrain` | `ocbrain`, `ocbrain-closeout` | `~/.ocbrain/ocbrain.sqlite` | event ledger, projections, retrieval, MCP, receipts, backup/migration, public-safety scanning |
 
-The companion databases are not additional brains. The default MCP never
-queries them. Legacy companion mutators require an explicit `--legacy-db`; they
-never silently write the v1 core.
+`pip install -e .` installs everything there is. Two optional companion
+distributions, `ocbrain-training` and `ocbrain-ops`, were published alongside
+the core and are gone: every table they owned in their own stores —
+`autopilot_runs`, `judge_runs`, `embed_runs`, `signal_events`,
+`harvest_watermarks`, `loop_liveness`, `family_scores`, `stall_pages`,
+`watchdog_findings` — held zero rows. (Those stores also declared their own
+`egress_audits`, empty like the rest. It is not the core table of the same
+name: `src/ocbrain/egress.py` writes that one on every applied curation run,
+and it is untouched.) There is no `pip install -e ./packages/...` step, no
+`ocbrain-ops` / `ocbrain-training` / `ocbrain-watchdog` command, and no
+entry-point mechanism for a companion to extend the CLI.
 
-Install companions only when deliberately needed:
-
-```bash
-.venv/bin/python -m pip install -e ./packages/training
-.venv/bin/python -m pip install -e ./packages/ops
-```
+The one piece worth keeping moved into the core rather than dying with the
+package: the public-repository safety scanner is now `src/ocbrain/publicsafety.py`,
+and `ocbrain public-safety-check` and `ocbrain install-hooks` are ordinary
+subcommands that need nothing installed beyond the core.
 
 For development:
 
@@ -322,9 +319,11 @@ The default runtime profile has eight tools:
 - `brain.ingest` — narrowly scoped evidence, never direct belief promotion;
 - `brain.closeout` — append-only `ocbrain.closeout.v1` outcome receipt.
 
-The admin profile adds preview, egress preview, durable correction, proposal
-decision/listing, and tombstone controls. It does **not** add a hosted teacher,
-training, scheduler, or stale-marking tool.
+The admin profile adds six more: preview, egress preview, durable correction,
+proposal decision, proposal listing, and the tombstone control. Fourteen tools
+is the whole surface. There is no hosted teacher, training, or scheduler tool,
+and `brain.mark_stale` is gone — it was published for two years and could never
+be dispatched, because `tools_for_profile` returned it for no profile.
 
 Run either profile explicitly:
 
@@ -430,8 +429,13 @@ ocbrain --db /absolute/legacy.sqlite core-migrate-v1 \
 
 Run the same command without `--plan` to create fresh verified outputs. The
 manifest accounts for preserved event-chain rows, imported semantic objects,
-retrievals, companion rows, hashes, integrity checks, and anything intentionally
-archive-only.
+retrievals, hashes, integrity checks, and anything intentionally archive-only.
+
+`--training-db` and `--ops-db` are still accepted, and both are about the *legacy
+source*: a v0.x database carries training and operational tables that have no
+home in the strict v1 inventory, so migration extracts them to their own files
+rather than dropping them or smuggling them into the core. They do not install
+anything and there is nothing left that reads them.
 
 Activation is separate. `scripts/ocbrain-mcp` uses `OCBRAIN_DB` when set;
 otherwise it reads the ignored local `data/active-core.path` when present, then
@@ -487,15 +491,16 @@ components future models need for safer transfer.
 
 ## Training boundary
 
-The earlier 150-item Opus fleet review is useful remediation evidence, but it is
-not a named-human audit. It found 67 pass / 83 fail, so pilot-v3 remains blocked.
-The main defects were persona sender envelopes, process chatter, routing tokens
-and identifiers, and weak DPO contrasts.
+There is no training code in this repository. The dataset mining, grading, and
+pilot-packet tooling lived in the `ocbrain-training` companion and was deleted
+with it; the `dataset-*` and `pilot-*` subcommands, `scripts/generate-pilot-candidates.py`,
+and `scripts/grade-pilot-blind.py` are gone.
 
-The clean private handoff packet is generated separately and contains 150
-pending decisions with no AI labels to anchor the reviewer. Completing it still
-does not authorize training; remediation, reminting, local grading, a fresh
-stratified audit, and explicit operator closeout remain separate gates.
+It never shipped a model. The one prepared pack, pilot-v3, was blocked by a
+150-item review that returned 67 pass / 83 fail — persona sender envelopes,
+process chatter, routing tokens, and weak DPO contrasts — and an AI review was
+never the named-human audit the gate required anyway. Keeping a blocked pipeline
+installed so it could stay blocked was the part that made no sense.
 
 ## Documentation
 

@@ -47,11 +47,7 @@ ocbrain-closeout = "ocbrain.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [
-  "src",
-  "packages/training/src",
-  "packages/ops/src",
-]
+pythonpath = ["src"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ocbrain"]
@@ -73,7 +69,7 @@ exclude = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "packages/training/src", "packages/ops/src"]
+src = ["src"]
 
 [tool.ruff.lint]
 # Gate, not aspiration: every category here is at zero across production code,

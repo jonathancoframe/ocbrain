@@ -153,10 +153,11 @@ For an explicitly authorized local correction/lifecycle task:
 scripts/ocbrain-mcp --profile admin
 ```
 
-The deprecated `--allow-writes` flag selects that same profile. Admin adds
-correction, proposal decisions/listing, tombstone, and local preview tools. It
-does not add hosted judgment, embedding, teacher, training, scheduler,
-watchdog, or stale-marking tools.
+The deprecated `--allow-writes` flag selects that same profile. Admin adds six
+tools — correction, proposal decision, proposal listing, tombstone, local
+preview, and egress preview — for fourteen in total. It adds no hosted
+judgment, embedding, teacher, training, scheduler, or watchdog tool, and
+`brain.mark_stale` no longer exists in either profile.
 
 ## Activation and rollback
 
@@ -172,14 +173,17 @@ which already-existing database a new MCP process opens; it does not mutate
 either database.
 
 Keep the pre-v1 archive and migration manifest. Never point the v1 MCP at a
-training or ops database.
+legacy training or ops extract; they are archival reconciliation files, not
+brains.
 
 ## Safety state
 
 - No core timer, launchd job, pager, or recurring maintenance exists.
-- The tracked old light/heavy/stallcheck plists are inert retirement markers.
-- The core MCP imports no companion implementation.
-- Hosted lanes and training are not activated by credentials or config probes.
+- The `com.jonathangu.ocbrain.*.plist` files are deleted, not parked. Unload and
+  remove any left in `~/Library/LaunchAgents` from a legacy install.
+- There is one distribution and no companion package to import.
+- Hosted lanes and training are not activated by credentials or config probes,
+  because there is no hosted-lane or training code to activate.
 - OpenClaw/Claude authentication is unrelated to OCBrain database authority.
 
 ## Verification commands

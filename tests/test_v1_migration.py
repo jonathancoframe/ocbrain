@@ -170,7 +170,6 @@ def test_plan_is_read_only_and_reports_all_fresh_outputs(tmp_path: Path) -> None
     assert result["source_semantic_counts"]["knowledge"] == 1
     assert result["source_training_counts"]["dataset_examples"] == 2
     assert result["source_ops_counts"]["autopilot_runs"] == 1
-    assert result["safety"]["automatic_activation"] is False
     assert result["safety"]["hosted_calls"] == 0
     assert not any(path.exists() for path in paths.values())
 

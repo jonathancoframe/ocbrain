@@ -49,6 +49,46 @@
   a byte-identical closeout now produce two receipts instead of colliding on the
   UNIQUE `content_hash`.
 
+- Delete the code that never ran: 31,600 lines out, with nothing that serves
+  changing behaviour. `packages/ops` and `packages/training` are gone; every
+  table in their own stores (`autopilot_runs`, `judge_runs`, `embed_runs`,
+  `signal_events`, `harvest_watermarks`, `loop_liveness`, `family_scores`,
+  `stall_pages`, `watchdog_findings`) held zero rows, so OCBrain is now one
+  distribution with one console script and no optional companion mechanism.
+  Those stores also declared an `egress_audits` table, which is a different
+  table from the core's `egress_audits`: the core one is written by
+  `src/ocbrain/egress.py` on every applied curation run, holds 30 rows in the
+  live brain, and is untouched here. Their one live module, the public-safety scanner, moved
+  first: it is `src/ocbrain/publicsafety.py`, and `ocbrain public-safety-check`
+  and `ocbrain install-hooks` are ordinary core subcommands, so the CI gate that
+  keeps private paths out of this repo no longer depends on a companion install.
+  Also gone: auto-compile (it produced 239 beliefs and all 239 were retracted);
+  the `ocbrain deslop` sweep, judged pass, repair, doctrine install and volume
+  eviction (155 consecutive hourly runs reported `actionable: 0`); hygiene's
+  `unused` and `unhelpful` classes and the feedback-watermark subsystem that
+  existed only to make `unhelpful` safe (neither class ever selected a belief,
+  and no operator ever set a watermark); `brain.mark_stale`, which
+  `tools_for_profile` could never return; and `_build_legacy_parser`, 682 lines
+  of v0 argument parsing no caller reached.
+- Keep the deslop rules, drop the sweep. The mechanical rules were never the
+  dead part: they fire as `curator.validate_claims`' write-time gate, which
+  rejected 34 unverified quotes, 8 fused claims and 7 temporal-in-durable claims
+  before they were stored. `find_slop`, `RULES` and `ENFORCED_RULE_IDS` stay,
+  along with `closeout_v1`'s `slop_findings` receipt and `wiki-lint.py`.
+  `rewindowed_evidence_id` stays too: volume mode used it, but so does
+  `import_source_v1`, which is the live transcript-import dedupe.
+- Remove four vocabulary values the ledger proves were never used: the
+  `personal_finance` scope type and the `public` visibility (0 rows each),
+  `reward_band` (written 1,325 times, read by nothing in the v1 core), and
+  `evidence_objects.verifier_status` (all 3,987 rows read `unknown`). The
+  `session` scope type stays despite a plan to remove it — one stored
+  `evidence_recorded` event carries it, and dropping it from `SCOPE_TYPES` would
+  make `ScopeTag` refuse that event and break projection replay.
+- Cut the config surface from 115 fields to 20. Only `retrieval`, `scopes`,
+  `curator` and `deslop` are ever read; thirteen other sections configured
+  deleted code or nothing at all. A section or key an operator's file names but
+  this build does not define is now explicitly skipped rather than fatal, which
+  is what lets a config written against the old surface keep working.
 - Curate every configured project scope, not one pinned project. The curator
   compiled whichever single project the promote script pinned, which on one real
   brain reached 5 of 574 curator-eligible objects while 535 closeout summaries

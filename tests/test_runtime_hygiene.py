@@ -20,10 +20,9 @@ from ocbrain.core_v1 import (
     append_core_event,
     init_core_v1,
     record_core_v1_retrieval,
-    set_automatic_activation,
 )
 from ocbrain.db import connect
-from ocbrain.mcp_v1 import correct_v1, decide_proposal_v1, ingest_v1
+from ocbrain.mcp_v1 import decide_proposal_v1
 from ocbrain.provenance import Provenance
 from ocbrain.scope import ScopeContext, ScopeTag
 
@@ -171,72 +170,6 @@ def test_the_retrieval_stable_id_ignores_provenance(tmp_path: Path, monkeypatch)
     conn.rollback()
     # Same served_at second, same query, same context, same items -> same id.
     assert len(ids) == 1
-
-
-def test_ingest_survives_a_blocked_auto_recompile(tmp_path: Path) -> None:
-    """A hard-retracted belief must not make re-ingesting its text fail.
-
-    Auto-belief ids are content-addressed, so identical text recompiles to the
-    same id; with automatic activation on, that hit compilation_block_reason and
-    raised PermissionError out of brain.ingest, losing the evidence write too.
-    """
-    conn = _core(tmp_path)
-    set_automatic_activation(conn, True)
-    context = ScopeContext(project="bountiful")
-    body = "The nightly export finishes before the morning report runs."
-
-    first = ingest_v1(
-        conn,
-        body=body,
-        kind="observation",
-        context=context,
-        writer="test",
-        session_id=None,
-        artifact_ref=None,
-    )
-    belief_id = first["auto_compiled_belief_id"]
-    assert first["kind"] == "evidence_recorded_and_compiled"
-
-    correct_v1(
-        conn,
-        layer="belief",
-        target=belief_id,
-        op="retract",
-        body="retired by test",
-        actor="test",
-        hard=True,
-    )
-    conn.commit()
-
-    second = ingest_v1(
-        conn,
-        body=body,
-        kind="observation",
-        context=context,
-        writer="test",
-        session_id=None,
-        artifact_ref=None,
-    )
-    conn.commit()
-
-    # The write succeeds instead of raising; only the recompile is skipped, and
-    # the response says so rather than failing silently.
-    assert second["kind"] == "evidence_recorded"
-    assert "hard-corrected" in second["auto_compile_blocked"]
-    assert "auto_compiled_belief_id" not in second
-    # Evidence is content-addressed, so the identical body is the same record.
-    assert second["evidence_id"] == first["evidence_id"]
-    assert (
-        conn.execute("SELECT COUNT(*) FROM evidence_objects WHERE body=?", (body,)).fetchone()[0]
-        == 1
-    )
-    # And the belief stays retracted rather than being quietly revived.
-    assert (
-        conn.execute(
-            "SELECT status FROM current_beliefs WHERE belief_id=?", (belief_id,)
-        ).fetchone()["status"]
-        == "retracted"
-    )
 
 
 def _seed_servable_belief(conn, *, belief_id: str, body: str) -> None:

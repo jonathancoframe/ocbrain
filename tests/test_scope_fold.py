@@ -113,7 +113,7 @@ def test_fold_scope_id_keeps_the_type_prefix_verbatim() -> None:
     assert fold_scope_id("project:Coframe Brain") == "project:coframe-brain"
     # Scope types carry their own underscores; folding the prefix would produce
     # a type that matches nothing.
-    assert fold_scope_id("personal_finance:Pelican Fund") == "personal_finance:pelican-fund"
+    assert fold_scope_id("legacy_unscoped:Pelican Fund") == "legacy_unscoped:pelican-fund"
     assert fold_scope_id("legacy_unscoped:Legacy Thing") == "legacy_unscoped:legacy-thing"
     assert fold_scope_id("global:doctrine") == "global:doctrine"
     assert fold_scope_id("project:") == "project:"

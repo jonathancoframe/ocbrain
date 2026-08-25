@@ -7,7 +7,7 @@ import json
 import pytest
 
 from ocbrain.cli import main
-from ocbrain.core_v1 import init_core_v1, set_automatic_activation
+from ocbrain.core_v1 import init_core_v1
 from ocbrain.db import connect, init_db
 from ocbrain.events import (
     SKILL_TELEMETRY_KINDS,
@@ -107,10 +107,9 @@ def test_metadata_fields_reject_nested_content_and_malformed_hashes(field, value
         validate_skill_telemetry(_envelope(**{field: value}))
 
 
-def test_telemetry_ingest_validates_and_never_auto_compiles(tmp_path):
+def test_telemetry_ingest_validates_and_never_becomes_a_belief(tmp_path):
     conn = connect(tmp_path / "telemetry.sqlite")
     init_core_v1(conn)
-    set_automatic_activation(conn, True)
     result = ingest_v1(
         conn,
         body=json.dumps(_envelope()),
@@ -123,7 +122,6 @@ def test_telemetry_ingest_validates_and_never_auto_compiles(tmp_path):
     conn.commit()
 
     assert result["kind"] == "evidence_recorded"
-    assert "auto_compiled_belief_id" not in result
     assert conn.execute("SELECT COUNT(*) FROM evidence_objects").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM current_beliefs").fetchone()[0] == 0
 

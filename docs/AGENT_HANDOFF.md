@@ -1,6 +1,6 @@
 # OCBrain agent handoff
 
-Last updated: 2026-07-13
+Last updated: 2026-08-25
 
 OCBrain v1 is an on-demand, local shared-intelligence bridge for Codex, Claude
 Code, OpenClaw, and compatible MCP clients. It is not an autonomous job runner,
@@ -30,30 +30,44 @@ projections. Retrieval uses, source-handle issues, egress audits, and closeouts
 are append-only operational receipts.
 
 Core installs no timer, scheduler, pager, watchdog, autopilot, training loop,
-hosted judge, or hosted embedding process. Optional companion packages are
-physically separate:
+hosted judge, or hosted embedding process.
 
-- `ocbrain` — strict core, migration, CLI, and MCP;
-- `ocbrain-training` — local curation, audit, and training preparation;
-- `ocbrain-ops` — manual diagnostics and retired-operation compatibility.
-
-Companions use separate SQLite files. They are absent from the core wheel and
-MCP import graph. Training remains blocked until the required named-human audit
-is complete and a separate local training opt-in is enabled.
+There is exactly one distribution, `ocbrain`, with two console scripts
+(`ocbrain` and `ocbrain-closeout`, both dispatching to `ocbrain.cli:main`). The
+`ocbrain-training` and `ocbrain-ops` companion packages are deleted, along with
+the mechanism that let a companion add subcommands. Every ops table they owned
+was empty, so nothing was migrated out of them — there was nothing in them.
+Training was never authorized and now has no code.
 
 ## Source map
 
 ```text
-src/ocbrain/core_v1.py                  event chain and projections
-src/ocbrain/shared_context.py           stable context/source receipts
-src/ocbrain/mcp_v1.py                   v1 tool implementations
-src/ocbrain/mcp.py                      MCP transport and authority profiles
-src/ocbrain/v1_migration.py             archive-first migration
-packages/training/src/ocbrain_training  optional training companion
-packages/ops/src/ocbrain_ops            optional operations companion
-scripts/ocbrain-mcp                     portable stdio launcher
-ops/hooks/pre-push                      public-repository safety gate
+src/ocbrain/core_v1.py             event chain, projections, hybrid ranking
+src/ocbrain/mcp_v1.py              v1 tool implementations
+src/ocbrain/mcp.py                 MCP transport and authority profiles
+src/ocbrain/shared_context.py      stable context/source receipts
+src/ocbrain/retrieve.py            shared scoped retrieval and token estimator
+src/ocbrain/closeout.py            ocbrain.closeout.v1 receipts
+src/ocbrain/curator.py             wiki-curator model calls and claim validation
+src/ocbrain/curation.py            curated-manifest application
+src/ocbrain/hygiene.py             expired/redundant retirement, restore, supersede
+src/ocbrain/deslop.py              write-time slop rules (see DESLOP.md)
+src/ocbrain/publicsafety.py        public-repository safety scanner
+src/ocbrain/v1_migration.py        archive-first migration
+src/ocbrain/core_ops.py            backup, restore, bounded sync, doctor
+src/ocbrain/db.py                  v0 compatibility schema and persistence
+scripts/ocbrain-mcp                portable stdio launcher
+scripts/ocbrain-runtime-call       one-shot runtime dispatcher
+scripts/brain-sync.sh              operator harvest loop (opt-in)
+scripts/brain-promote.sh           operator promote/retire loop (opt-in)
+scripts/wiki-curator.py            sparse wiki compiler
+scripts/wiki-lint.py               materialized-wiki linter
+ops/hooks/pre-push                 public-repository safety gate
 ```
+
+`ls src/ocbrain` is the authority; the entries above are the ones a handoff
+usually needs. `src/ocbrain/write_batch.py` and the whole of `packages/` no
+longer exist.
 
 ## Runtime contract
 
@@ -87,8 +101,10 @@ Preserve these boundaries:
 - runtime tools append evidence and receipts, not hidden durable beliefs;
 - source expansion requires an issued, in-scope, hash-verified handle;
 - no brain tool enqueues or runs loop work;
-- no hosted judge, embedder, or teacher call activates from credentials alone;
-- no training run starts from AI/delegated triage labels;
+- the only call that leaves the machine is the wiki curator's provider request
+  in `curator.py`; it is invoked by a script rather than by the MCP and needs an
+  explicit `--apply`. The embedder path in `hybrid.py` refuses any host that is
+  not loopback;
 - no migration changes or repoints the live database;
 - no destructive history rewrite substitutes for correction or tombstone
   evidence;
@@ -97,30 +113,33 @@ Preserve these boundaries:
 ## Migration and activation
 
 `core-migrate-v1` is archive-first and fresh-path-only. It reads the legacy
-database, writes a coherent immutable archive plus fresh core and companion
-stores, verifies hashes/counts/integrity, and never activates the result.
+database, writes a coherent immutable archive plus a fresh strict core, verifies
+hashes/counts/integrity, and never activates the result. `--training-db` and
+`--ops-db` extract the legacy source's training and operational tables to their
+own files so every source table is accounted for; they are outputs of the
+migration, not installs.
 
 Activation is a separate operator action through the ignored local pointer.
 Before activation, verify the event prefix and chain, strict schema inventory,
-projection rebuild equivalence, companion separation, and rollback artifacts.
+projection rebuild equivalence, and rollback artifacts.
 
 ## Verification
 
 For source or public-documentation changes, run:
 
 ```bash
-PYTHONPATH=src:packages/training/src:packages/ops/src python -m pytest -q
-PYTHONPATH=src:packages/training/src:packages/ops/src ruff check .
-python -m compileall -q src packages tests
+PYTHONPATH=src python -m pytest -q
+ruff check .
+python -m compileall -q src tests
 git diff --check
-PYTHONPATH=src:packages/ops/src python -m ocbrain_ops.cli \
+PYTHONPATH=src python -m ocbrain.cli \
   public-safety-check --root . --diff-range origin/main
 ```
 
-For a release, also build all three distributions, inspect wheel inventories,
-install them into clean Python environments, exercise core and isolated
-companion CLIs, rehearse a real archive-first migration, and repeat the
-three-client acceptance gate.
+For a release, build the single `ocbrain` distribution, inspect the wheel
+inventory, install it into a clean Python environment, exercise the CLI,
+rehearse a real archive-first migration, and repeat the three-client acceptance
+gate.
 
 ## Repository discipline
 

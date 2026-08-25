@@ -119,7 +119,6 @@ def apply_curated_manifest(
                     "evidence_ids": list(dict.fromkeys(evidence_ids)),
                     "scope": scope.to_dict(),
                     "confidence": confidence,
-                    "reward_band": "strong",
                     "attributes": attributes,
                 },
                 writer=actor,

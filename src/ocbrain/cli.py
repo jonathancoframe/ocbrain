@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable
-from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
@@ -20,51 +18,29 @@ from ocbrain.core_ops import (
 )
 from ocbrain.core_v1 import (
     append_core_event,
-    automatic_activation_enabled,
     get_core_v1_belief,
     get_core_v1_evidence,
     init_core_v1,
     is_core_v1,
     migrate_core_v1_columns,
     record_core_v1_evidence,
-    set_automatic_activation,
 )
 from ocbrain.curation import apply_curated_manifest
-from ocbrain.curator import PROVIDER_DEFAULTS
 from ocbrain.db import (
     DEFAULT_DB_PATH,
     PUBLIC_SCOPES,
     connect,
     counts,
-    get_knowledge,
     init_db,
     knowledge_digest,
     link_knowledge_evidence,
     list_knowledge,
-    mark_knowledge_stale,
     search,
     upsert_evidence,
     upsert_knowledge,
     upsert_search_index,
 )
-from ocbrain.deslop import (
-    ENFORCED_RULE_IDS as DESLOP_ENFORCED_RULE_IDS,
-)
-from ocbrain.deslop import (
-    JUDGED_RULE,
-    apply_repair,
-    apply_volume_eviction,
-    install_doctrine,
-    judge_beliefs,
-    plan_volume_eviction,
-    request_repair,
-    rewindowed_evidence_id,
-    scan_beliefs,
-    served_beliefs,
-)
-from ocbrain.deslop import (
-    RULE_IDS as DESLOP_RULE_IDS,
-)
+from ocbrain.deslop import rewindowed_evidence_id
 from ocbrain.egress import egress_preview
 from ocbrain.events import (
     SKILL_TELEMETRY_KINDS,
@@ -91,14 +67,10 @@ from ocbrain.hybrid import build_vector_index, vector_status
 from ocbrain.hygiene import CLASSES as HYGIENE_CLASSES
 from ocbrain.hygiene import (
     DEFAULT_BATCH_CAP,
-    DEFAULT_MIN_AGE_DAYS,
-    DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
     DEFAULT_RESTATEMENT_THRESHOLD,
-    DEFAULT_UNHELPFUL_THRESHOLD,
     apply_retirements,
     plan_retirements,
     restore,
-    set_feedback_watermark,
     supersede,
     verify_serving_invariants,
 )
@@ -134,688 +106,6 @@ from ocbrain.text import (
 PRIVACY_SCOPES = ("private", "workspace", "project", "public")
 
 
-def _build_legacy_parser() -> argparse.ArgumentParser:
-    """Deprecated parser retained temporarily for direct v0.x function tests."""
-    parser = argparse.ArgumentParser(prog="ocbrain", description="OCBrain legacy commands")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path")
-    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
-    subparsers = parser.add_subparsers(dest="command")
-
-    init_parser = subparsers.add_parser("init", help="Initialize the SQLite ledger")
-    init_parser.set_defaults(func=cmd_init)
-
-    status_parser = subparsers.add_parser(
-        "status", help="Inspect core and companion state without changing the database"
-    )
-    status_parser.set_defaults(func=cmd_status)
-
-    sync_parser = subparsers.add_parser(
-        "sync",
-        help="Boundedly reconcile the local event projection (no hosted or scheduled work)",
-    )
-    sync_parser.add_argument("--max-events", type=int, default=1_000)
-    sync_parser.add_argument("--time-budget", type=float, default=10.0)
-    sync_parser.add_argument(
-        "--full",
-        action="store_true",
-        help=(
-            "discard every projected row and refold the whole ledger; the recovery "
-            "path after `deslop --volume --apply`. Ignores --max-events"
-        ),
-    )
-    sync_parser.set_defaults(func=cmd_sync)
-
-    doctor_parser = subparsers.add_parser(
-        "doctor", help="Check the database and smoke a real stdio MCP subprocess"
-    )
-    doctor_parser.add_argument("--timeout", type=float, default=8.0)
-    doctor_parser.add_argument("--launcher", type=Path)
-    doctor_parser.set_defaults(func=cmd_doctor)
-
-    runtime_parser = subparsers.add_parser(
-        "runtime-check",
-        help="Run doctor plus Codex, Claude Code, and OpenClaw MCP probes",
-    )
-    runtime_parser.add_argument("--timeout", type=float, default=12.0)
-    runtime_parser.add_argument("--launcher", type=Path)
-    runtime_parser.set_defaults(func=cmd_runtime_check)
-
-    backup_parser = subparsers.add_parser(
-        "backup", help="Create a verified online SQLite backup at a fresh path"
-    )
-    backup_parser.add_argument("--output", type=Path, required=True)
-    backup_parser.add_argument("--manifest", type=Path)
-    backup_parser.set_defaults(func=cmd_backup)
-
-    restore_parser = subparsers.add_parser(
-        "restore", help="Restore a verified backup to a fresh path (never overwrite live)"
-    )
-    restore_parser.add_argument("--backup", type=Path, required=True)
-    restore_parser.add_argument("--output-db", type=Path, required=True)
-    restore_parser.add_argument("--manifest", type=Path)
-    restore_parser.set_defaults(func=cmd_restore)
-
-    migrate_parser = subparsers.add_parser(
-        "core-migrate-v1",
-        help="Plan or build an archive-first fresh v1 core database",
-    )
-    migrate_parser.add_argument("--core-db", type=Path, required=True)
-    migrate_parser.add_argument("--archive-db", type=Path, required=True)
-    migrate_parser.add_argument("--manifest", type=Path, required=True)
-    migrate_parser.add_argument(
-        "--plan", action="store_true", help="Read-only preflight; create no files"
-    )
-    migrate_parser.set_defaults(func=cmd_core_migrate_v1)
-
-    evidence_parser = subparsers.add_parser("evidence", help="Append immutable evidence")
-    evidence_parser.add_argument("--claim")
-    evidence_parser.add_argument("--input", type=Path)
-    evidence_parser.add_argument("--source-type", default="closeout")
-    evidence_parser.add_argument("--source-runtime")
-    evidence_parser.add_argument("--source-uri")
-    evidence_parser.add_argument("--artifact-uri")
-    evidence_parser.add_argument("--artifact-hash")
-    evidence_parser.add_argument("--verifier-status", default="unknown")
-    evidence_parser.add_argument("--project")
-    evidence_parser.add_argument("--privacy-scope", default="workspace")
-    evidence_parser.set_defaults(func=cmd_evidence)
-
-    knowledge_parser = subparsers.add_parser("knowledge", help="List knowledge rows")
-    knowledge_parser.add_argument("--status")
-    knowledge_parser.add_argument("--type")
-    knowledge_parser.add_argument("--include-private", action="store_true")
-    knowledge_parser.add_argument("--limit", type=int, default=20)
-    knowledge_parser.set_defaults(func=cmd_knowledge)
-
-    promote_parser = subparsers.add_parser("value", help="Upsert one value knowledge row")
-    promote_parser.add_argument("--subject", required=True)
-    promote_parser.add_argument("--predicate", required=True)
-    typed_value = promote_parser.add_mutually_exclusive_group(required=True)
-    typed_value.add_argument("--text")
-    typed_value.add_argument("--number", type=float)
-    typed_value.add_argument("--bool", choices=["true", "false"])
-    promote_parser.add_argument("--unit")
-    promote_parser.add_argument("--target-value", type=float)
-    promote_parser.add_argument("--status", default="candidate")
-    promote_parser.add_argument("--inject", action="store_true")
-    promote_parser.add_argument("--confidence", type=float)
-    promote_parser.add_argument("--project")
-    promote_parser.add_argument("--privacy-scope", default="workspace")
-    promote_parser.set_defaults(func=cmd_value)
-
-    search_parser = subparsers.add_parser("search", help="Search evidence and knowledge")
-    search_parser.add_argument("query")
-    search_parser.add_argument("--limit", type=int, default=10)
-    search_parser.add_argument("--include-private", action="store_true")
-    search_parser.add_argument("--project")
-    search_parser.add_argument("--type")
-    search_parser.add_argument("--status")
-    search_parser.add_argument("--loop-id")
-    search_parser.add_argument("--family")
-    search_parser.set_defaults(func=cmd_search)
-
-    preview_parser = subparsers.add_parser(
-        "preview",
-        help="Preview the exact scoped retrieval payload from the event-sourced core",
-    )
-    preview_parser.add_argument("query")
-    add_context_args(preview_parser)
-    preview_parser.add_argument("--limit", type=int, default=12)
-    preview_parser.add_argument("--cross-scope", action="store_true")
-    preview_parser.add_argument("--at-ts")
-    preview_parser.set_defaults(func=cmd_preview)
-
-    ingest_parser = subparsers.add_parser(
-        "event-ingest",
-        help="Append scoped evidence to the event-sourced core",
-    )
-    ingest_parser.add_argument("--body", required=True)
-    ingest_parser.add_argument("--kind", default="observation")
-    ingest_parser.add_argument("--writer", default="ocbrain")
-    ingest_parser.add_argument("--artifact-ref")
-    add_context_args(ingest_parser)
-    ingest_parser.add_argument("--global-doctrine", action="store_true")
-    ingest_parser.set_defaults(func=cmd_event_ingest)
-
-    compile_parser = subparsers.add_parser(
-        "event-compile",
-        help="Append and optionally approve a compiled belief event",
-    )
-    compile_parser.add_argument("--belief-id", required=True)
-    compile_parser.add_argument("--body", required=True)
-    compile_parser.add_argument("--evidence-id", action="append", default=[])
-    compile_parser.add_argument("--confidence", type=float)
-    compile_parser.add_argument(
-        "--reward-band",
-        choices=["discard", "weak", "moderate", "strong"],
-    )
-    compile_parser.add_argument("--approve", action="store_true")
-    add_context_args(compile_parser)
-    compile_parser.add_argument("--global-doctrine", action="store_true")
-    compile_parser.set_defaults(func=cmd_event_compile)
-
-    correct_parser = subparsers.add_parser(
-        "event-correct",
-        help="Append a durable correction and synchronously rebuild the projection",
-    )
-    correct_parser.add_argument(
-        "--target-layer",
-        choices=["evidence", "knowledge", "belief"],
-        required=True,
-    )
-    correct_parser.add_argument("--target-id", required=True)
-    correct_parser.add_argument(
-        "--op",
-        choices=["mark_wrong", "edit", "pin", "demote", "reframe", "retract", "restore"],
-        required=True,
-    )
-    correct_parser.add_argument("--body")
-    correct_parser.add_argument("--author", default="human:jonathan")
-    correct_parser.add_argument("--hard", action="store_true")
-    correct_parser.set_defaults(func=cmd_event_correct)
-
-    forget_parser = subparsers.add_parser(
-        "event-forget",
-        help="Append a tombstone and synchronously rebuild the projection",
-    )
-    forget_parser.add_argument("--target", required=True)
-    forget_parser.add_argument("--mode", choices=["soft", "shred"], default="soft")
-    forget_parser.add_argument("--reason")
-    forget_parser.add_argument("--approved-by", default="human:jonathan")
-    forget_parser.set_defaults(func=cmd_event_forget)
-
-    dream_parser = subparsers.add_parser(
-        "event-dream",
-        help="Batch scoped evidence into pending compilation proposals",
-    )
-    add_context_args(dream_parser)
-    dream_parser.add_argument("--since-ts")
-    dream_parser.add_argument("--target", default="local_model")
-    dream_parser.add_argument("--record-egress", action="store_true")
-    dream_parser.add_argument("--limit", type=int, default=20)
-    dream_parser.set_defaults(func=cmd_event_dream)
-
-    proposals_parser = subparsers.add_parser(
-        "event-proposals",
-        help="List pending or decided event-core compilation proposals",
-    )
-    add_context_args(proposals_parser)
-    proposals_parser.add_argument("--include-decided", action="store_true")
-    proposals_parser.add_argument("--limit", type=int, default=50)
-    proposals_parser.set_defaults(func=cmd_event_proposals)
-
-    decide_parser = subparsers.add_parser(
-        "event-decide",
-        help="Append a gate decision for one compilation proposal",
-    )
-    decide_parser.add_argument("--proposal-event-id", required=True)
-    decide_parser.add_argument(
-        "--decision",
-        choices=["approve", "reject", "edit", "shadow"],
-        required=True,
-    )
-    decide_parser.add_argument("--actor", default="human:jonathan")
-    decide_parser.add_argument("--edited-body")
-    decide_parser.add_argument("--reason")
-    decide_parser.set_defaults(func=cmd_event_decide)
-
-    event_digest_parser = subparsers.add_parser(
-        "event-digest",
-        help="Return scoped event-core digest, pending proposals, and current beliefs",
-    )
-    add_context_args(event_digest_parser)
-    event_digest_parser.add_argument("--since-ts")
-    event_digest_parser.add_argument("--limit", type=int, default=20)
-    event_digest_parser.set_defaults(func=cmd_event_digest)
-
-    egress_parser = subparsers.add_parser(
-        "egress-preview",
-        help="Preview scope-filtered evidence before local or hosted teacher egress",
-    )
-    egress_parser.add_argument("--target", default="hosted_teacher")
-    egress_parser.add_argument("--query")
-    egress_parser.add_argument("--record", action="store_true")
-    add_context_args(egress_parser)
-    egress_parser.set_defaults(func=cmd_egress_preview)
-
-    teacher_parser = subparsers.add_parser(
-        "event-teacher-request",
-        help="Prepare a hosted-teacher package when explicitly enabled (never dispatches)",
-    )
-    add_context_args(teacher_parser)
-    teacher_parser.add_argument("--query")
-    teacher_parser.add_argument("--objective", default="compile_scoped_beliefs")
-    teacher_parser.add_argument("--model", default="hosted_teacher")
-    teacher_parser.add_argument("--limit", type=int, default=20)
-    teacher_parser.add_argument("--no-record", action="store_true")
-    teacher_parser.set_defaults(func=cmd_event_teacher_request)
-
-    backfill_parser = subparsers.add_parser(
-        "event-backfill",
-        help="Backfill current legacy knowledge into the scoped event-sourced core",
-    )
-    backfill_parser.add_argument("--limit", type=int, default=100)
-    backfill_parser.add_argument(
-        "--sample-limit",
-        type=int,
-        default=100,
-        help="Maximum planned/imported items to include in command output",
-    )
-    backfill_parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Backfill all remaining matching current legacy rows in one transaction",
-    )
-    backfill_parser.add_argument("--project")
-    backfill_parser.add_argument("--type")
-    backfill_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Classify the next legacy rows without appending event-core writes",
-    )
-    backfill_parser.set_defaults(func=cmd_event_backfill)
-
-    import_memory_parser = subparsers.add_parser(
-        "import-memory",
-        help="Import markdown memory files as source-backed doc knowledge",
-    )
-    import_memory_parser.add_argument("paths", nargs="+", type=Path)
-    import_memory_parser.add_argument("--project", default="workspace")
-    import_memory_parser.add_argument("--privacy-scope", choices=PRIVACY_SCOPES, default="private")
-    import_memory_parser.add_argument("--limit", type=int)
-    import_memory_parser.add_argument(
-        "--max-bytes",
-        type=int,
-        default=50_000,
-        help="Maximum UTF-8 bytes to index per file",
-    )
-    import_memory_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Scan, redact, and report planned imports without opening the database",
-    )
-    import_memory_parser.add_argument(
-        "--evidence-only",
-        action="store_true",
-        help="append memory-file evidence without promoting the whole file into a serving belief",
-    )
-    import_memory_parser.set_defaults(func=cmd_import_memory)
-
-    import_history_parser = subparsers.add_parser(
-        "import-history",
-        help="Import runtime transcript/history files as source-backed doc knowledge",
-    )
-    import_history_parser.add_argument("paths", nargs="*", type=Path)
-    import_history_parser.add_argument(
-        "--manifest",
-        action="append",
-        type=Path,
-        default=[],
-        help="Newline-delimited file containing history file paths",
-    )
-    import_history_parser.add_argument("--project", default="workspace")
-    import_history_parser.add_argument("--privacy-scope", choices=PRIVACY_SCOPES, default="private")
-    import_history_parser.add_argument("--limit", type=int)
-    import_history_parser.add_argument(
-        "--max-bytes",
-        type=int,
-        default=20_000,
-        help="Maximum UTF-8 bytes to index per history file",
-    )
-    import_history_parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=500,
-        help="Commit after this many imported files",
-    )
-    import_history_parser.add_argument(
-        "--evidence-only",
-        action="store_true",
-        help="append transcript evidence without promoting whole transcripts into serving beliefs",
-    )
-    import_history_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Scan, redact, and report planned imports without opening the database",
-    )
-    import_history_parser.set_defaults(func=cmd_import_history)
-
-    digest_parser = subparsers.add_parser("digest", help="Show current knowledge digest")
-    digest_parser.add_argument("--project")
-    digest_parser.add_argument("--limit", type=int, default=12)
-    digest_parser.add_argument("--include-private", action="store_true")
-    digest_parser.set_defaults(func=cmd_digest)
-
-    loop_ingest_parser = subparsers.add_parser(
-        "loop-ingest", help="Dry-run or apply loop result envelopes as evidence/knowledge"
-    )
-    loop_ingest_parser.add_argument("--loop-id", required=True)
-    loop_ingest_parser.add_argument("--run-id", required=True)
-    loop_ingest_parser.add_argument("--artifacts", required=True, type=Path)
-    loop_ingest_parser.add_argument("--ledger", type=Path)
-    loop_ingest_parser.add_argument("--backlog", type=Path)
-    loop_mode = loop_ingest_parser.add_mutually_exclusive_group()
-    loop_mode.add_argument("--dry-run", action="store_true")
-    loop_mode.add_argument("--apply", action="store_true")
-    loop_ingest_parser.add_argument("--json", action="store_true", help="Emit JSON output")
-    loop_ingest_parser.set_defaults(func=cmd_loop_ingest)
-
-    stale_parser = subparsers.add_parser("mark-stale", help="Mark knowledge stale")
-    stale_parser.add_argument("knowledge_id")
-    stale_parser.add_argument("--reason", default="user_request")
-    stale_parser.set_defaults(func=cmd_mark_stale)
-
-    prune_parser = subparsers.add_parser(
-        "prune", help="Mark unreferenced expired knowledge stale or archived"
-    )
-    prune_parser.add_argument("--ttl-days", type=int, default=30)
-    prune_parser.add_argument("--unhelpful-ttl-days", type=int, default=14)
-    prune_parser.add_argument("--archive-stale-days", type=int)
-    prune_parser.set_defaults(func=cmd_prune)
-
-    heal_parser = subparsers.add_parser(
-        "heal", help="Supersede conflicting current value knowledge"
-    )
-    heal_parser.add_argument("--numeric-threshold", type=float, default=0.0)
-    heal_parser.set_defaults(func=cmd_heal)
-
-    liveness_parser = subparsers.add_parser(
-        "liveness-check", help="Open loop liveness tripwires from runner deadman rows"
-    )
-    liveness_parser.add_argument("--runner-ledger", type=Path)
-    liveness_parser.set_defaults(func=cmd_liveness_check)
-
-    mcp_parser = subparsers.add_parser("mcp", help="Run stdio MCP server")
-    mcp_parser.add_argument(
-        "--profile",
-        choices=["runtime", "admin"],
-        default="runtime",
-        help="runtime exposes the shared bridge; admin adds protected maintenance tools",
-    )
-    mcp_parser.add_argument(
-        "--allow-writes",
-        action="store_true",
-        help="Deprecated alias for the admin MCP profile; enables protected mutation tools",
-    )
-    mcp_parser.set_defaults(func=cmd_mcp)
-
-    # --- v0.2 autonomy + dataset factory (spec §8) --------------------------
-    autopilot_parser = subparsers.add_parser(
-        "autopilot", help="Manually run the maintenance pipeline (never scheduled by ocbrain)"
-    )
-    autopilot_select = autopilot_parser.add_mutually_exclusive_group()
-    autopilot_select.add_argument(
-        "--stage",
-        action="append",
-        dest="stages",
-        help="Run only this stage (repeatable); default runs all stages",
-    )
-    autopilot_select.add_argument(
-        "--profile",
-        dest="profile",
-        help=(
-            "Run a named stage profile from cfg.autopilot.profiles "
-            "(legacy 'light'/'heavy' names are manual only); embed runs after autolabel"
-        ),
-    )
-    autopilot_parser.add_argument("--dry-run", action="store_true")
-    autopilot_parser.set_defaults(func=cmd_autopilot)
-
-    quarantine_parser = subparsers.add_parser(
-        "quarantine", help="List or release quarantined knowledge"
-    )
-    quarantine_sub = quarantine_parser.add_subparsers(dest="quarantine_command")
-    q_list = quarantine_sub.add_parser("list", help="List quarantined knowledge rows")
-    q_list.add_argument("--limit", type=int, default=100)
-    q_list.set_defaults(func=cmd_quarantine_list)
-    q_release = quarantine_sub.add_parser("release", help="Release a quarantined row")
-    q_release.add_argument("knowledge_id")
-    q_release.add_argument("--actor", required=True)
-    q_release.add_argument("--reason", required=True)
-    q_release.set_defaults(func=cmd_quarantine_release)
-    quarantine_parser.set_defaults(func=cmd_quarantine_list)
-
-    label_parser = subparsers.add_parser(
-        "label", help="Record a manual good/bad quality signal on a knowledge row"
-    )
-    label_parser.add_argument("knowledge_id")
-    label_parser.add_argument("--outcome", choices=["good", "bad"], required=True)
-    label_parser.add_argument("--note", default="")
-    label_parser.set_defaults(func=cmd_label)
-
-    dataset_mine_parser = subparsers.add_parser(
-        "dataset-mine", help="Mine SFT/DPO/persona examples from transcripts"
-    )
-    dataset_mine_parser.add_argument("--dataset", choices=["sft", "dpo", "persona"])
-    dataset_mine_parser.add_argument("--limit", type=int)
-    dataset_mine_parser.add_argument("--time-budget", type=float, dest="time_budget")
-    dataset_mine_parser.add_argument("--verified-only", action="store_true")
-    dataset_mine_parser.set_defaults(func=cmd_dataset_mine)
-
-    dataset_curate_parser = subparsers.add_parser(
-        "dataset-persona-curate",
-        help="Import explicit private persona prompt/response JSONL",
-    )
-    dataset_curate_parser.add_argument("--input", type=Path, required=True)
-    dataset_curate_parser.set_defaults(func=cmd_dataset_persona_curate)
-
-    dataset_calibration_parser = subparsers.add_parser(
-        "dataset-calibration-import",
-        help="Import private human preferences with reasons and ideal corrections",
-    )
-    dataset_calibration_parser.add_argument("--input", type=Path, required=True)
-    dataset_calibration_parser.set_defaults(func=cmd_dataset_calibration_import)
-
-    dataset_grade_parser = subparsers.add_parser(
-        "dataset-grade", help="Grade examples with a loopback-only local LLM"
-    )
-    dataset_grade_parser.add_argument("--dataset", choices=["sft", "dpo", "persona"])
-    dataset_grade_parser.add_argument("--limit", type=int)
-    dataset_grade_parser.add_argument("--endpoint")
-    dataset_grade_parser.add_argument("--model")
-    dataset_grade_parser.add_argument(
-        "--source-uri-prefix",
-        help="Grade only examples whose local provenance URI begins with this value",
-    )
-    dataset_grade_parser.add_argument("--force", action="store_true")
-    dataset_grade_parser.add_argument(
-        "--train-class",
-        action="append",
-        dest="train_classes",
-        choices=[
-            "train_voice",
-            "train_judgment",
-            "train_skill",
-            "retrieval_only",
-            "exclude",
-        ],
-        help="Grade only examples in one or more weights/retrieval classes",
-    )
-    dataset_grade_parser.add_argument(
-        "--selected-only",
-        action="store_true",
-        help="Grade only the deterministic v0.4 selected training pack",
-    )
-    dataset_grade_parser.set_defaults(func=cmd_dataset_grade)
-
-    dataset_classify_parser = subparsers.add_parser(
-        "dataset-classify",
-        help="Classify examples as weights training, retrieval-only, or excluded",
-    )
-    dataset_classify_parser.add_argument("--limit", type=int)
-    dataset_classify_parser.add_argument("--force", action="store_true")
-    dataset_classify_parser.set_defaults(func=cmd_dataset_classify)
-
-    dataset_pack_select_parser = subparsers.add_parser(
-        "dataset-pack-select",
-        help="Select the deterministic local v0.4 training pack",
-    )
-    dataset_pack_select_parser.add_argument("--sft", type=int, default=2000)
-    dataset_pack_select_parser.add_argument("--dpo", type=int, default=300)
-    dataset_pack_select_parser.add_argument("--persona", type=int, default=500)
-    dataset_pack_select_parser.add_argument("--seed", default="ocbrain-v04-selected-pack-v1")
-    dataset_pack_select_parser.set_defaults(func=cmd_dataset_pack_select)
-
-    dataset_pack_finalize_parser = subparsers.add_parser(
-        "dataset-pack-finalize",
-        help="Finalize the graded candidate pool into a passing v0.4 training pack",
-    )
-    dataset_pack_finalize_parser.add_argument("--sft", type=int, default=1000)
-    dataset_pack_finalize_parser.add_argument("--dpo", type=int, default=200)
-    dataset_pack_finalize_parser.add_argument("--persona", type=int, default=300)
-    dataset_pack_finalize_parser.add_argument("--min-grade", type=float, default=0.8)
-    dataset_pack_finalize_parser.set_defaults(func=cmd_dataset_pack_finalize)
-
-    dataset_pack_stats_parser = subparsers.add_parser(
-        "dataset-pack-stats",
-        help="Report selected-pack local grade coverage and passing counts",
-    )
-    dataset_pack_stats_parser.add_argument("--min-grade", type=float, default=0.8)
-    dataset_pack_stats_parser.set_defaults(func=cmd_dataset_pack_stats)
-
-    feedback_stats_parser = subparsers.add_parser(
-        "retrieval-feedback-stats",
-        help="Report explicit/inferred retrieval feedback coverage",
-    )
-    feedback_stats_parser.set_defaults(func=cmd_retrieval_feedback_stats)
-
-    retrieval_benchmark_parser = subparsers.add_parser(
-        "retrieval-benchmark",
-        help="Run a frozen, scope-aware retrieval benchmark without returning corpus text",
-    )
-    retrieval_benchmark_parser.add_argument("--input", type=Path, required=True)
-    retrieval_benchmark_parser.add_argument(
-        "--allow-small", action="store_true", help="Allow fewer than 100 cases for diagnostics"
-    )
-    retrieval_benchmark_parser.set_defaults(func=cmd_retrieval_benchmark)
-
-    retrieval_benchmark_expand_parser = subparsers.add_parser(
-        "retrieval-benchmark-expand",
-        help="Expand a private 25-case base across four supported runtimes",
-    )
-    retrieval_benchmark_expand_parser.add_argument("--input", type=Path, required=True)
-    retrieval_benchmark_expand_parser.add_argument("--output", type=Path, required=True)
-    retrieval_benchmark_expand_parser.set_defaults(func=cmd_retrieval_benchmark_expand)
-
-    dataset_export_parser = subparsers.add_parser(
-        "dataset-export", help="Export deterministic JSONL datasets + manifest"
-    )
-    dataset_export_parser.add_argument("--dataset", choices=["sft", "dpo", "persona"])
-    dataset_export_parser.add_argument("--min-scope", dest="min_scope")
-    dataset_export_parser.add_argument("--min-label", dest="min_label")
-    dataset_export_parser.add_argument("--min-grade", type=float, dest="min_grade")
-    dataset_export_parser.add_argument("--output-dir", type=Path, dest="output_dir")
-    dataset_export_parser.add_argument("--verified-only", action="store_true")
-    dataset_export_parser.set_defaults(func=cmd_dataset_export)
-
-    dataset_stats_parser = subparsers.add_parser(
-        "dataset-stats", help="Report dataset growth by label/scope/source/week"
-    )
-    dataset_stats_parser.set_defaults(func=cmd_dataset_stats)
-
-    pilot_prepare_parser = subparsers.add_parser(
-        "dataset-pilot-prepare",
-        help="Build the eval-first local fine-tune pilot pack when explicitly enabled",
-    )
-    pilot_prepare_parser.add_argument("--output-dir", type=Path)
-    pilot_prepare_parser.add_argument("--min-grade", type=float)
-    pilot_prepare_parser.add_argument("--eval-prompts", type=int, default=100)
-    pilot_prepare_parser.add_argument("--seed", default="ocbrain-voice-pilot-v3")
-    pilot_prepare_parser.add_argument("--base-model")
-    pilot_prepare_parser.add_argument("--base-model-source")
-    pilot_prepare_parser.add_argument("--base-model-revision")
-    pilot_prepare_parser.add_argument(
-        "--eval-from",
-        type=Path,
-        help="Reuse a prior pilot's prompts/references/rubric byte-for-byte",
-    )
-    pilot_prepare_parser.add_argument(
-        "--legacy-sentinel-from",
-        type=Path,
-        help="Preserve a prior frozen eval separately and exclude all its sources from train",
-    )
-    pilot_prepare_parser.add_argument(
-        "--diagnostic-small-pack",
-        action="store_true",
-        help="Disable v0.4 corpus-size/train-class gates for diagnostics only",
-    )
-    pilot_prepare_parser.add_argument("--training-iterations", type=int, default=25)
-    pilot_prepare_parser.set_defaults(func=cmd_dataset_pilot_prepare)
-
-    pilot_blind_parser = subparsers.add_parser(
-        "dataset-pilot-blind", help="Randomize reference/model answers for blind scoring"
-    )
-    pilot_blind_parser.add_argument("--pilot-dir", type=Path, required=True)
-    pilot_blind_parser.add_argument("--candidate-responses", type=Path, required=True)
-    pilot_blind_parser.add_argument("--seed", default="ocbrain-blind-v1")
-    pilot_blind_parser.set_defaults(func=cmd_dataset_pilot_blind)
-
-    pilot_score_parser = subparsers.add_parser(
-        "dataset-pilot-score", help="Score completed blind voice/taste ratings"
-    )
-    pilot_score_parser.add_argument("--pilot-dir", type=Path, required=True)
-    pilot_score_parser.add_argument("--ratings", type=Path, required=True)
-    pilot_score_parser.set_defaults(func=cmd_dataset_pilot_score)
-
-    pilot_multiblind_parser = subparsers.add_parser(
-        "dataset-pilot-multiblind",
-        help="Build a blinded Jonathan/base/tuned/frontier evaluation pack",
-    )
-    pilot_multiblind_parser.add_argument("--pilot-dir", type=Path, required=True)
-    pilot_multiblind_parser.add_argument(
-        "--response",
-        action="append",
-        required=True,
-        help="One of base=/path, tuned=/path, frontier=/path; repeat three times",
-    )
-    pilot_multiblind_parser.add_argument("--seed", default="ocbrain-multiblind-v1")
-    pilot_multiblind_parser.set_defaults(func=cmd_dataset_pilot_multiblind)
-
-    pilot_multiscore_parser = subparsers.add_parser(
-        "dataset-pilot-multiscore", help="Score completed four-way blind rankings"
-    )
-    pilot_multiscore_parser.add_argument("--pilot-dir", type=Path, required=True)
-    pilot_multiscore_parser.add_argument("--ratings", type=Path, required=True)
-    pilot_multiscore_parser.set_defaults(func=cmd_dataset_pilot_multiscore)
-
-    pilot_record_parser = subparsers.add_parser(
-        "dataset-pilot-record-training", help="Record verified local adapter evidence"
-    )
-    pilot_record_parser.add_argument("--pilot-dir", type=Path, required=True)
-    pilot_record_parser.add_argument("--iterations", type=int, required=True)
-    pilot_record_parser.add_argument("--train-loss", type=float, required=True)
-    pilot_record_parser.add_argument("--validation-loss", type=float, required=True)
-    pilot_record_parser.add_argument("--exit-code", type=int, required=True)
-    pilot_record_parser.set_defaults(func=cmd_dataset_pilot_record_training)
-
-    # --- public-safety enforcement (tracked-tree scanner + hooks) ----------
-    public_safety_parser = subparsers.add_parser(
-        "public-safety-check",
-        help="Scan the tracked tree for private data before it reaches the public repo",
-    )
-    public_safety_parser.add_argument(
-        "--diff-range",
-        help="git range (e.g. origin/main..HEAD) to scan added lines for new secrets",
-    )
-    public_safety_parser.add_argument(
-        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
-    )
-    public_safety_parser.add_argument("--json", action="store_true", help="Emit JSON output")
-    public_safety_parser.set_defaults(func=cmd_public_safety_check)
-
-    install_hooks_parser = subparsers.add_parser(
-        "install-hooks", help="Symlink tracked git hooks (ops/hooks) into .git/hooks"
-    )
-    install_hooks_parser.add_argument(
-        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
-    )
-    install_hooks_parser.set_defaults(func=cmd_install_hooks)
-
-    parser.add_argument("--input", type=Path, help=argparse.SUPPRESS)
-    return parser
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build the core-only v1 CLI parser.
 
@@ -844,8 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--full",
         action="store_true",
         help=(
-            "discard every projected row and refold the whole ledger; the recovery "
-            "path after `deslop --volume --apply`. Ignores --max-events"
+            "discard every projected row and refold the whole ledger from scratch. "
+            "Ignores --max-events"
         ),
     )
     sync.set_defaults(func=cmd_sync)
@@ -893,16 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="soft-retract the selected beliefs (default: report only)",
     )
-    hygiene_parser.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS)
     hygiene_parser.add_argument("--batch-cap", type=int, default=DEFAULT_BATCH_CAP)
-    hygiene_parser.add_argument(
-        "--min-feedback-observations",
-        type=int,
-        default=DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
-    )
-    hygiene_parser.add_argument(
-        "--unhelpful-threshold", type=float, default=DEFAULT_UNHELPFUL_THRESHOLD
-    )
     hygiene_parser.add_argument(
         "--restatement-threshold",
         type=float,
@@ -910,14 +191,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "token overlap above which two served beliefs count as one fact "
             "restated; lower retires more aggressively"
-        ),
-    )
-    hygiene_parser.add_argument(
-        "--set-watermark",
-        action="store_true",
-        help=(
-            "stamp now as the point from which retrieval feedback counts, then exit; "
-            "run this after a ranking change so stale verdicts do not retire good facts"
         ),
     )
     hygiene_parser.add_argument(
@@ -932,76 +205,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="mark one belief superseded by another, then exit",
     )
     hygiene_parser.set_defaults(func=cmd_hygiene)
-
-    deslop_parser = commands.add_parser(
-        "deslop",
-        help="Find and repair badly-written beliefs, and evict re-windowed evidence",
-        description=(
-            "Two layers. The mechanical rules are deterministic and free, so they "
-            "run everywhere including inside the curator's own validation. The "
-            "judged rule asks a model the one question no pattern can answer: "
-            "would a future reader act differently for knowing this? Nothing is "
-            "deleted -- repairs rewrite or split, and every outcome is reversible "
-            "through `ocbrain hygiene --restore`."
-        ),
-    )
-    deslop_parser.add_argument(
-        "--class",
-        dest="classes",
-        action="append",
-        choices=[*DESLOP_RULE_IDS, JUDGED_RULE],
-        help="restrict to one rule; repeatable (default: all mechanical rules)",
-    )
-    deslop_parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="repair the findings (default: report only)",
-    )
-    deslop_parser.add_argument(
-        "--mechanical-only",
-        action="store_true",
-        help="skip the judged rule, so the run makes no hosted call and is deterministic",
-    )
-    deslop_parser.add_argument(
-        "--volume",
-        action="store_true",
-        help=(
-            "report re-windowed evidence rows instead of belief findings. With "
-            "--apply this evicts them from the projection; `ocbrain sync --full` "
-            "rebuilds every row from the ledger"
-        ),
-    )
-    deslop_parser.add_argument(
-        "--provider",
-        default="anthropic",
-        choices=sorted(PROVIDER_DEFAULTS),
-        help="hosted model provider for the judged rule and for repairs",
-    )
-    deslop_parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=Path.home() / ".common",
-        help="dotenv file consulted when the API key env var is unset",
-    )
-    deslop_parser.add_argument("--api-key-env", help="defaults to the provider's usual variable")
-    deslop_parser.add_argument("--base-url", help="defaults to the provider's endpoint")
-    deslop_parser.add_argument("--model", help="defaults to the provider's mid-tier model")
-    deslop_parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="most repairs to apply in one run (default: deslop.max_repairs_per_run)",
-    )
-    deslop_parser.add_argument(
-        "--install-doctrine",
-        action="store_true",
-        help=(
-            "store the writing standard as a pinned belief, then exit; any client "
-            "calling brain.context before writing then retrieves it"
-        ),
-    )
-    deslop_parser.add_argument("--project", default="workspace")
-    deslop_parser.set_defaults(func=cmd_deslop)
 
     config_parser = commands.add_parser(
         "config",
@@ -1130,7 +333,6 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--body", required=True)
     compile_parser.add_argument("--evidence-id", action="append", default=[])
     compile_parser.add_argument("--confidence", type=float)
-    compile_parser.add_argument("--reward-band", choices=["discard", "weak", "moderate", "strong"])
     compile_parser.add_argument("--approve", action="store_true")
     add_context_args(compile_parser)
     compile_parser.add_argument("--global-doctrine", action="store_true")
@@ -1281,31 +483,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument("--active-db-file", type=Path, help=argparse.SUPPRESS)
     mcp_parser.set_defaults(func=cmd_mcp)
-    automatic_activation_parser = commands.add_parser(
-        "automatic-activation",
-        help="Show or set unattended evidence/closeout to belief promotion",
+    # Public-safety enforcement lives in core, not an optional companion: it is
+    # the gate that keeps private paths and secrets out of this public repo, and
+    # CI runs it on every push. A guard nobody has installed is not a guard.
+    public_safety_parser = commands.add_parser(
+        "public-safety-check",
+        help="Scan the tracked tree for private data before it reaches the public repo",
     )
-    automatic_activation_group = automatic_activation_parser.add_mutually_exclusive_group()
-    automatic_activation_group.add_argument(
-        "--enable",
-        action="store_true",
-        help="auto-promote ingested evidence and closeouts into served beliefs",
+    public_safety_parser.add_argument(
+        "--diff-range",
+        help="git range (e.g. origin/main..HEAD) to scan added lines for new secrets",
     )
-    automatic_activation_group.add_argument(
-        "--disable",
-        action="store_true",
-        help="keep promotion human-gated (the default)",
+    public_safety_parser.add_argument(
+        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
     )
-    automatic_activation_parser.set_defaults(func=cmd_automatic_activation)
+    public_safety_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    public_safety_parser.set_defaults(func=cmd_public_safety_check)
+
+    install_hooks_parser = commands.add_parser(
+        "install-hooks", help="Symlink tracked git hooks (ops/hooks) into .git/hooks"
+    )
+    install_hooks_parser.add_argument(
+        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
+    )
+    install_hooks_parser.set_defaults(func=cmd_install_hooks)
+
     parser.add_argument("--input", type=Path, help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    extension_result = dispatch_companion_command(argv)
-    if extension_result is not None:
-        return extension_result
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.input and args.command is None:
@@ -1315,100 +523,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
     return args.func(args)
-
-
-COMPANION_COMMANDS: dict[str, str] = {
-    "autopilot": "ocbrain-ops",
-    "quarantine": "ocbrain-ops",
-    "label": "ocbrain-ops",
-    "loop-ingest": "ocbrain-ops",
-    "prune": "ocbrain-ops",
-    "heal": "ocbrain-ops",
-    "liveness-check": "ocbrain-ops",
-    "event-dream": "ocbrain-ops",
-    "event-teacher-request": "ocbrain-ops",
-    "retrieval-feedback-stats": "ocbrain-ops",
-    "public-safety-check": "ocbrain-ops",
-    "install-hooks": "ocbrain-ops",
-    "dataset-mine": "ocbrain-training",
-    "dataset-persona-curate": "ocbrain-training",
-    "dataset-calibration-import": "ocbrain-training",
-    "dataset-grade": "ocbrain-training",
-    "dataset-classify": "ocbrain-training",
-    "dataset-pack-select": "ocbrain-training",
-    "dataset-pack-finalize": "ocbrain-training",
-    "dataset-pack-stats": "ocbrain-training",
-    "dataset-export": "ocbrain-training",
-    "dataset-stats": "ocbrain-training",
-    "dataset-pilot-prepare": "ocbrain-training",
-    "dataset-pilot-blind": "ocbrain-training",
-    "dataset-pilot-score": "ocbrain-training",
-    "dataset-pilot-multiblind": "ocbrain-training",
-    "dataset-pilot-multiscore": "ocbrain-training",
-    "dataset-pilot-record-training": "ocbrain-training",
-    "retrieval-benchmark": "ocbrain-training",
-    "retrieval-benchmark-expand": "ocbrain-training",
-}
-
-
-def _command_position(argv: list[str]) -> int | None:
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token in {"--db"}:
-            index += 2
-            continue
-        if token in {"--pretty"}:
-            index += 1
-            continue
-        if token.startswith("-"):
-            return None
-        return index
-    return None
-
-
-def dispatch_companion_command(argv: list[str]) -> int | None:
-    """Load only the exact optional command selected by the operator."""
-    position = _command_position(argv)
-    if position is None:
-        return None
-    command = argv[position]
-    package = COMPANION_COMMANDS.get(command)
-    if package is None:
-        return None
-    db: Path | None = None
-    pretty = "--pretty" in argv[:position]
-    if "--db" in argv[:position]:
-        db_index = argv.index("--db")
-        if db_index + 1 < position:
-            db = Path(argv[db_index + 1])
-    matches = [item for item in entry_points(group="ocbrain.commands.v1") if item.name == command]
-    if len(matches) > 1:
-        print(
-            json.dumps(
-                {
-                    "action": command,
-                    "status": "blocked",
-                    "error": "multiple companion providers registered",
-                },
-                sort_keys=True,
-            )
-        )
-        return 2
-    if not matches:
-        print(
-            json.dumps(
-                {
-                    "action": command,
-                    "status": "blocked",
-                    "reason": "optional_companion_not_installed",
-                    "install": f"pip install {package}",
-                },
-                sort_keys=True,
-            )
-        )
-        return 2
-    return int(matches[0].load()(argv=argv[position:], db=db, pretty=pretty))
 
 
 def output(args: argparse.Namespace, payload) -> None:
@@ -1579,8 +693,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             "database": result,
             "operating_model": {
                 "core": "explicit one-shot commands plus stdio MCP",
-                "training": "optional manual companion (`ocbrain-training`)",
-                "watchdog": "optional manual companion (`ocbrain-watchdog`)",
                 "scheduler_installed_by_core": False,
             },
         },
@@ -1637,11 +749,6 @@ def cmd_curated_apply(args: argparse.Namespace) -> int:
 def cmd_hygiene(args: argparse.Namespace) -> int:
     conn = open_existing_core_v1(args.db)
     try:
-        if args.set_watermark:
-            stamp = set_feedback_watermark(conn)
-            conn.commit()
-            output(args, {"action": "hygiene", "feedback_watermark": stamp})
-            return 0
         if args.supersede:
             belief_id, successor_id = args.supersede
             result = supersede(conn, belief_id=belief_id, successor_id=successor_id)
@@ -1656,10 +763,7 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
         plan = plan_retirements(
             conn,
             classes=tuple(args.classes) if args.classes else HYGIENE_CLASSES,
-            min_age_days=args.min_age_days,
             batch_cap=args.batch_cap,
-            min_feedback_observations=args.min_feedback_observations,
-            unhelpful_threshold=args.unhelpful_threshold,
             restatement_threshold=args.restatement_threshold,
         )
         if args.apply:
@@ -1675,213 +779,6 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
         conn.close()
     output(args, {"action": "hygiene", **payload})
     return 0
-
-
-def _deslop_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
-    """Resolve ``(api_key, base_url, model)`` for the provider, or fail loudly."""
-    from ocbrain.curator import load_env_value
-
-    defaults = PROVIDER_DEFAULTS[args.provider]
-    api_key_env = args.api_key_env or defaults["api_key_env"]
-    api_key = load_env_value(args.env_file.expanduser(), api_key_env)
-    if not api_key:
-        raise SystemExit(
-            f"{api_key_env} is not configured; "
-            f"set it, or pass --mechanical-only to skip every hosted call"
-        )
-    return api_key, args.base_url or defaults["base_url"], args.model or defaults["model"]
-
-
-def _deferred_deslop_credentials(
-    args: argparse.Namespace,
-) -> Callable[[], tuple[str, str, str]]:
-    """Resolve credentials on first real need, then reuse them for the run.
-
-    A `stamp` or `drop` repair is applied locally, so a run whose repairs are
-    all local makes no hosted call and must not require an API key. Resolving
-    up front turned those runs into a hard exit on any machine without one —
-    including CI, where the test asserting a stamp needs no hosted call was the
-    thing that failed.
-    """
-    resolved: list[tuple[str, str, str]] = []
-
-    def resolve() -> tuple[str, str, str]:
-        if not resolved:
-            resolved.append(_deslop_credentials(args))
-        return resolved[0]
-
-    return resolve
-
-
-def cmd_deslop(args: argparse.Namespace) -> int:
-    conn = open_existing_core_v1(args.db)
-    try:
-        if args.install_doctrine:
-            outcome = install_doctrine(conn, project=args.project)
-            output(args, {"action": "deslop", "mode": "doctrine", **outcome})
-            return 0
-        if args.volume:
-            plan = plan_volume_eviction(conn)
-            if args.apply:
-                plan = apply_volume_eviction(conn, plan)
-            payload = {key: value for key, value in plan.items() if key != "targets"}
-            payload["target_sample"] = plan["targets"][:12]
-            payload["megabytes"] = round(plan["bytes"] / 1_048_576, 2)
-            output(args, {"action": "deslop", "mode": "volume", **payload})
-            return 0
-
-        selected = tuple(args.classes) if args.classes else None
-        mechanical = tuple(r for r in (selected or DESLOP_RULE_IDS) if r != JUDGED_RULE)
-        judged_requested = (
-            not args.mechanical_only and (selected is None or JUDGED_RULE in selected)
-        )
-        report = scan_beliefs(conn, rules=mechanical) if mechanical else []
-        by_id = {item["belief_id"]: item for item in report}
-
-        judged: dict[str, dict[str, str]] = {}
-        if judged_requested:
-            api_key, base_url, model = _deslop_credentials(args)
-            # Judge the whole served corpus, not just the mechanical hits: an
-            # unactionable belief is usually well-formed, which is the point.
-            judged = judge_beliefs(
-                served_beliefs(conn),
-                provider=args.provider,
-                api_key=api_key,
-                base_url=base_url,
-                model=model,
-            )
-            for belief_id, verdict in judged.items():
-                entry = by_id.get(belief_id)
-                finding = {
-                    "rule": JUDGED_RULE,
-                    "repair": "drop",
-                    "detail": verdict["reason"],
-                }
-                if entry is None:
-                    stored = get_core_v1_belief(conn, belief_id) or {}
-                    by_id[belief_id] = {
-                        "belief_id": belief_id,
-                        "body": str(stored.get("body") or ""),
-                        "attributes": stored.get("attributes") or {},
-                        "findings": [finding],
-                    }
-                else:
-                    entry["findings"].append(finding)
-
-        findings = list(by_id.values())
-        census: dict[str, int] = {}
-        for item in findings:
-            for finding in item["findings"]:
-                census[finding["rule"]] = census.get(finding["rule"], 0) + 1
-
-        # Only enforced rules and the judged verdict may act unattended. An
-        # advisory finding is a judgement call, so it reports and waits for a
-        # human to pass `--class` explicitly.
-        actionable = [
-            item
-            for item in findings
-            if any(
-                f["rule"] in DESLOP_ENFORCED_RULE_IDS or f["rule"] == JUDGED_RULE
-                for f in item["findings"]
-            )
-        ]
-        from ocbrain.config import load_config
-
-        config = load_config()
-        limit = args.limit if args.limit is not None else config.deslop.max_repairs_per_run
-        repairs: list[dict[str, Any]] = []
-        if args.apply and actionable:
-            credentials = _deferred_deslop_credentials(args)
-            for item in actionable[: max(0, limit)]:
-                repairs.append(_apply_one_repair(
-                    conn,
-                    item,
-                    provider=args.provider,
-                    credentials=credentials,
-                    current_ttl_days=config.curator.current_ttl_days,
-                ))
-
-        payload = {
-            "action": "deslop",
-            "mode": "beliefs",
-            "scanned": len(served_beliefs(conn)),
-            "flagged": len(findings),
-            "actionable": len(actionable),
-            "census": census,
-            "rules": list(mechanical),
-            "judged": judged_requested,
-            "findings": [
-                {k: v for k, v in item.items() if k != "attributes"} for item in findings
-            ],
-            "apply_requested": bool(args.apply),
-            "repairs": repairs,
-        }
-    finally:
-        conn.close()
-    output(args, payload)
-    return 0
-
-
-def _apply_one_repair(
-    conn,
-    item: dict[str, Any],
-    *,
-    provider: str,
-    credentials: Callable[[], tuple[str, str, str]],
-    current_ttl_days: int,
-) -> dict[str, Any]:
-    """Request one repair, then apply it only if it passes the subtractive gate.
-
-    ``credentials`` is called only on the path that actually reaches the model,
-    so the two local repairs below stay free of any API-key requirement.
-    """
-    # Two repairs need no model call at all. A `drop` finding already said there
-    # is nothing worth keeping, and inventing a rewrite for it would be the exact
-    # failure the subtractive gate exists to catch. A `stamp` finding is missing
-    # metadata, not bad prose, so the body must not change.
-    if all(finding["repair"] == "stamp" for finding in item["findings"]):
-        return {"belief_id": item["belief_id"]} | apply_repair(
-            conn,
-            belief_id=item["belief_id"],
-            action="stamp",
-            bodies=[],
-            reason="; ".join(finding["detail"] for finding in item["findings"]),
-            current_ttl_days=current_ttl_days,
-        )
-    drop_only = all(
-        finding["repair"] == "drop"
-        and (finding["rule"] in DESLOP_ENFORCED_RULE_IDS or finding["rule"] == JUDGED_RULE)
-        for finding in item["findings"]
-    )
-    if drop_only:
-        reason = "; ".join(finding["detail"] for finding in item["findings"])
-        return {"belief_id": item["belief_id"]} | apply_repair(
-            conn, belief_id=item["belief_id"], action="drop", bodies=[], reason=reason
-        )
-    api_key, base_url, model = credentials()
-    action, bodies, reason, rejection = request_repair(
-        item,
-        item["findings"],
-        provider=provider,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-    )
-    if rejection is not None:
-        return {
-            "belief_id": item["belief_id"],
-            "action": action,
-            "rejected": rejection,
-            "created": [],
-        }
-    return {"belief_id": item["belief_id"], "reason": reason} | apply_repair(
-        conn,
-        belief_id=item["belief_id"],
-        action=action,
-        bodies=bodies,
-        reason=reason,
-        current_ttl_days=current_ttl_days,
-    )
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -2090,7 +987,6 @@ def cmd_value(args: argparse.Namespace) -> int:
                 "evidence_ids": [evidence_id],
                 "scope": scope.to_dict(),
                 "confidence": args.confidence,
-                "reward_band": None,
             },
             writer="ocbrain-cli",
         )
@@ -2287,7 +1183,6 @@ def cmd_event_compile(args: argparse.Namespace) -> int:
                 "evidence_ids": args.evidence_id,
                 "scope": scope.to_dict(),
                 "confidence": args.confidence,
-                "reward_band": args.reward_band,
             },
             writer="ocbrain-cli",
             session_id=args.session,
@@ -2320,7 +1215,6 @@ def cmd_event_compile(args: argparse.Namespace) -> int:
         evidence_ids=args.evidence_id,
         scope=scope,
         confidence=args.confidence,
-        reward_band=args.reward_band,
         session_id=args.session,
     )
     decision_id = None
@@ -2512,23 +1406,6 @@ def cmd_scope_promote(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_event_dream(args: argparse.Namespace) -> int:
-    from ocbrain_ops.dream import dream
-
-    conn = open_db(args)
-    result = dream(
-        conn,
-        context=context_from_args(args),
-        since_ts=args.since_ts,
-        target=args.target,
-        record_egress=args.record_egress,
-        limit=args.limit,
-    )
-    conn.commit()
-    output(args, result)
-    return 0
-
-
 def cmd_event_proposals(args: argparse.Namespace) -> int:
     conn = open_db(args)
     if is_core_v1(conn):
@@ -2618,40 +1495,6 @@ def cmd_egress_preview(args: argparse.Namespace) -> int:
         record=args.record,
     )
     if args.record:
-        conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_event_teacher_request(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_ops.teacher import hosted_teacher_request
-
-    cfg = load_config()
-    if not cfg.teacher.enabled:
-        output(
-            args,
-            {
-                "action": "event-teacher-request",
-                "call_performed": False,
-                "changed": 0,
-                "dispatch_state": "disabled",
-                "reason": "hosted_teacher_disabled_by_default",
-                "status": "blocked",
-            },
-        )
-        return 2
-    conn = open_db(args)
-    result = hosted_teacher_request(
-        conn,
-        context=context_from_args(args),
-        query=args.query,
-        objective=args.objective,
-        model=args.model,
-        limit=args.limit,
-        record=not args.no_record,
-    )
-    if not args.no_record:
         conn.commit()
     output(args, result)
     return 0
@@ -2861,17 +1704,6 @@ def classify_legacy_row(row) -> dict[str, object]:
             ),
             "reasons": ["matched cormorant/bihua client terms"],
         }
-    if "pelican" in text:
-        return {
-            "scope": ScopeTag(
-                "personal_finance",
-                "personal_finance:pelican",
-                visibility="confidential",
-                egress_policy="local_only",
-                provenance="inferred",
-            ),
-            "reasons": ["matched pelican personal-finance terms"],
-        }
     if "bountiful" in text or "backyard-ripe" in text:
         return {
             "scope": ScopeTag("project", "project:bountiful", provenance="inferred"),
@@ -3042,8 +1874,7 @@ def cmd_import_history(args: argparse.Namespace) -> int:
         # ingest/closeout/retrieval logging from Codex/Claude/Cursor/Hermes)
         # then fails with "database is locked". Per-file commits bound the
         # writer window to one file's actual DB writes; the slow redaction
-        # of the next file happens outside any transaction. Same rationale
-        # as DatasetWriteBatch for the dataset miners.
+        # of the next file happens outside any transaction.
         if core_v1:
             store_v1_history_fingerprints(conn, current_fingerprints)
         conn.commit()
@@ -3417,7 +2248,6 @@ def import_source_v1(
                 "evidence_ids": [evidence_id],
                 "scope": scope.to_dict(),
                 "confidence": confidence,
-                "reward_band": "moderate",
             },
             writer=f"ocbrain-import:{runtime}",
         )
@@ -3702,74 +2532,6 @@ def cmd_digest(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_loop_ingest(args: argparse.Namespace) -> int:
-    from ocbrain_ops.loops import LoopIngestOptions, dry_run_loop_ingest, write_loop_ingest
-
-    options = LoopIngestOptions(
-        loop_id=args.loop_id,
-        run_id=args.run_id,
-        artifacts_root=args.artifacts,
-        ledger=args.ledger,
-        backlog=args.backlog,
-        dry_run=not args.apply,
-    )
-    if args.apply:
-        conn = open_db(args)
-        result = write_loop_ingest(conn, options)
-    else:
-        result = dry_run_loop_ingest(options)
-    if args.json:
-        output(args, result)
-    else:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
-
-
-def cmd_mark_stale(args: argparse.Namespace) -> int:
-    conn = open_db(args)
-    if not mark_knowledge_stale(conn, args.knowledge_id, reason=args.reason):
-        raise ValueError(f"knowledge not found: {args.knowledge_id}")
-    conn.commit()
-    row = get_knowledge(conn, args.knowledge_id)
-    output(args, {"knowledge": dict(row)})
-    return 0
-
-
-def cmd_prune(args: argparse.Namespace) -> int:
-    from ocbrain_ops.maintenance import prune_knowledge
-
-    conn = open_db(args)
-    result = prune_knowledge(
-        conn,
-        ttl_days=args.ttl_days,
-        unhelpful_ttl_days=args.unhelpful_ttl_days,
-        archive_stale_days=args.archive_stale_days,
-    )
-    conn.commit()
-    output(args, result.as_dict() | {"counts": counts(conn)})
-    return 0
-
-
-def cmd_heal(args: argparse.Namespace) -> int:
-    from ocbrain_ops.maintenance import heal_conflicts
-
-    conn = open_db(args)
-    result = heal_conflicts(conn, numeric_threshold=args.numeric_threshold)
-    conn.commit()
-    output(args, result.as_dict() | {"counts": counts(conn)})
-    return 0
-
-
-def cmd_liveness_check(args: argparse.Namespace) -> int:
-    from ocbrain_ops.maintenance import check_loop_liveness
-
-    conn = open_db(args)
-    result = check_loop_liveness(conn, runner_ledger=args.runner_ledger)
-    conn.commit()
-    output(args, result.as_dict() | {"counts": counts(conn)})
-    return 0
-
-
 def cmd_mcp(args: argparse.Namespace) -> int:
     import os
 
@@ -3788,428 +2550,6 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         active_db_file=getattr(args, "active_db_file", None),
         delivery_target=normalize_delivery_target(selected or None),
     )
-
-
-def cmd_automatic_activation(args: argparse.Namespace) -> int:
-    conn = open_db(args)
-    if not is_core_v1(conn):
-        raise SystemExit("automatic-activation requires an OCBrain v1 core")
-    if args.enable or args.disable:
-        set_automatic_activation(conn, bool(args.enable))
-        conn.commit()
-    output(args, {"automatic_activation": automatic_activation_enabled(conn)})
-    return 0
-
-
-# --------------------------------------------------------------------------- #
-# v0.2 autonomy + dataset factory commands (spec §8)
-# --------------------------------------------------------------------------- #
-def cmd_autopilot(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_ops.autopilot import run_autopilot
-
-    conn = open_db(args)
-    cfg = load_config()
-    result = run_autopilot(
-        conn,
-        cfg,
-        db_path=args.db,
-        stages=args.stages,
-        profile=getattr(args, "profile", None),
-        dry_run=args.dry_run,
-    )
-    output(args, result)
-    return 0
-
-
-def cmd_quarantine_list(args: argparse.Namespace) -> int:
-    conn = open_db(args)
-    limit = getattr(args, "limit", 100)
-    rows = conn.execute(
-        """
-        SELECT id, slug, title, quarantine_reason, quality_label, updated_at
-        FROM knowledge
-        WHERE quarantine_reason IS NOT NULL
-        ORDER BY updated_at DESC, id
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    output(args, {"quarantined": [dict(row) for row in rows], "count": len(rows)})
-    return 0
-
-
-def cmd_quarantine_release(args: argparse.Namespace) -> int:
-    from ocbrain_ops.safeguards import release_quarantine
-
-    conn = open_db(args)
-    released = release_quarantine(conn, args.knowledge_id, actor=args.actor, reason=args.reason)
-    conn.commit()
-    row = get_knowledge(conn, args.knowledge_id)
-    output(
-        args,
-        {
-            "knowledge_id": args.knowledge_id,
-            "released": released,
-            "knowledge": dict(row) if row else None,
-        },
-    )
-    return 0
-
-
-def cmd_label(args: argparse.Namespace) -> int:
-    from ocbrain.db import now_iso
-    from ocbrain_ops.autolabel import Signal, record_signal
-
-    conn = open_db(args)
-    row = get_knowledge(conn, args.knowledge_id)
-    if row is None:
-        raise ValueError(f"knowledge not found: {args.knowledge_id}")
-    polarity = "good" if args.outcome == "good" else "bad"
-    signal = Signal(
-        kind="manual_label",
-        polarity=polarity,
-        weight=0.9,
-        source="session",
-        source_ref=f"manual:{args.knowledge_id}",
-        knowledge_id=args.knowledge_id,
-        details={"note": args.note} if args.note else {"manual": True},
-        occurred_at=now_iso(),
-    )
-    signal_id = record_signal(conn, signal)
-    conn.commit()
-    output(
-        args,
-        {"knowledge_id": args.knowledge_id, "signal_id": signal_id, "outcome": args.outcome},
-    )
-    return 0
-
-
-def cmd_dataset_mine(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset import mine_all
-
-    conn = open_db(args)
-    cfg = load_config()
-    roots = list(cfg.review.session_roots)
-    budget = getattr(args, "time_budget", None)
-    limit = getattr(args, "limit", None)
-    verified_only = getattr(args, "verified_only", False)
-    dataset = getattr(args, "dataset", None)
-    if dataset == "sft":
-        from ocbrain_training.dataset.mine_sft import mine_sft
-
-        result = mine_sft(conn, cfg=cfg, roots=roots, limit=limit, time_budget_seconds=budget)
-    elif dataset == "dpo":
-        from ocbrain_training.dataset.mine_dpo import mine_dpo
-
-        result = mine_dpo(conn, cfg=cfg, roots=roots, limit=limit, time_budget_seconds=budget)
-    elif dataset == "persona":
-        from ocbrain_training.dataset.mine_persona import mine_persona
-
-        result = mine_persona(
-            conn,
-            cfg=cfg,
-            roots=roots,
-            verified_only=verified_only,
-            limit=limit,
-            time_budget_seconds=budget,
-        )
-    else:
-        result = mine_all(
-            conn,
-            cfg=cfg,
-            roots=roots,
-            verified_only=verified_only,
-            time_budget_seconds=budget,
-        )
-    conn.commit()
-    if cfg.autopilot.checkpoint_after_dataset_mine:
-        from ocbrain.fsutil import checkpoint_sqlite_wal
-
-        db_path = getattr(args, "db", None)
-        result["wal_checkpoint"] = checkpoint_sqlite_wal(
-            conn,
-            db_path,
-            minimum_bytes=cfg.autopilot.checkpoint_wal_min_bytes,
-        )
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_persona_curate(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset.curate import import_persona_curation
-
-    conn = open_db(args)
-    result = import_persona_curation(conn, args.input, cfg=load_config())
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_calibration_import(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.calibration import import_calibrations
-
-    conn = open_db(args)
-    result = import_calibrations(conn, args.input)
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_export(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset.export import export_all
-
-    conn = open_db(args)
-    cfg = load_config()
-    dataset = getattr(args, "dataset", None)
-    result = export_all(
-        conn,
-        cfg=cfg,
-        datasets=[dataset] if dataset else None,
-        min_scope=getattr(args, "min_scope", None),
-        min_label=getattr(args, "min_label", None),
-        min_grade=getattr(args, "min_grade", None),
-        verified_only=getattr(args, "verified_only", False),
-        export_dir=getattr(args, "output_dir", None),
-    )
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_grade(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset.grade import grade_examples
-
-    conn = open_db(args)
-    cfg = load_config()
-    dataset = getattr(args, "dataset", None)
-    result = grade_examples(
-        conn,
-        cfg=cfg,
-        datasets=[dataset] if dataset else None,
-        limit=getattr(args, "limit", None),
-        endpoint=getattr(args, "endpoint", None),
-        model=getattr(args, "model", None),
-        force=getattr(args, "force", False),
-        source_uri_prefix=getattr(args, "source_uri_prefix", None),
-        train_classes=getattr(args, "train_classes", None),
-        selected_only=bool(getattr(args, "selected_only", False)),
-    )
-    conn.commit()
-    output(args, result)
-    return 1 if result.get("status") in {"error", "blocked", "locked"} else 0
-
-
-def cmd_dataset_classify(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.classify import classify_examples
-
-    conn = open_db(args)
-    result = classify_examples(
-        conn,
-        force=bool(getattr(args, "force", False)),
-        limit=getattr(args, "limit", None),
-    )
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pack_select(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.selection import select_training_pack
-
-    conn = open_db(args)
-    result = select_training_pack(
-        conn,
-        targets={"sft": args.sft, "dpo": args.dpo, "persona": args.persona},
-        seed=args.seed,
-    )
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pack_finalize(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.selection import finalize_training_pack
-
-    conn = open_db(args)
-    result = finalize_training_pack(
-        conn,
-        targets={"sft": args.sft, "dpo": args.dpo, "persona": args.persona},
-        min_grade=args.min_grade,
-    )
-    conn.commit()
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pack_stats(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.selection import selected_pack_stats
-
-    conn = open_db(args)
-    output(args, selected_pack_stats(conn, min_grade=args.min_grade))
-    return 0
-
-
-def cmd_retrieval_feedback_stats(args: argparse.Namespace) -> int:
-    from ocbrain_ops.feedback import feedback_coverage
-
-    conn = open_db(args)
-    output(args, feedback_coverage(conn))
-    return 0
-
-
-def cmd_retrieval_benchmark(args: argparse.Namespace) -> int:
-    from ocbrain_training.retrieval_eval import run_benchmark
-
-    conn = open_db(args)
-    result = run_benchmark(
-        conn,
-        args.input,
-        require_cases=1 if bool(getattr(args, "allow_small", False)) else 100,
-    )
-    output(args, result)
-    return 0
-
-
-def cmd_retrieval_benchmark_expand(args: argparse.Namespace) -> int:
-    from ocbrain_training.retrieval_eval import expand_runtime_matrix
-
-    result = expand_runtime_matrix(args.input, args.output)
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_stats(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.stats import dataset_stats
-
-    conn = open_db(args)
-    output(args, dataset_stats(conn))
-    return 0
-
-
-def cmd_dataset_pilot_prepare(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset.pilot import prepare_pilot
-
-    cfg = load_config()
-    if not cfg.dataset.training_enabled:
-        output(
-            args,
-            {
-                "action": "dataset-pilot-prepare",
-                "changed": 0,
-                "reason": "dataset_training_disabled_by_default",
-                "status": "blocked",
-            },
-        )
-        return 2
-    conn = open_db(args)
-    try:
-        result = prepare_pilot(
-            conn,
-            cfg=cfg,
-            output_dir=getattr(args, "output_dir", None),
-            min_grade=getattr(args, "min_grade", None),
-            eval_prompts=getattr(args, "eval_prompts", 100),
-            seed=getattr(args, "seed", "ocbrain-voice-pilot-v3"),
-            base_model=getattr(args, "base_model", None),
-            base_model_source=getattr(args, "base_model_source", None),
-            base_model_revision=getattr(args, "base_model_revision", None),
-            eval_from=getattr(args, "eval_from", None),
-            training_iterations=getattr(args, "training_iterations", 25),
-            quality_gates=not bool(getattr(args, "diagnostic_small_pack", False)),
-            sentinel_from=getattr(args, "legacy_sentinel_from", None),
-        )
-    except RuntimeError as exc:
-        output(
-            args,
-            {
-                "action": "dataset-pilot-prepare",
-                "changed": 0,
-                "status": "blocked",
-                "error": str(exc),
-            },
-        )
-        return 1
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pilot_blind(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.pilot import prepare_blind_pairs
-
-    result = prepare_blind_pairs(
-        args.pilot_dir,
-        args.candidate_responses,
-        seed=args.seed,
-    )
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pilot_score(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.pilot import score_blind_ratings
-
-    result = score_blind_ratings(args.pilot_dir, args.ratings)
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pilot_multiblind(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.pilot import prepare_multiblind
-
-    response_sets: dict[str, Path] = {}
-    for raw in args.response:
-        name, separator, value = str(raw).partition("=")
-        if not separator or name not in {"base", "tuned", "frontier"} or not value:
-            raise ValueError("--response must be base=PATH, tuned=PATH, or frontier=PATH")
-        response_sets[name] = Path(value).expanduser()
-    result = prepare_multiblind(args.pilot_dir, response_sets, seed=args.seed)
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pilot_multiscore(args: argparse.Namespace) -> int:
-    from ocbrain_training.dataset.pilot import score_multiblind
-
-    result = score_multiblind(args.pilot_dir, args.ratings)
-    output(args, result)
-    return 0
-
-
-def cmd_dataset_pilot_record_training(args: argparse.Namespace) -> int:
-    from ocbrain.config import load_config
-    from ocbrain_training.dataset.pilot import record_training_result
-
-    if not load_config().dataset.training_enabled:
-        output(
-            args,
-            {
-                "action": "dataset-pilot-record-training",
-                "changed": 0,
-                "reason": "dataset_training_disabled_by_default",
-                "status": "blocked",
-            },
-        )
-        return 2
-    result = record_training_result(
-        args.pilot_dir,
-        iterations=args.iterations,
-        train_loss=args.train_loss,
-        validation_loss=args.validation_loss,
-        exit_code=args.exit_code,
-    )
-    output(args, result)
-    return 0
-
-
-# --------------------------------------------------------------------------- #
-# public-safety enforcement (keep private data out of the public repo)
-# --------------------------------------------------------------------------- #
 def _resolve_repo_root(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit
@@ -4228,7 +2568,7 @@ def _resolve_repo_root(explicit: Path | None) -> Path:
 
 
 def cmd_public_safety_check(args: argparse.Namespace) -> int:
-    from ocbrain_ops.publicsafety import scan
+    from ocbrain.publicsafety import scan
 
     root = _resolve_repo_root(getattr(args, "root", None))
     result = scan(root, diff_range=getattr(args, "diff_range", None))

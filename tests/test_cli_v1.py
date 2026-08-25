@@ -36,7 +36,6 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         "init",
         "status",
         "sync",
-        "automatic-activation",
         "evidence",
         "knowledge",
         "value",
@@ -70,18 +69,22 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         "vector-build",
         "vector-status",
     }
-    # Covered in tests/test_hygiene.py, tests/test_config_surface.py, and
-    # tests/test_deslop.py, including their CLI routes.
-    hygiene_acceptance = {"hygiene", "config", "deslop"}
+    # Covered in tests/test_hygiene.py and tests/test_config_surface.py,
+    # including their CLI routes.
+    hygiene_acceptance = {"hygiene", "config"}
     # Covered in tests/test_scope_promote_cli.py, including the projection
     # rebuild and the egress boundary.
     scope_acceptance = {"scope-promote"}
+    # Covered in tests/test_publicsafety.py, which drives the scanner against
+    # throwaway git repos rather than this one.
+    repo_guard_acceptance = {"public-safety-check", "install-hooks"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
         | curated_and_vector_acceptance
         | hygiene_acceptance
         | scope_acceptance
+        | repo_guard_acceptance
     )
 
 
@@ -172,9 +175,6 @@ def test_fresh_v1_operational_cli_routes(tmp_path, capsys, monkeypatch) -> None:
     )
     assert mcp_calls == [(db, False, "runtime", None, "hosted_model")]
 
-    assert _run(capsys, db, ["automatic-activation"])["automatic_activation"] is False
-    assert _run(capsys, db, ["automatic-activation", "--enable"])["automatic_activation"] is True
-    assert _run(capsys, db, ["automatic-activation", "--disable"])["automatic_activation"] is False
 
 
 def test_fresh_v1_cli_read_surfaces_and_event_lifecycle(tmp_path, capsys) -> None:

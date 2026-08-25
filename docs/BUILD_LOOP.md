@@ -1,6 +1,10 @@
 # ocbrain Long-Running Build Loop
 
 Date opened: 2026-06-21 15:50 PDT
+Status: **closed.** Loops 0-4 shipped and became the v1 core. Loops 5 and 6 were
+built and then deleted; the record of what they were and why they went is kept
+below rather than erased, because "we tried this and measured it" is the useful
+part.
 
 ## Why This Exists
 
@@ -94,36 +98,30 @@ Exit evidence:
 - MCP smoke proof
 - public site updates
 
-### Loop 5: Loop-Aware Brain Ingest
+### Loop 5: Loop-Aware Brain Ingest (built, then deleted)
 
-Goal: make ocbrain understand autonomous loop result envelopes without becoming
-the loop runner, using the final evidence/knowledge core instead of parallel
-loop tables.
+Goal was to make ocbrain understand autonomous loop result envelopes without
+becoming the loop runner: an `ocbrain.loop_result.v1` envelope, a
+`brain-loop-ingest` console script with dry-run and `--apply` modes, and a
+`family_scores` rollup derived from loop-tagged rows.
 
-Exit evidence:
+It was built and it met its exit evidence. It is gone anyway. The console
+script, the `loop-ingest` subcommand, and the `liveness-check` command went with
+`packages/ops`, and the reason is that `loop_liveness` and `family_scores` never
+held a row. A safety surface with no traffic is not a safety surface, it is
+untested code sitting on the audit path.
 
-- `ocbrain.loop_result.v1` envelope validation
-- dry-run `brain-loop-ingest` command
-- deterministic run summary, metric, experiment-family, knowledge, and tripwire output
-- tests proving dry-run ingest writes nothing
-- explicit `--apply` mode writes loop-tagged evidence/knowledge rows and is idempotent
-- `family_scores` rollup is derivable from loop-tagged rows
+### Loop 6: Scheduler Readiness (superseded)
 
-### Loop 6: Scheduler Readiness
-
-Goal: prepare a scheduled consolidation loop without enabling it yet.
-
-Exit evidence:
-
-- dry-run schedule command
-- idempotence proof
-- failure recovery notes
-- approval checklist for enabling cron/automation
+Goal was to prepare a scheduled consolidation loop without enabling it. What
+actually shipped is smaller and is the current answer: OCBrain installs no
+scheduler, and an operator who wants one opts in explicitly to
+`scripts/brain-sync.sh` and `scripts/brain-promote.sh`. See
+[SCHEDULED_MAINTENANCE.md](SCHEDULED_MAINTENANCE.md). The autopilot and
+stallcheck plists that Loop 6 anticipated were written, ran, and were deleted
+along with every table they wrote to, all of which were empty.
 
 ## Current Next Action
 
-Continue Loop 5 final-spec work:
-
-- add prune/heal jobs over `knowledge`
-- add liveness watcher wiring over runner ledger/deadman timestamps
-- keep scheduled dry-run readiness queued until loop evidence ingestion is stable
+None. The loop is closed. Ongoing work is tracked as ordinary issues and pull
+requests against `main`.

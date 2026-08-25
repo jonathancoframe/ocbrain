@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
-import sys
 
 import pytest
 
@@ -98,7 +97,7 @@ def test_sync_refuses_before_writing_when_event_cap_would_be_exceeded(tmp_path):
     assert check.execute("SELECT COUNT(*) FROM projection_cursor").fetchone()[0] == 0
 
 
-def test_cli_sync_never_loads_config_or_dispatches_companion_work(tmp_path, monkeypatch, capsys):
+def test_cli_sync_stays_inside_its_local_core_boundary(tmp_path, monkeypatch, capsys):
     path = tmp_path / "brain.sqlite"
     _database(path).close()
 
@@ -106,14 +105,10 @@ def test_cli_sync_never_loads_config_or_dispatches_companion_work(tmp_path, monk
         raise AssertionError("sync crossed its local core boundary")
 
     monkeypatch.setattr(core_ops.subprocess, "run", forbidden)
-    loaded_before = set(sys.modules)
-
     assert main(["--db", str(path), "sync"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["policy"]["hosted_calls"] == 0
     assert result["policy"]["forbidden_stages"] == list(FORBIDDEN_SYNC_STAGES)
-    newly_loaded = set(sys.modules) - loaded_before
-    assert not any(name.startswith(("ocbrain_ops", "ocbrain_training")) for name in newly_loaded)
 
 
 def test_status_does_not_create_a_missing_database(tmp_path):

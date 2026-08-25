@@ -293,7 +293,6 @@ def migration_plan(
             "archive_first": True,
             "in_place_drop": False,
             "in_place_vacuum": False,
-            "automatic_activation": False,
             "outputs_must_be_fresh": True,
             "hosted_calls": 0,
             "network_calls": 0,

@@ -172,7 +172,6 @@ CREATE TABLE IF NOT EXISTS evidence_objects (
   source_uri TEXT,
   artifact_uri TEXT,
   artifact_hash TEXT,
-  verifier_status TEXT,
   occurred_at TEXT,
   recorded_at TEXT NOT NULL,
   scope_type TEXT NOT NULL,
@@ -454,28 +453,6 @@ def is_core_v1(conn: sqlite3.Connection) -> bool:
     return version is not None and str(version[0]) == CORE_V1_SCHEMA_VERSION
 
 
-def automatic_activation_enabled(conn: sqlite3.Connection) -> bool:
-    """Return true when this core auto-promotes runtime writes into beliefs.
-
-    Off by default: the published contract keeps promotion a human-gated
-    curation step. An operator opts a local core into unattended compilation by
-    setting the ``automatic_activation`` flag, which the ingest and closeout
-    paths consult before promoting.
-    """
-    row = conn.execute(
-        "SELECT value FROM schema_meta WHERE key='automatic_activation'"
-    ).fetchone()
-    return row is not None and str(row[0]).strip().lower() == "true"
-
-
-def set_automatic_activation(conn: sqlite3.Connection, enabled: bool) -> None:
-    """Persist the automatic-activation flag for this core."""
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('automatic_activation', ?)",
-        ("true" if enabled else "false",),
-    )
-
-
 # Columns added to a v1 core after the first release. CORE_V1_SCHEMA uses
 # CREATE TABLE IF NOT EXISTS throughout, so an already-initialized core keeps
 # its original columns forever unless they are added explicitly. Additive and
@@ -557,7 +534,6 @@ def init_core_v1(conn: sqlite3.Connection) -> None:
         (
             ("core_schema", CORE_V1_SCHEMA_VERSION),
             ("semantic_authority", "brain_events"),
-            ("automatic_activation", "false"),
         ),
     )
     conn.execute(f"PRAGMA application_id={CORE_V1_APPLICATION_ID}")
@@ -893,7 +869,6 @@ def _project_recorded_evidence(
         source_uri=body.get("artifact_ref"),
         artifact_uri=body.get("artifact_ref"),
         artifact_hash=None,
-        verifier_status="unknown",
         occurred_at=event["ts"],
         recorded_at=event["ts"],
         scope=scope,
@@ -1092,7 +1067,6 @@ def _project_legacy_evidence(
         source_uri=row.get("source_uri"),
         artifact_uri=row.get("artifact_uri"),
         artifact_hash=row.get("artifact_hash"),
-        verifier_status=row.get("verifier_status"),
         occurred_at=row.get("occurred_at"),
         recorded_at=str(row.get("ingested_at") or event["ts"]),
         scope=scope,
@@ -1393,7 +1367,6 @@ def _upsert_evidence_object(
     source_uri: str | None,
     artifact_uri: str | None,
     artifact_hash: str | None,
-    verifier_status: str | None,
     occurred_at: str | None,
     recorded_at: str,
     scope: dict[str, Any],
@@ -1415,10 +1388,10 @@ def _upsert_evidence_object(
         INSERT INTO evidence_objects(
           evidence_id, body, body_head, kind, content_hash, source_content_hash,
           source_type, source_runtime,
-          source_uri, artifact_uri, artifact_hash, verifier_status, occurred_at,
+          source_uri, artifact_uri, artifact_hash, occurred_at,
           recorded_at, scope_type, scope_id, visibility, egress_policy,
           scope_provenance, metadata_json, recorded_event_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(evidence_id) DO UPDATE SET
           body_head=COALESCE(excluded.body_head, evidence_objects.body_head),
           source_type=COALESCE(excluded.source_type, evidence_objects.source_type),
@@ -1426,7 +1399,6 @@ def _upsert_evidence_object(
           source_uri=COALESCE(excluded.source_uri, evidence_objects.source_uri),
           artifact_uri=COALESCE(excluded.artifact_uri, evidence_objects.artifact_uri),
           artifact_hash=COALESCE(excluded.artifact_hash, evidence_objects.artifact_hash),
-          verifier_status=COALESCE(excluded.verifier_status, evidence_objects.verifier_status),
           source_content_hash=COALESCE(
             excluded.source_content_hash, evidence_objects.source_content_hash
           ),
@@ -1451,7 +1423,6 @@ def _upsert_evidence_object(
             source_uri,
             artifact_uri,
             artifact_hash,
-            verifier_status,
             occurred_at,
             recorded_at,
             *_scope_values(scope),

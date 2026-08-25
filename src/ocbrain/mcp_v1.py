@@ -17,7 +17,6 @@ from ocbrain.config import load_config
 from ocbrain.core_v1 import (
     CORE_V1_SCHEMA_VERSION,
     append_core_event,
-    automatic_activation_enabled,
     canonical_json,
     compilation_block_reason,
     evidence_body_ref,
@@ -56,26 +55,20 @@ MAX_ITEM_EXCERPT_CHARS = 1_600
 MAX_ITEM_SOURCE_HANDLES = 3
 RETRIEVAL_ID_PLACEHOLDER = "ret_0000000000000000"
 
-AUTO_COMPILE_BELIEF_TYPE = "auto_compiled"
-AUTO_COMPILE_CONFIDENCE = 0.6
-AUTO_COMPILE_TITLE_CHARS = 80
+def shared_continuity_scope(context: ScopeContext) -> ScopeTag:
+    """Scope for a closeout summary: broadest shared context, never hosted.
 
-
-def _auto_compile_title(body: str) -> str:
-    line = body.strip().splitlines()[0] if body.strip() else "auto-compiled belief"
-    return line[:AUTO_COMPILE_TITLE_CHARS]
-
-
-def auto_compile_scope(context: ScopeContext) -> ScopeTag:
-    """Scope for unattended promotion: broadest shared context, never hosted.
-
-    Continuity across clients means a belief compiled while Claude Code worked
+    Continuity across clients means a summary written while Claude Code worked
     should be recallable by Codex or Cursor on the same project. So this prefers
     the widest *shared* scope (project, then repo, then client) rather than the
     narrowest one ``resolve_write_scope`` picks. Egress stays ``local_only`` so
-    automation can never promote content into hosted-model delivery; visibility
-    is ``internal`` so same-instance clients share it. Task/session-only or
-    empty contexts fall back to the standard narrow write scope.
+    an unattended write can never reach hosted-model delivery; visibility is
+    ``internal`` so same-instance clients share it. Task/session-only or empty
+    contexts fall back to the standard narrow write scope.
+
+    The ``auto_compiled`` provenance literal outlives the auto-compile feature
+    on purpose: 575 stored closeout evidence rows already carry it, and
+    changing the value here would make new writes disagree with the ledger.
     """
     for scope_type, value in (
         ("project", context.project),
@@ -91,70 +84,6 @@ def auto_compile_scope(context: ScopeContext) -> ScopeTag:
                 provenance="auto_compiled",
             )
     return resolve_write_scope(context)
-
-
-def auto_compile_evidence(
-    conn: sqlite3.Connection,
-    *,
-    evidence_id: str,
-    body: str,
-    scope: ScopeTag,
-    actor: str,
-    source_kind: str,
-) -> str:
-    """Promote one just-recorded evidence into a served belief, no human review.
-
-    Called only when ``automatic_activation`` is enabled. The belief inherits
-    the evidence scope and visibility verbatim, so unattended promotion can
-    never widen egress (confidential/local_only evidence yields a
-    confidential/local_only belief). The belief id is content-and-scope stable,
-    so re-ingesting identical evidence converges on one belief instead of
-    appending duplicate compilation events.
-    """
-    belief_id = stable_id("belief", "auto", body, scope.scope_id)
-    scope_dict = scope.to_dict()
-    existing = get_core_v1_belief(conn, belief_id)
-    if (
-        existing is not None
-        and existing.get("status") == "current"
-        and bool(existing.get("serve"))
-        and str(existing.get("body")) == body
-        and existing.get("scope") == scope_dict
-    ):
-        return belief_id
-    proposal_id = append_core_event(
-        conn,
-        "compilation_proposed",
-        {
-            "schema_version": "ocbrain.compilation.v1",
-            "subject": {"kind": "belief", "id": belief_id},
-            "belief_id": belief_id,
-            "belief_type": AUTO_COMPILE_BELIEF_TYPE,
-            "body": body,
-            "evidence_ids": [evidence_id],
-            "scope": scope_dict,
-            "confidence": AUTO_COMPILE_CONFIDENCE,
-            "reward_band": "weak",
-            "attributes": {
-                "title": _auto_compile_title(body),
-                "auto_compiled": True,
-                "source_kind": source_kind,
-                "source_evidence_id": evidence_id,
-                "content_sha256": sha256_text(body),
-                "lifecycle": "durable",
-            },
-        },
-        writer=actor,
-    )
-    decide_proposal_v1(
-        conn,
-        proposal_event_id=proposal_id,
-        decision="approve",
-        actor=actor,
-        edited_body=None,
-        reason="automatic_activation",
-    )
-    return belief_id
 
 
 def build_context_v1(
@@ -1004,7 +933,6 @@ def _evidence_for_delivery(evidence: dict[str, Any], *, delivery_target: str) ->
         "kind",
         "content_hash",
         "source_content_hash",
-        "verifier_status",
         "occurred_at",
         "recorded_at",
         "scope",
@@ -1275,11 +1203,7 @@ def ingest_v1(
         if envelope["kind"] != kind:
             raise ValueError("skill telemetry body kind must match brain.ingest kind")
         body = canonical_json(envelope)
-    auto = automatic_activation_enabled(conn) and not telemetry
-    # When auto-compiling, the evidence and its belief share one scope so
-    # brain.source expansion stays scope-consistent, and that scope is the
-    # shared continuity scope rather than the narrowest per-client one.
-    scope = auto_compile_scope(context) if auto else resolve_write_scope(context)
+    scope = resolve_write_scope(context)
     evidence_id, event_id = record_core_v1_evidence(
         conn,
         body=body,
@@ -1289,30 +1213,11 @@ def ingest_v1(
         session_id=session_id,
         artifact_ref=artifact_ref,
     )
-    result = {
+    return {
         "event_id": event_id,
         "evidence_id": evidence_id,
         "kind": "evidence_recorded",
     }
-    if auto:
-        try:
-            result["auto_compiled_belief_id"] = auto_compile_evidence(
-                conn,
-                evidence_id=evidence_id,
-                body=body,
-                scope=scope,
-                actor=writer,
-                source_kind=kind,
-            )
-        except PermissionError as exc:
-            # Auto-belief ids are content-addressed, so re-ingesting text that
-            # matches a retracted or tombstoned belief hits compilation_block_reason
-            # and raises. Recording the evidence is the caller's actual request;
-            # a blocked recompile must not fail the whole write.
-            result["auto_compile_blocked"] = str(exc)
-        else:
-            result["kind"] = "evidence_recorded_and_compiled"
-    return result
 
 
 def closeout_v1(
@@ -1370,14 +1275,11 @@ def closeout_v1(
     # scope so a closeout written while one client worked is curatable and
     # recallable by the others.
     #
-    # This used to sit inside the automatic_activation check, which conflated two
-    # different things: *recording evidence* and *promoting it to a served
-    # belief*. Turning the flag off to stop unattended promotion therefore also
-    # stopped closeout summaries becoming evidence at all -- and closeout
-    # summaries are the single largest supply of curator-eligible evidence. One
-    # real brain lost 567 of 799 closeouts (71%) that way, silently, for weeks.
-    # Recording evidence is not promotion; only the compile step is gated.
-    scope = auto_compile_scope(context)
+    # Recording evidence is not promotion. An earlier version gated this write
+    # on the automatic_activation flag and so lost 567 of 799 closeouts (71%)
+    # in one real brain when the flag was off. Closeout summaries are the
+    # largest supply of curator-eligible evidence; they are always recorded.
+    scope = shared_continuity_scope(context)
     evidence_id, _event_id = record_core_v1_evidence(
         conn,
         body=summary,
@@ -1389,19 +1291,6 @@ def closeout_v1(
     receipt["evidence_id"] = evidence_id
     if slop:
         receipt["slop_findings"] = [finding.to_dict() for finding in slop]
-    if automatic_activation_enabled(conn):
-        try:
-            receipt["auto_compiled_belief_id"] = auto_compile_evidence(
-                conn,
-                evidence_id=evidence_id,
-                body=summary,
-                scope=scope,
-                actor=actor,
-                source_kind="task_closeout_summary",
-            )
-        except PermissionError as exc:
-            # See ingest_v1: a blocked recompile must not lose the closeout.
-            receipt["auto_compile_blocked"] = str(exc)
     return receipt
 
 
@@ -1862,8 +1751,7 @@ def _require_v1(conn: sqlite3.Connection) -> None:
 
 
 __all__ = [
-    "auto_compile_evidence",
-    "auto_compile_scope",
+    "shared_continuity_scope",
     "bind_retrieval_id_v1",
     "build_context_v1",
     "closeout_v1",

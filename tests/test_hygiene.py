@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -15,12 +15,9 @@ from ocbrain.core_v1 import (
 )
 from ocbrain.db import connect
 from ocbrain.hygiene import (
-    DEFAULT_MIN_AGE_DAYS,
     apply_retirements,
-    get_feedback_watermark,
     plan_retirements,
     restore,
-    set_feedback_watermark,
     supersede,
     verify_serving_invariants,
 )
@@ -177,120 +174,6 @@ def test_supersede_refuses_self_and_unknown_targets(tmp_path: Path) -> None:
         supersede(conn, belief_id=known, successor_id="curated:bountiful:ghost")
     with pytest.raises(ValueError, match="belief not found"):
         supersede(conn, belief_id="curated:bountiful:ghost", successor_id=known)
-
-
-def test_unused_class_respects_age_pin_and_wiki_exemptions(tmp_path: Path) -> None:
-    conn = _core(tmp_path)
-    old_ts = (NOW - timedelta(days=DEFAULT_MIN_AGE_DAYS + 5)).isoformat()
-    recent_ts = (NOW - timedelta(days=2)).isoformat()
-    unused_old = "curated:bountiful:unused-old"
-    unused_recent = "curated:bountiful:unused-recent"
-    pinned_old = "curated:bountiful:pinned-old"
-    wiki_old = "curated:bountiful:wiki-old"
-    retrieved_old = "curated:bountiful:retrieved-old"
-    _seed(conn, belief_id=unused_old, body="Never served fact one body here.", compiled_at=old_ts)
-    _seed(
-        conn,
-        belief_id=unused_recent,
-        body="Never served fact two body here.",
-        compiled_at=recent_ts,
-    )
-    _seed(
-        conn,
-        belief_id=pinned_old,
-        body="Pinned fact that must survive the sweep.",
-        compiled_at=old_ts,
-        pinned=True,
-    )
-    _seed(
-        conn,
-        belief_id=wiki_old,
-        body="Curated wiki fact that must survive the sweep.",
-        belief_type="wiki_fact",
-        compiled_at=old_ts,
-    )
-    _seed(conn, belief_id=retrieved_old, body="Served at least once fact body.", compiled_at=old_ts)
-    _judge(
-        conn,
-        belief_id=retrieved_old,
-        outcome="used",
-        count=1,
-        served_at=recent_ts,
-        prefix="served",
-    )
-    conn.commit()
-
-    plan = plan_retirements(conn, classes=("unused",), now=NOW)
-    assert [target["belief_id"] for target in plan["targets"]] == [unused_old]
-
-
-def test_unhelpful_class_is_refused_without_a_watermark(tmp_path: Path) -> None:
-    """Historical verdicts must not retire facts a broken ranker mis-served."""
-    conn = _core(tmp_path)
-    bad = "curated:bountiful:badly-judged"
-    _seed(conn, belief_id=bad, body="A fact that was judged badly many times over.")
-    _judge(
-        conn,
-        belief_id=bad,
-        outcome="irrelevant",
-        count=20,
-        served_at="2026-07-01T00:00:00+00:00",
-        prefix="old",
-    )
-    conn.commit()
-
-    assert get_feedback_watermark(conn) is None
-    plan = plan_retirements(conn, classes=("unhelpful",), now=NOW)
-    assert plan["targets"] == []
-    assert "unhelpful" in plan["skipped_classes"]
-
-
-def test_unhelpful_class_only_counts_feedback_after_the_watermark(tmp_path: Path) -> None:
-    conn = _core(tmp_path)
-    pre_only = "curated:bountiful:pre-watermark-only"
-    post = "curated:bountiful:post-watermark"
-    _seed(conn, belief_id=pre_only, body="Judged badly before the ranking change only.")
-    _seed(conn, belief_id=post, body="Judged badly after the ranking change instead.")
-    _judge(
-        conn,
-        belief_id=pre_only,
-        outcome="irrelevant",
-        count=20,
-        served_at="2026-07-01T00:00:00+00:00",
-        prefix="pre",
-    )
-    set_feedback_watermark(conn, "2026-08-01T00:00:00+00:00")
-    _judge(
-        conn,
-        belief_id=post,
-        outcome="irrelevant",
-        count=8,
-        served_at="2026-08-03T00:00:00+00:00",
-        prefix="post",
-    )
-    conn.commit()
-
-    plan = plan_retirements(conn, classes=("unhelpful",), now=NOW)
-    assert [target["belief_id"] for target in plan["targets"]] == [post]
-
-
-def test_unhelpful_class_needs_a_minimum_sample(tmp_path: Path) -> None:
-    conn = _core(tmp_path)
-    thin = "curated:bountiful:thin-evidence"
-    _seed(conn, belief_id=thin, body="Judged badly but only once so far here.")
-    set_feedback_watermark(conn, "2026-08-01T00:00:00+00:00")
-    _judge(
-        conn,
-        belief_id=thin,
-        outcome="harmful",
-        count=1,
-        served_at="2026-08-03T00:00:00+00:00",
-        prefix="thin",
-    )
-    conn.commit()
-
-    plan = plan_retirements(conn, classes=("unhelpful",), now=NOW)
-    assert plan["targets"] == []
 
 
 def test_a_swept_belief_can_be_restored(tmp_path: Path) -> None:
@@ -505,22 +388,18 @@ def test_cli_hygiene_reports_then_applies(tmp_path: Path, capsys) -> None:
     assert applied["applied"] == 1
     assert applied["invariants"]["unserved_in_search_index"] == 0
 
-    assert cli_main(["--db", str(db_path), "hygiene", "--set-watermark"]) == 0
-    assert json.loads(capsys.readouterr().out)["feedback_watermark"]
 
-
-def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: Path) -> None:
+def test_closeout_records_evidence_but_promotes_nothing(tmp_path: Path) -> None:
     """Recording evidence is not promotion, and must not be gated with it.
 
-    Both used to sit behind automatic_activation, so turning that flag off to stop
-    unattended promotion also stopped closeout summaries becoming evidence --
-    silently removing the largest supply of curator-eligible evidence.
+    Both used to sit behind the automatic_activation flag, so turning that flag
+    off to stop unattended promotion also stopped closeout summaries becoming
+    evidence -- silently removing the largest supply of curator-eligible
+    evidence. The flag is gone; the separation it broke is what this pins.
     """
-    from ocbrain.core_v1 import automatic_activation_enabled
     from ocbrain.mcp_v1 import closeout_v1
 
     conn = _core(tmp_path)
-    assert automatic_activation_enabled(conn) is False
     receipt = closeout_v1(
         conn,
         task_ref="task-with-activation-off",
@@ -547,8 +426,7 @@ def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: 
     ).fetchone()
     assert row["kind"] == "task_closeout_summary"
     assert row["scope_id"] == "project:bountiful"
-    # But nothing was promoted, because that half is still gated.
-    assert "auto_compiled_belief_id" not in receipt
+    # But nothing was promoted: compilation stays a human-gated curation step.
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM current_beliefs WHERE serve=1 AND status='current'"
