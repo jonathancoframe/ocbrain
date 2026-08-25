@@ -18,8 +18,6 @@ from ocbrain.events import (
 from ocbrain.mcp import handle_request
 from ocbrain.retrieve import retrieve
 from ocbrain.scope import ScopeContext, ScopeTag, global_scope, resolve_write_scope
-from ocbrain_ops.dream import dream
-from ocbrain_ops.teacher import hosted_teacher_request
 
 
 def seeded_scoped_core(tmp_path: Path):
@@ -110,6 +108,43 @@ def seeded_scoped_core(tmp_path: Path):
         decide_compilation(conn, proposal_event_id=proposal, decision="approve")
     conn.commit()
     return conn
+
+
+def pending_consolidations(conn) -> list[dict[str, str]]:
+    """Two undecided compilation proposals, built from the core API.
+
+    The event gate, the digest, and the MCP gate tools all need something
+    pending to act on. This replaces the deleted ops `dream` helper, which
+    only ever existed to manufacture the same two rows.
+    """
+
+    specs = (
+        (
+            "belief:bountiful-consolidation",
+            "Scoped consolidation of Bountiful evidence.",
+            ["evd:bountiful-stack"],
+            ScopeTag("project", "project:bountiful", egress_policy="hosted_ok"),
+        ),
+        (
+            "belief:doctrine-consolidation",
+            "Scoped consolidation of global doctrine evidence.",
+            ["evd:global-rules"],
+            global_scope(),
+        ),
+    )
+    proposed: list[dict[str, str]] = []
+    for belief_id, body, evidence_ids, scope in specs:
+        proposal_event_id = propose_compilation(
+            conn,
+            belief_id=belief_id,
+            body=body,
+            evidence_ids=evidence_ids,
+            scope=scope,
+            confidence=0.45,
+        )
+        proposed.append({"belief_id": belief_id, "proposal_event_id": proposal_event_id})
+    conn.commit()
+    return proposed
 
 
 def test_scoped_retrieval_excludes_foreign_project_but_keeps_global(tmp_path: Path) -> None:
@@ -213,37 +248,6 @@ def test_hosted_egress_excludes_confidential_and_redacts_secrets(tmp_path: Path)
     assert "personal_finance:pelican" in rejected_ids
     assert "sk-123456789012345678901234" not in included_text
     assert payload["audit_id"].startswith("egress_")
-    assert conn.execute("SELECT COUNT(*) FROM egress_audits").fetchone()[0] == 1
-
-
-def test_hosted_teacher_request_is_local_approval_package(tmp_path: Path) -> None:
-    conn = seeded_scoped_core(tmp_path)
-    record_evidence(
-        conn,
-        body="Bountiful hosted teacher eligible public deployment note.",
-        scope=ScopeTag("project", "project:bountiful", egress_policy="hosted_ok"),
-    )
-
-    payload = hosted_teacher_request(
-        conn,
-        context=ScopeContext(project="bountiful"),
-        query="Bountiful",
-    )
-    encoded = json.dumps(payload)
-    included_scopes = {item["scope"]["scope_id"] for item in payload["egress"]["included"]}
-    rejected_scopes = {item["scope"]["scope_id"] for item in payload["egress"]["rejected"]}
-
-    assert payload["request_id"].startswith("teacher_request_")
-    assert payload["dispatch_state"] == "approval_required"
-    assert payload["call_performed"] is False
-    assert payload["approval"]["required_approvals"] == [
-        "hosted_teacher_calls",
-        "hosted_egress",
-    ]
-    assert "project:bountiful" in included_scopes
-    assert "client:bihua" in rejected_scopes
-    assert "sk-123456789012345678901234" not in encoded
-    assert payload["request"]["input"]["response_schema"]["required"] == ["compilations"]
     assert conn.execute("SELECT COUNT(*) FROM egress_audits").fetchone()[0] == 1
 
 
@@ -563,49 +567,9 @@ def test_event_tables_are_insert_only_for_connector_operations(tmp_path: Path) -
     assert forbidden == []
 
 
-def test_dream_writes_pending_scoped_proposals_not_current_beliefs(tmp_path: Path) -> None:
-    conn = seeded_scoped_core(tmp_path)
-
-    result = dream(
-        conn,
-        context=ScopeContext(project="bountiful"),
-        target="local_model",
-        record_egress=True,
-    )
-    rebuild_projection(conn)
-    payload = retrieve(
-        conn,
-        "Scoped consolidation",
-        context=ScopeContext(project="bountiful"),
-    )
-
-    assert result["summary"]["proposals"] >= 2
-    assert result["egress"]["audit_id"].startswith("egress_")
-    assert {item["reward_band"] for item in list_compilation_proposals(conn)} == {"moderate"}
-    assert payload["items"] == []
-
-
-def test_dream_honors_hard_corrections_as_conflicts(tmp_path: Path) -> None:
-    conn = seeded_scoped_core(tmp_path)
-    first = dream(conn, context=ScopeContext(project="bountiful"))
-    blocked_belief_id = first["proposed"][0]["belief_id"]
-
-    record_correction(
-        conn,
-        target_layer="belief",
-        target_id=blocked_belief_id,
-        op="mark_wrong",
-        body="Do not re-derive this dream proposal.",
-        hard=True,
-    )
-    second = dream(conn, context=ScopeContext(project="bountiful"))
-
-    assert blocked_belief_id in {item["belief_id"] for item in second["conflicts"]}
-
-
 def test_event_gate_lists_and_decides_pending_proposals(tmp_path: Path) -> None:
     conn = seeded_scoped_core(tmp_path)
-    result = dream(conn, context=ScopeContext(project="bountiful"))
+    result = {"proposed": pending_consolidations(conn)}
     proposal_id = result["proposed"][0]["proposal_event_id"]
 
     pending = list_compilation_proposals(conn, context=ScopeContext(project="bountiful"))
@@ -668,11 +632,11 @@ def test_event_core_digest_reports_pending_and_current_by_scope(tmp_path: Path) 
         writer="codex",
         session_id="codex-1",
     )
-    dream_result = dream(conn, context=ScopeContext(project="bountiful"))
+    consolidations = {"proposed": pending_consolidations(conn)}
 
     payload = event_core_digest(conn, context=ScopeContext(project="bountiful"))
 
-    assert payload["summary"]["pending_compilations"] >= len(dream_result["proposed"])
+    assert payload["summary"]["pending_compilations"] >= len(consolidations["proposed"])
     assert "evidence_recorded" in payload["event_counts"]
     assert "compilation_proposed" in payload["event_counts"]
     assert any(item["belief_id"] == "belief:bountiful-stack" for item in payload["current_beliefs"])
@@ -690,7 +654,7 @@ def test_event_core_digest_exposes_falsifiable_quiet_loop_surface(
 ) -> None:
     conn = seeded_scoped_core(tmp_path)
     quiet = event_core_digest(conn, context=ScopeContext(project="bountiful"))
-    dream(conn, context=ScopeContext(project="bountiful"))
+    pending_consolidations(conn)
     attention = event_core_digest(conn, context=ScopeContext(project="bountiful"))
 
     assert quiet["quiet_loop"]["state"] == "quiet"
@@ -848,8 +812,8 @@ def test_mcp_connector_runtime_writes_are_narrow_and_admin_tools_are_gated(
 
 def test_mcp_event_gate_lists_and_decides_proposals(tmp_path: Path) -> None:
     conn = seeded_scoped_core(tmp_path)
-    dream_result = dream(conn, context=ScopeContext(project="bountiful"))
-    proposal_id = dream_result["proposed"][0]["proposal_event_id"]
+    consolidations = {"proposed": pending_consolidations(conn)}
+    proposal_id = consolidations["proposed"][0]["proposal_event_id"]
 
     listed = handle_request(
         conn,
@@ -910,7 +874,7 @@ def test_mcp_event_gate_lists_and_decides_proposals(tmp_path: Path) -> None:
     digest_payload = json.loads(digest_response["result"]["content"][0]["text"])
     assert "event_core" in digest_payload
     assert any(
-        item["belief_id"] == dream_result["proposed"][0]["belief_id"]
+        item["belief_id"] == consolidations["proposed"][0]["belief_id"]
         for item in digest_payload["event_core"]["current_beliefs"]
     )
 

@@ -1,3 +1,12 @@
+"""OCBrain ships as one distribution.
+
+The v1.1 split into `ocbrain-ops` and `ocbrain-training` companions is gone:
+every table those packages wrote stayed empty in production, so the split was
+guarding a boundary that carried no traffic. What survives is a single
+`ocbrain` wheel whose console script is the only entry point, and these tests
+pin that shape so a companion cannot quietly reappear.
+"""
+
 from __future__ import annotations
 
 import json
@@ -8,14 +17,13 @@ import tomllib
 from pathlib import Path
 
 from ocbrain import cli
-from ocbrain_ops.store import DEFAULT_OPS_DB
-from ocbrain_training.store import DEFAULT_TRAINING_DB
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SRC = ROOT / "src"
-OPS_SRC = ROOT / "packages/ops/src"
 
-RETIRED_CORE_MODULES = {
+# Names that must not come back into `src/ocbrain`. Every one of them was an
+# ops or training module deleted in the v2 great deletion.
+DELETED_COMPANION_MODULES = {
     "autolabel.py",
     "autopilot.py",
     "dream.py",
@@ -35,48 +43,34 @@ RETIRED_CORE_MODULES = {
 }
 
 
-def _project(path: Path) -> dict[str, object]:
-    return tomllib.loads(path.read_text())["project"]
-
-
 def test_distribution_metadata_and_console_ownership() -> None:
-    core = _project(ROOT / "pyproject.toml")
-    training = _project(ROOT / "packages/training/pyproject.toml")
-    ops = _project(ROOT / "packages/ops/pyproject.toml")
+    core = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
 
-    assert (core["name"], training["name"], ops["name"]) == (
-        "ocbrain",
-        "ocbrain-training",
-        "ocbrain-ops",
-    )
-    assert core["version"] == training["version"] == ops["version"] == "1.1.0"
+    assert core["name"] == "ocbrain"
     assert core["scripts"] == {
         "ocbrain": "ocbrain.cli:main",
         "ocbrain-closeout": "ocbrain.cli:main",
     }
-    assert training["scripts"] == {"ocbrain-training": "ocbrain_training.cli:main"}
-    assert ops["scripts"] == {
-        "ocbrain-ops": "ocbrain_ops.cli:main",
-        "ocbrain-watchdog": "ocbrain_ops.stallcheck:main",
-        "brain-loop-ingest": "ocbrain_ops.cli:loop_ingest_main",
-    }
-    assert training["dependencies"] == ["ocbrain>=1.1,<2"]
-    assert ops["dependencies"] == ["ocbrain>=1.1,<2"]
-    assert ops["optional-dependencies"] == {"training": ["ocbrain-training>=1.1,<2"]}
+    assert not (ROOT / "packages").exists()
 
 
-def test_core_source_and_parser_exclude_companion_implementations() -> None:
+def test_core_source_excludes_the_deleted_companion_modules() -> None:
     core_package = ROOT / "src/ocbrain"
     assert not (core_package / "dataset").exists()
-    assert RETIRED_CORE_MODULES.isdisjoint(path.name for path in core_package.glob("*.py"))
+    assert DELETED_COMPANION_MODULES.isdisjoint(path.name for path in core_package.glob("*.py"))
+
+
+def test_every_subcommand_is_served_by_this_package() -> None:
+    """No lazy entry-point dispatch survives: the parser is the whole surface."""
 
     subparsers = next(action for action in cli.build_parser()._actions if action.dest == "command")
     core_commands = set(subparsers.choices)
-    assert core_commands.isdisjoint(cli.COMPANION_COMMANDS)
-    assert {"init", "status", "sync", "preview", "mcp"} <= core_commands
+    assert {"init", "status", "sync", "preview", "mcp", "public-safety-check"} <= core_commands
+    assert not hasattr(cli, "COMPANION_COMMANDS")
+    assert not hasattr(cli, "dispatch_companion_command")
 
 
-def test_importing_core_cli_and_mcp_does_not_import_companions() -> None:
+def test_importing_core_cli_and_mcp_does_not_import_a_companion() -> None:
     probe = """
 import json
 import sys
@@ -97,14 +91,6 @@ print(json.dumps(sorted(
         env=env,
     )
     assert json.loads(result.stdout) == []
-
-
-def test_companion_stores_are_distinct_from_the_core_default() -> None:
-    assert DEFAULT_TRAINING_DB.name == "training.sqlite"
-    assert DEFAULT_OPS_DB.name == "ops.sqlite"
-    assert DEFAULT_TRAINING_DB != DEFAULT_OPS_DB
-    assert DEFAULT_TRAINING_DB != cli.DEFAULT_DB_PATH
-    assert DEFAULT_OPS_DB != cli.DEFAULT_DB_PATH
 
 
 def test_public_safety_hook_calls_the_checked_out_core_cli() -> None:

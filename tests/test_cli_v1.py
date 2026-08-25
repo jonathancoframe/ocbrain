@@ -76,12 +76,16 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_scope_promote_cli.py, including the projection
     # rebuild and the egress boundary.
     scope_acceptance = {"scope-promote"}
+    # Covered in tests/test_publicsafety.py, which drives the scanner against
+    # throwaway git repos rather than this one.
+    repo_guard_acceptance = {"public-safety-check", "install-hooks"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
         | curated_and_vector_acceptance
         | hygiene_acceptance
         | scope_acceptance
+        | repo_guard_acceptance
     )
 
 
