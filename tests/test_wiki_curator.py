@@ -1161,3 +1161,98 @@ def test_rewording_a_doctrine_fact_does_not_demote_it(tmp_path: Path) -> None:
     assert str(served[0]["scope_type"]) == "global"
     assert str(served[0]["scope_id"]) == "global:doctrine"
     conn.close()
+
+
+def test_same_key_in_another_scope_updates_instead_of_minting(tmp_path: Path) -> None:
+    """A key already served anywhere names THE fact, whatever the wording.
+
+    Restatement similarity is a heuristic and it missed on a live corpus: a
+    coframe-scoped run reworded the doctrine-scoped asa2 fact below the
+    threshold and minted a second serving copy of the same key, which wiki-lint
+    then flagged as conflicting-key. Key equality is the identity test wiki-lint
+    already enforces corpus-wide, so minting must honor it too — and the update
+    must keep the belief at its existing scope rather than demoting doctrine to
+    the running project.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+
+    first = apply_claims(
+        conn,
+        [
+            {
+                "key": "research-vm-live",
+                "title": "Live research VM",
+                "body": "The live analysis VM is asa2; asa1 is terminated.",
+                "category": "preference",
+                "lifecycle": "durable",
+                "confidence": 0.9,
+                "evidence_ids": [],
+            }
+        ],
+        model="test",
+        project="workspace",
+    )
+    doctrine_id = first["applied"][0]
+
+    # Same key from another project, worded far past any restatement threshold,
+    # and typed so claim_scope would stamp it project-scoped if it minted fresh.
+    second = apply_claims(
+        conn,
+        [
+            {
+                "key": "research-vm-live",
+                "title": "Live research VM",
+                "body": (
+                    "For applied-science infrastructure, use asa2 going forward; "
+                    "the earlier primary box was decommissioned."
+                ),
+                "category": "system",
+                "lifecycle": "durable",
+                "confidence": 0.85,
+                "evidence_ids": [],
+            }
+        ],
+        model="test",
+        project="coframe",
+    )
+
+    assert second["applied"] == [doctrine_id]
+    rows = conn.execute(
+        "SELECT belief_id, scope_id, body FROM current_beliefs "
+        "WHERE serve=1 AND json_extract(attributes_json,'$.key')='research-vm-live'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert str(rows[0]["scope_id"]) == "global:doctrine"
+    assert "asa2 going forward" in str(rows[0]["body"])
+    conn.close()
+
+
+def test_same_key_same_body_elsewhere_is_unchanged(tmp_path: Path) -> None:
+    """An identical claim under a key served elsewhere makes no proposal."""
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    body = "The live analysis VM is asa2; asa1 is terminated."
+    claim = {
+        "key": "research-vm-live",
+        "title": "Live research VM",
+        "body": body,
+        "category": "preference",
+        "lifecycle": "durable",
+        "confidence": 0.9,
+        "evidence_ids": [],
+    }
+    first = apply_claims(conn, [claim], model="test", project="workspace")
+    second = apply_claims(
+        conn,
+        [{**claim, "category": "system"}],
+        model="test",
+        project="coframe",
+    )
+    assert second["applied"] == []
+    assert second["unchanged"] == [first["applied"][0]]
+    conn.close()
