@@ -1,8 +1,10 @@
 # Procedural memory in the core
 
-Status: **design, not shipped.** Nothing in this document is implemented. The
-prototype that motivates it is `scripts/procmine/`, which reads the corpus
-read-only and writes nothing back; its findings are in
+Status: **the gotcha half is shipped; procedures are still design.**
+`scripts/procmine/mint.py` mints gotchas as ordinary beliefs, `brain-promote.sh`
+runs the miner as an opt-in scheduled stage, and `search_core_v1` already refuses
+to serve a procedure in degraded mode. Nothing yet writes a `belief_type =
+"procedure"` row: §1-§5 below remain design. Findings are in
 [PROCEDURE-ATLAS-20260824.md](PROCEDURE-ATLAS-20260824.md).
 
 A belief answers *what is true*. A procedure answers *how this gets done here,
@@ -20,9 +22,11 @@ already hard enough.
 ## 1. Shape: a belief, not a new table
 
 `current_beliefs.belief_type` is a free-text column with no `CHECK`
-(`src/ocbrain/core_v1.py:181`). Existing values in the wild are `wiki_fact`,
-`curated_fact`, and `auto_compiled`. **A `procedure` needs no DDL change at
-all**, and inherits scope, FTS, hybrid ranking, feedback, and hygiene for free.
+(`src/ocbrain/core_v1.py:181`). Existing values in the wild are `wiki_fact` and
+`curated_fact`, plus the historical `auto_compiled` rows left behind when that
+mechanism was deleted; `gotcha` joined them when the mint shipped. **A
+`procedure` needs no DDL change at all**, and inherits scope, FTS, hybrid
+ranking, feedback, and hygiene for free.
 
 The alternative costs more than it looks. `CORE_V1_TABLES`
 (`src/ocbrain/core_v1.py:84`) is a closed allow-list and
@@ -140,11 +144,14 @@ weak match, and the comment at `src/ocbrain/core_v1.py:37` states the intent
 ("an honest empty packet over same-scope filler"). A mined procedure is subject
 to the same gates.
 
-There is one hazard. Those floors stand down when the dense arm is unhealthy
-(`dense_arm_healthy`, `src/ocbrain/core_v1.py:1733`), so with the embedder down a
-procedure could be served on a single shared token. Procedures should be
-**excluded entirely in degraded mode** rather than served speculatively: a wrong
-belief is a wrong sentence, a wrong procedure is a wrong afternoon.
+There is one hazard, and it is **fixed**. Those floors stand down when the dense
+arm is unhealthy (`dense_arm_healthy`), so with the embedder down a procedure
+could be served on a single shared token. `search_core_v1` now drops every
+`belief_type='procedure'` candidate whenever `dense_fallback` is set and reports
+the count as `ranking.degraded_excluded_procedures`: a wrong belief is a wrong
+sentence, a wrong procedure is a wrong afternoon. Gotchas are sentence-shaped and
+carry a belief's risk, so they keep serving. The guard landed before any
+procedure exists, so it cannot be forgotten on the day one does.
 
 The miner's own abstention is upstream of all of this and is the more important
 gate. `procmine.dag` refuses to emit a procedure below 5 episodes, below a 3-step
@@ -180,6 +187,18 @@ class of bug, and it stays consistent with the rule that
 `current_beliefs` is a rebuildable projection of the append-only event log
 (`src/ocbrain/core_v1.py:1`). The write goes through the existing
 `correction_recorded` event path, not a bespoke UPDATE.
+
+The gotcha mint already does exactly this, by the cheapest available route: it
+recomputes the whole claim and republishes it as a fresh
+`compilation_proposed`/`compilation_decided` pair under a **stable belief id**
+derived from `(signature, scope_id)`, so a re-mint converges on one row instead
+of adding one. That is recompute-and-replace with no new event kind at all.
+
+A future *statistics-only* republish — the attributes moved, the sentence did
+not — should instead ride a correction `annotate` op rather than reproposing the
+whole belief. **That op is pending on a separate branch (`v2/supersede`) and is
+deliberately not implemented here.** Until it lands, a stats refresh is a full
+reproposal, which is correct but noisier in the event log than it needs to be.
 
 **Closing the loop through `brain.closeout`.** `record_closeout`
 (`src/ocbrain/closeout.py:20`) already walks the retrievals it was linked to
@@ -218,16 +237,18 @@ Existing machinery covers most of it:
 - **Supersession** — `superseded_by`, same sweep. The miner sets it when a new
   mining run replaces a procedure over the same family.
 
-One change is required. `_unused_targets` (`src/ocbrain/hygiene.py:134`) retires
-anything never present in `retrieval_items` after 30 days, exempting only
-`pinned=0` and `belief_type != 'wiki_fact'` (`src/ocbrain/hygiene.py:143`).
-A correct, rarely-needed procedure — the one for a quarterly task — would be
-retired for the crime of not coming up. Procedures need the same exemption
-`wiki_fact` has, because their support comes from episodes, not from retrievals.
+**No exemption is required any more.** This section previously called for
+procedures to inherit the `unused` exemption `wiki_fact` has, on the grounds that
+a correct, rarely-needed procedure — the one for a quarterly task — would be
+retired for the crime of not coming up. That whole hygiene class is gone:
+`CLASSES` is now `("expired", "redundant")`, and both `unused` and `unhelpful`
+were deleted after 155 consecutive scheduled runs in which neither ever selected
+a belief (`src/ocbrain/hygiene.py`). There is nothing left to be exempt from.
 
-They should stay fully subject to `_unhelpful_targets`
-(`src/ocbrain/hygiene.py:163`): a procedure people actively mark unhelpful has
-earned retirement.
+What retires a mined artifact instead is `expired`, on the `valid_until` the
+miner sets. That is the right mechanism: a claim nobody re-mined in six weeks
+should stop being served, and the miner re-confirms every claim it can still
+support on every cycle.
 
 ---
 
@@ -241,20 +262,51 @@ the time".
 Those are not procedures. They are **step-scoped**, they need no closeout, and
 they have three orders of magnitude more support. They fit the existing belief
 shape with no new kind at all: a one-sentence claim, a scope, evidence ids, and a
-confidence — exactly the belief shape the curator already mints.
+confidence.
 
-So the mining pipeline produces two outputs at different ceremony levels:
+This is the half that shipped, as `scripts/procmine/mint.py`. Three properties
+are worth stating because an earlier draft of this document got them wrong:
+
+**It is not auto-compiled.** An earlier version proposed storing gotchas as
+"ordinary auto-compiled beliefs". `auto_compile_evidence` and
+`automatic_activation` were deleted; there is no mechanism by which evidence
+promotes itself. The mint writes an explicit `evidence_recorded`
+(`kind="procmine_gotcha"`, a bounded stats snapshot), then an explicit
+`compilation_proposed` and an explicit approval under
+`writer="procmine:<version>"`. A named non-human actor decides, on the record.
+
+**It is not the curator either.** No hosted model is called. The sentence is
+generated from the counts by `dag.mine_gotchas`, so the wording cannot drift from
+the evidence, and the whole mint is offline and deterministic.
+
+**Re-minting replaces, never increments.** `belief_id = stable_id("belief",
+"gotcha", signature, scope_id)` depends on nothing that changes between runs, so
+the second cycle rewrites the first cycle's row. There is no `reward_band` on a
+gotcha: that field was deleted with the rest of the reward machinery, and a
+mined claim has no business carrying one.
 
 | | procedure | gotcha |
 |---|---|---|
 | unit | task family | one step signature |
 | needs closeouts | yes | no |
 | support on this corpus | 1 | 12 above threshold |
-| storage | `belief_type='procedure'` | ordinary belief |
-| decay | TTL + supersession | re-mined each cycle |
+| storage | `belief_type='procedure'` (design) | `belief_type='gotcha'` (shipped) |
+| decay | TTL + supersession | `valid_until` +45d, re-mined each cycle |
+| degraded mode | excluded | served |
+| cap per run | n/a | 12 |
 
-Shipping the gotcha layer first is the lower-risk path, and it is the half that
-already has the evidence.
+Confidence is a Bayesian shrink of the *repair* success rate toward 0.5, not of
+the failure rate. The failure rate is the claim, not the uncertainty: a step that
+fails 46% of 357 calls fails 46% of the time. What a reader gambles on is the
+remedy the claim names, so that is what the number scores — and a gotcha with no
+recurring repair lands at exactly 0.5, which reads correctly as "trust the
+warning, not a way out of it".
+
+Scope is the dominant project among the mining-set episodes that contain the
+signature, falling back to `project:workspace` when no episode carries it at all.
+`source_quality` grades how well that *attribution* is evidenced — identity joins
+above temporal ones — not how well the counts are; the counts come from the whole
+corpus regardless.
 
 ---
 
@@ -307,7 +359,26 @@ error messages are reduced to a redacted, id-stripped 160-character fingerprint.
 A procedure inherits the belief egress rules unchanged: `egress_allowed`
 (`src/ocbrain/scope.py:204`) and the delivery gate at
 `src/ocbrain/core_v1.py:2079`. Nothing about a procedure is exportable that a
-belief in the same scope would not be.
+belief in the same scope would not be. A minted gotcha is written `local_only`
+and `internal`: a mined artifact must not widen its own egress.
+
+**Redaction is not the same as publishability, and this repository learned that
+the hard way.** `redact_secrets` looks for credentials. An internal IPv4 address,
+an OS Login account name, and the operator's own home directory name are none of
+those, so all three passed every gate and reached the committed
+`docs/procedures.json` and `docs/PROCEDURE-ATLAS-20260824.md` — inside an error
+fingerprint, and in the envelope's `cache_path`, which never went through a
+signature at all. `normalize.scrub_artifact_text` now classes those to `<ip>` and
+`<user>`, `_safe` applies the same rule to every fingerprint, and the atlas runs
+its whole rendered report and machine JSON through it before writing. Both
+committed artifacts were scrubbed in place; a test asserts they stay clean.
+
+The extract cache has a matching hazard. It is keyed on the *source file's*
+fingerprint, which cannot notice that the redaction rules changed, so a cached
+segment would keep serving text the current normalizer would never emit.
+`normalize.NORMALIZER_VERSION` is stored in the extract state and discards the
+whole cache when it moves. Bump it for any change to signatures, redaction, or
+result classing.
 
 ---
 
@@ -330,7 +401,28 @@ belief in the same scope would not be.
    is append-only, so the historical corpus still needs the tiered join.
 2. **Cursor needs a real exporter.** 57 cursor closeouts, 0 traces, because
    `scripts/export-cursor-chats.py` exports chat bubbles and not the tool log.
-3. **A scheduled miner**, alongside the curator and `ocbrain hygiene`, since
-   statistics are recomputed rather than incremented.
-4. **The `unused` hygiene exemption**, or correct procedures get swept at 30 days.
-5. **Gotchas first.** They need none of items 1-4.
+   Still open.
+3. ~~**A scheduled miner**, alongside the curator and `ocbrain hygiene`, since
+   statistics are recomputed rather than incremented.~~ **Landed.**
+   `brain-promote.sh` runs extract → atlas → mint after the vector rebuild,
+   gated `OCBRAIN_PROCMINE=1`, with the write half gated again behind
+   `OCBRAIN_PROCMINE_APPLY=1`. OCBrain still ships no scheduler: an operator opts
+   in by loading a launchd agent, exactly as for the rest of that script.
+   Extraction is incremental — a source file is fingerprinted by
+   `(mtime_ns, size)` and unchanged files replay from cached segments under
+   `~/.ocbrain/procmine/cache` — so a quiet cycle costs under a second against
+   roughly eighty for a cold walk of the corpus.
+4. ~~**The `unused` hygiene exemption**, or correct procedures get swept at 30
+   days.~~ **Moot.** The `unused` class no longer exists; see §5.
+5. ~~**Gotchas first.** They need none of items 1-4.~~ **Done**, and the
+   sequencing held: the gotcha layer needed none of them.
+6. **Provenance-admitted edges, consumed rather than merely reported.** The
+   adapters now classify every adjacent pair as `hard` (a token of at least 12
+   characters from call N's output reappears in call N+1's arguments and in at
+   most two calls of that session) or `suspected`, and the atlas reports the
+   split per runtime. Nothing consumes the class yet: `mine_family` still induces
+   its DAG from bare adjacency. Swapping that over is a separate change and wants
+   its own comparison against the current procedure output.
+7. **Labels, still.** 116 episodes reach the mining set out of 1,148 closeouts.
+   That, not the machinery, is why exactly one procedure clears the floor, and it
+   is why full procedure *serving* is deliberately absent from the shipped half.
