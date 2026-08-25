@@ -118,6 +118,41 @@ title, body, category, lifecycle, and confidence are range-checked, and each
 supporting quote must appear **verbatim** in the evidence it cites. A model that
 invents a citation produces no belief.
 
+### What the curator does when a fact changes
+
+A claim on a key the corpus already serves, carrying a different statement, is a
+**correction**. It routes through the same supersession transaction a runtime
+`brain.supersede` uses: the old copy is era-closed with `superseded_by`, the
+replacement is minted under its own id keeping the same key, the confidence is
+capped at `min(old, claim, 0.7)`, and a paired `correction_recorded` event says
+the fact changed. An unchanged body is still a free no-op, and a claim that
+merely rewords an existing fact still updates it in place.
+
+Because it is the same transaction, it inherits the same routing. A doctrine
+target, a pinned target, and everything past `supersede.direct_cap`
+(`OCBRAIN_SUPERSEDE_DIRECT_CAP`, default 8 per caller per 24 hours) become
+undecided proposals in the pending ledger instead of landing, and
+`brain.digest` reports the depth as `pending_corrections`. That default is sized
+for a runtime agent, and a busy cycle will park its tail: a replay of every
+key collision in one 253-fact corpus landed 8 supersessions and deferred 35.
+Nothing is lost either way — `ocbrain` proposal decisions finish a deferred pair
+later — but raise the cap if a scheduled curator is expected to correct more
+than eight facts a day unattended.
+
+Two guards bound this, and neither can be configured away:
+
+- A claim more than 0.05 below the confidence of the belief it would retire is
+  deferred rather than enacted. Arriving later is not the same as being right.
+- A claim whose newest supporting evidence predates the newest content
+  correction on its target is **blocked**. A scheduled curator reads a window of
+  evidence, not a diff, so Monday's sources come back around every cycle; without
+  this, Wednesday's run quietly restores what a human corrected on Tuesday.
+
+Claims about something the corpus already covers but does not contradict are
+marked rather than merged: both beliefs keep serving and each records the other
+in `attributes.contradicts`, which is the field the context packet's
+`contradictions` array reads.
+
 ### What the sweep retires
 
 Two classes, each separately counted so a run reports *why* it acted:

@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+- Stop the curator from silently overwriting a fact it has already compiled. A
+  claim on a key the corpus already served used to be an update in place: the
+  body was replaced and the confidence overwritten with whatever the hosted
+  model returned, with no event marking the fact as changed and nothing saying
+  what it used to say. On the live corpus that had happened **80 times across 50
+  distinct beliefs**, out of 324 approved curator proposals — the single largest
+  source of pollution in the brain, run hourly, unattended. A key collision
+  carrying a different statement now routes through the same supersession
+  transaction `brain.supersede` uses: the old copy is era-closed with
+  `superseded_by`, the replacement keeps the key under its own id, the
+  confidence is capped at `min(old, claim, 0.7)` instead of taken on trust, and
+  a paired `correction_recorded` says the fact changed. Replaying the 43
+  recoverable collisions on a copy of that corpus: **43 in-place overwrites
+  before, 0 after** — 8 supersessions landed and 35 were deferred to the pending
+  ledger, because the transaction is shared and so is its routing.
+- Give new-key claims a cheap-then-escalate cascade instead of a single
+  similarity test. A cosine pre-filter over the local sidecar ends it for the
+  overwhelming majority of claims, which are about something nothing else in the
+  corpus mentions; above the floor, `is_restatement` separates an elaboration
+  (updates in place, unchanged) from a claim that is about the same subject and
+  says something else. Only that remainder escalates. With no vector sidecar the
+  cascade stands down silently and the corpus keeps its previous behaviour, the
+  same way retrieval degrades to lexical.
+- Let the curator model adjudicate the ambiguous tail by **index selection**, in
+  the hosted call that already runs. `CLAIMS_SCHEMA` gains an optional
+  `conflicts_with: [{index, resolution}]` selecting rows out of the advisory
+  existing-beliefs list the prompt already carried, now explicitly numbered.
+  `validate_claims` range-checks every index against the list actually supplied,
+  so an invented index produces no action — and, unlike an invented citation,
+  does not cost the claim, which is a separate judgement. `supersede` runs the
+  transaction; `coexist` writes `attributes.contradicts` on **both** beliefs and
+  leaves both serving. Free-form contradiction generation is the first thing to
+  collapse on a small model, and this curator is meant to be able to run on one.
+- Populate `contradictions[]` for the first time. The packet builder has read
+  `attributes.contradicts` since the packet existed and nothing had ever written
+  it, so every packet the brain has ever served carried an empty array while
+  handing the reader two answers to one question. The coexist path is its
+  writer. Zero beliefs in the live corpus carried the attribute before this.
+- Never let recency alone resolve a conflict, and never let stale evidence
+  resurrect a correction. A claim more than 0.05 below the confidence of the
+  belief it would retire is **deferred** — recorded as an undecided proposal in
+  the pending ledger, with the standing belief still serving — rather than
+  enacted. A claim whose newest supporting evidence predates the newest content
+  correction on its target is **blocked**: a scheduled curator reads a window of
+  evidence rather than a diff, so without this the Wednesday run quietly
+  restores what a human corrected on Tuesday. `annotate` is deliberately not a
+  content correction, or the coexist path would block itself next cycle.
+- Add `correction` and `gotcha` to `ELIGIBLE_KINDS`, closing a write-only hole:
+  agents could already ingest both kinds and the curator could never read one,
+  so they were hash-chained and invisible forever. This is also what closes the
+  supersession loop — the rationale evidence a supersession records comes back
+  round for re-confirmation or challenge on the next cycle, on any install whose
+  `curator.egress_policies` admits the scope it was written in.
+- `apply_claims` returns `superseded`, `coexist_marked`, and `deferred` beside
+  `applied`/`unchanged`/`blocked`, and `wiki-curator.py` reports all six per
+  project and in the rollup. A cycle that corrects the corpus has to be legible
+  as one.
 - Add `brain.supersede`: correct a belief by replacing it, not by deleting it.
   The ledger held 719 correction events and 718 of them were retracts, because
   retracting was the only correction the store could express. All 11 corrections
