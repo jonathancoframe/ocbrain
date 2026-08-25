@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ocbrain.closeout import normalize_task_ref
 from ocbrain.history_window import is_body_ref
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
@@ -264,7 +265,10 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   server_connection_id TEXT,
   client_session_hint TEXT,
   client_runtime_key TEXT,
-  provenance_json TEXT
+  provenance_json TEXT,
+  -- The folded form of `task_ref` above, so a retrieval and the closeout that
+  -- links it agree on which task they belong to. NULL on historical rows.
+  task_ref_norm TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_outcome_served
   ON retrieval_uses(outcome, served_at);
@@ -345,10 +349,19 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   -- legacy model-supplied string. See ocbrain.provenance.
   server_connection_id TEXT,
   client_session_hint TEXT,
-  client_runtime_key TEXT
+  client_runtime_key TEXT,
+  -- Chain pointers. `parent_closeout_id` is the closeout this one continues,
+  -- written only when it resolved; `task_ref_norm` is the folded form of
+  -- `task_ref` above, which stays verbatim. Both are NULL on every row written
+  -- before they existed: the fold happens at write time and history is never
+  -- rewritten. See ocbrain.closeout.normalize_task_ref.
+  parent_closeout_id TEXT,
+  task_ref_norm TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint
   ON task_closeouts(client_session_hint, closed_at);
+CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain
+  ON task_closeouts(task_ref_norm, closed_at);
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
   closeout_id TEXT NOT NULL REFERENCES task_closeouts(id),
@@ -464,9 +477,12 @@ _ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("retrieval_uses", "client_session_hint", "TEXT"),
     ("retrieval_uses", "client_runtime_key", "TEXT"),
     ("retrieval_uses", "provenance_json", "TEXT"),
+    ("retrieval_uses", "task_ref_norm", "TEXT"),
     ("task_closeouts", "server_connection_id", "TEXT"),
     ("task_closeouts", "client_session_hint", "TEXT"),
     ("task_closeouts", "client_runtime_key", "TEXT"),
+    ("task_closeouts", "parent_closeout_id", "TEXT"),
+    ("task_closeouts", "task_ref_norm", "TEXT"),
 )
 
 _ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
@@ -474,6 +490,8 @@ _ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
     "ON retrieval_uses(client_session_hint, served_at)",
     "CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint "
     "ON task_closeouts(client_session_hint, closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain "
+    "ON task_closeouts(task_ref_norm, closed_at)",
 )
 
 
@@ -2188,8 +2206,8 @@ def record_core_v1_retrieval(
           id, served_to_runtime, task_ref, outcome, query_text, served_ids_json,
           context_json, packet_schema, session_id, served_at,
           server_connection_id, client_session_hint, client_runtime_key,
-          provenance_json
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provenance_json, task_ref_norm
+        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
@@ -2207,6 +2225,10 @@ def record_core_v1_retrieval(
             prov.client_session_hint,
             prov.client_runtime_key,
             canonical_json(prov_payload) if prov_payload else None,
+            # Same fold the closeout writes, so a read and the receipt that
+            # links it agree on which task they belong to without matching on
+            # free text.
+            normalize_task_ref(task_ref) if task_ref else None,
         ),
     )
     for rank, item in enumerate(rows):

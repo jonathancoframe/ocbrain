@@ -135,6 +135,8 @@ _CANONICAL_RETRIEVAL_COLUMNS = {
     "client_session_hint",
     "client_runtime_key",
     "provenance_json",
+    # The folded task reference a retrieval and its closeout chain on.
+    "task_ref_norm",
 }
 
 # The exact live legacy retrieval_uses shape: the original 7 columns plus the
