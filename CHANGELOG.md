@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- Store transcript evidence by reference instead of by value. Measured on a
+  177 MB core: `*_history_file` bodies were 53.3 MB (99.13% of all evidence body
+  bytes), their `evidence_recorded` events 73.9 MB (82.4% of the ledger), and
+  the beliefs compiled from them another 20.9 MB across `current_beliefs` and
+  `compilation_proposed` — 148 MB of 177 MB, growing ~106 MB a month. Import now
+  emits `body: ""` plus a `body_ref` naming the source file and the hashes that
+  rebuild its window, a 2,000-character head excerpt in `evidence_objects
+  .body_head`, and the `source_content_hash` that was empty on every history row
+  ever written. Replaying the same corpus under the new scheme: 19.9 MB, and
+  ~14 MB a month. **New events only — no migration**; existing rows keep their
+  bodies. `brain.source` re-reads the file, rebuilds the window, and verifies it
+  against the recorded hash before serving a byte; a transcript that has grown,
+  rotated, or been deleted (12.4% of recorded source URIs already dangle) comes
+  back as a typed `content_unavailable` with a reason and the recorded head
+  excerpt, never as a raised tool error. The evidence id is still derived from
+  the full window text, so no identity moves. The belief compiled from a
+  transcript now carries the head rather than the whole window — required, not
+  incidental: a re-windowed transcript has to compare unchanged, and it cannot
+  compare against a body the store no longer holds. The import-time re-window
+  gate reads `COALESCE(NULLIF(body, ''), body_head)`, and bundle export sends
+  the head excerpt instead of refusing a pointer row as `invalid_body_size`.
+- Capture caller identity at the server rather than accepting the model's word
+  for it. Runtime and session were free text a model typed into `context`: 129
+  distinct `served_to_runtime` spellings, no session id at all on 44.7% of
+  retrievals and 37.4% of closeouts, and 13 closeouts that identity-join to a
+  transcript. `initialize` now mints a per-connection UUID and reads the MCP
+  child's own environment, and that value is threaded through `tools/call` and
+  `resources/read` — which never received the session state at all — down to
+  every write path. Three identities are stored separately, because only one of
+  them can be trusted and the row should say which: `server_connection_id`
+  (server-minted, authoritative, names a connection and not a conversation),
+  `client_session_hint` (`OCBRAIN_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`;
+  harness-attested and never server-verified — its stability across `/resume`,
+  `/clear` and compaction is unverified, and a Claude Code subagent inherits its
+  parent's value), and `client_runtime_key` (`OCBRAIN_CLIENT`, else `AI_AGENT`,
+  else the handshake `clientInfo.name`, with the winning source recorded). The
+  model-supplied `context.session` and `context.runtime` keep their columns and
+  are now recorded verbatim: `canonical_runtime` and the
+  `context_json["runtime_raw"]` side-channel are gone from the write path, and
+  the folder moves to `scripts/procmine/runtimes.py` where the historical corpus
+  still needs it. Provenance never joins `ScopeContext`, whose `to_dict()` feeds
+  the retrieval `stable_id`. Columns are additive and nullable, applied wherever
+  a core is opened including `serve()`; `task_closeouts` is append-only, so
+  there is no backfill and existing rows are untouched. Two connections writing
+  a byte-identical closeout now produce two receipts instead of colliding on the
+  UNIQUE `content_hash`.
+
 - Curate every configured project scope, not one pinned project. The curator
   compiled whichever single project the promote script pinned, which on one real
   brain reached 5 of 574 curator-eligible objects while 535 closeout summaries

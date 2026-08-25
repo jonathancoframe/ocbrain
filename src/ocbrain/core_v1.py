@@ -22,8 +22,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ocbrain.history_window import is_body_ref
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.scope import (
     LOCAL_MODEL_TARGET,
     ScopeContext,
@@ -157,7 +159,11 @@ END;
 
 CREATE TABLE IF NOT EXISTS evidence_objects (
   evidence_id TEXT PRIMARY KEY,
+  -- Empty for a pointer row: the text lives in the file named by
+  -- metadata_json's body_ref, and `body_head` holds the recorded excerpt.
+  -- See ocbrain.history_window.
   body TEXT NOT NULL,
+  body_head TEXT,
   kind TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   source_content_hash TEXT,
@@ -252,10 +258,19 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   feedback_source TEXT,
   feedback_at TEXT,
   served_at TEXT NOT NULL,
-  source_event_id TEXT REFERENCES brain_events(id)
+  source_event_id TEXT REFERENCES brain_events(id),
+  -- Server-observed caller identity. `session_id` above stays the legacy
+  -- model-supplied string; these three are what the process saw for itself.
+  -- See ocbrain.provenance for what each one is worth.
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT,
+  provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_outcome_served
   ON retrieval_uses(outcome, served_at);
+CREATE INDEX IF NOT EXISTS idx_retrieval_uses_session_hint
+  ON retrieval_uses(client_session_hint, served_at);
 
 CREATE TABLE IF NOT EXISTS retrieval_items (
   retrieval_use_id TEXT NOT NULL REFERENCES retrieval_uses(id),
@@ -325,8 +340,16 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   verifier_refs_json TEXT NOT NULL,
   provenance_json TEXT NOT NULL,
   receipt_json TEXT NOT NULL,
-  content_hash TEXT NOT NULL UNIQUE
+  content_hash TEXT NOT NULL UNIQUE,
+  -- Server-observed caller identity, mirrored out of provenance_json so the
+  -- closeout-to-transcript join is a column read. `session_id` above stays the
+  -- legacy model-supplied string. See ocbrain.provenance.
+  server_connection_id TEXT,
+  client_session_hint TEXT,
+  client_runtime_key TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint
+  ON task_closeouts(client_session_hint, closed_at);
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
   closeout_id TEXT NOT NULL REFERENCES task_closeouts(id),
@@ -453,11 +476,70 @@ def set_automatic_activation(conn: sqlite3.Connection, enabled: bool) -> None:
     )
 
 
+# Columns added to a v1 core after the first release. CORE_V1_SCHEMA uses
+# CREATE TABLE IF NOT EXISTS throughout, so an already-initialized core keeps
+# its original columns forever unless they are added explicitly. Additive and
+# nullable only: no rewrite, no backfill, and an older binary reading a
+# migrated core simply ignores them.
+_ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("evidence_objects", "body_head", "TEXT"),
+    ("retrieval_uses", "server_connection_id", "TEXT"),
+    ("retrieval_uses", "client_session_hint", "TEXT"),
+    ("retrieval_uses", "client_runtime_key", "TEXT"),
+    ("retrieval_uses", "provenance_json", "TEXT"),
+    ("task_closeouts", "server_connection_id", "TEXT"),
+    ("task_closeouts", "client_session_hint", "TEXT"),
+    ("task_closeouts", "client_runtime_key", "TEXT"),
+)
+
+_ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_uses_session_hint "
+    "ON retrieval_uses(client_session_hint, served_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint "
+    "ON task_closeouts(client_session_hint, closed_at)",
+)
+
+
+def migrate_core_v1_columns(conn: sqlite3.Connection) -> list[str]:
+    """Apply the additive column set to an already-initialized v1 core.
+
+    Idempotent and cheap enough to run on every open: it is one
+    ``PRAGMA table_info`` per table when there is nothing to do. Run it there
+    rather than behind a separate migrate command, because the MCP server opens
+    an existing core without calling :func:`init_core_v1` at all, and a write
+    path that referenced a column the running server had never added would fail
+    at the first ``brain.context`` after deploy.
+    """
+    added: list[str] = []
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    by_table: dict[str, set[str]] = {}
+    for table, column, decl in _ADDITIVE_CORE_V1_COLUMNS:
+        if table not in tables:
+            continue
+        if table not in by_table:
+            by_table[table] = {
+                str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+        if column in by_table[table]:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        by_table[table].add(column)
+        added.append(f"{table}.{column}")
+    if added:
+        for statement in _ADDITIVE_CORE_V1_INDEXES:
+            conn.execute(statement)
+    return added
+
+
 def init_core_v1(conn: sqlite3.Connection) -> None:
     """Initialize a fresh v1 core; refuse to layer it over legacy tables."""
     if is_core_v1(conn):
         assert_core_v1_inventory(conn)
         conn.executescript(CORE_V1_SCHEMA)
+        migrate_core_v1_columns(conn)
         return
     existing = [
         str(row[0])
@@ -787,13 +869,25 @@ def _project_recorded_evidence(
     text = str(body.get("body") or "")
     scope = _scope_dict(body.get("scope"))
     evidence_id = str(body.get("evidence_id") or stable_id("evd", text))
+    # A pointer event carries no text. Its content hash is the hash of the
+    # window the pointer names, not of the empty string -- otherwise every
+    # pointer row would share one hash and the collision check below would
+    # stop meaning anything. Both values ride the event body, so a replay of
+    # an old and a new event produces the same rows either way.
+    body_ref = body.get("body_ref") if is_body_ref(body.get("body_ref")) else None
+    body_head = body.get("body_head")
     _upsert_evidence_object(
         conn,
         evidence_id=evidence_id,
         body=text,
+        body_head=str(body_head) if isinstance(body_head, str) else None,
         kind=str(body.get("kind") or "observation"),
-        content_hash=sha256_text(text),
-        source_content_hash=None,
+        content_hash=(
+            str(body_ref["window_sha256"]) if body_ref is not None else sha256_text(text)
+        ),
+        source_content_hash=(
+            str(body_ref["window_input_sha256"]) if body_ref is not None else None
+        ),
         source_type="event",
         source_runtime=event["writer"],
         source_uri=body.get("artifact_ref"),
@@ -814,10 +908,18 @@ def _project_recorded_evidence(
 
 
 def _metadata_event_body(body: dict[str, Any]) -> dict[str, Any]:
-    """The event body as projected metadata, without the duplicated text."""
-    slimmed = {key: value for key, value in body.items() if key != "body"}
+    """The event body as projected metadata, without any duplicated text.
+
+    ``body_head`` is dropped for the same reason ``body`` is: it has its own
+    column on this row. Two kilobytes per transcript, kept twice, is the whole
+    saving of the pointer given back.
+    """
+    duplicated = {"body", "body_head"}
+    slimmed = {key: value for key, value in body.items() if key not in duplicated}
     if "body" in body:
         slimmed["body_omitted"] = "see evidence_objects.body / brain_events.body_json"
+    if "body_head" in body:
+        slimmed["body_head_omitted"] = "see evidence_objects.body_head"
     return slimmed
 
 
@@ -1283,6 +1385,7 @@ def _upsert_evidence_object(
     evidence_id: str,
     body: str,
     kind: str,
+    body_head: str | None = None,
     content_hash: str,
     source_content_hash: str | None,
     source_type: str | None,
@@ -1310,13 +1413,14 @@ def _upsert_evidence_object(
     conn.execute(
         """
         INSERT INTO evidence_objects(
-          evidence_id, body, kind, content_hash, source_content_hash,
+          evidence_id, body, body_head, kind, content_hash, source_content_hash,
           source_type, source_runtime,
           source_uri, artifact_uri, artifact_hash, verifier_status, occurred_at,
           recorded_at, scope_type, scope_id, visibility, egress_policy,
           scope_provenance, metadata_json, recorded_event_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(evidence_id) DO UPDATE SET
+          body_head=COALESCE(excluded.body_head, evidence_objects.body_head),
           source_type=COALESCE(excluded.source_type, evidence_objects.source_type),
           source_runtime=COALESCE(excluded.source_runtime, evidence_objects.source_runtime),
           source_uri=COALESCE(excluded.source_uri, evidence_objects.source_uri),
@@ -1338,6 +1442,7 @@ def _upsert_evidence_object(
         (
             evidence_id,
             body,
+            body_head,
             kind,
             content_hash,
             source_content_hash,
@@ -1570,6 +1675,31 @@ def get_core_v1_belief(conn: sqlite3.Connection, object_id: str) -> dict[str, An
     result["evidence_ids"] = _json_list(row["evidence_ids"])
     result["attributes"] = json.loads(row["attributes_json"] or "{}")
     return result
+
+
+def evidence_body_ref(source: Any) -> dict[str, Any] | None:
+    """The body pointer on an evidence row, or ``None`` for an inline body.
+
+    Accepts either a raw ``evidence_objects`` row or the dict
+    :func:`get_core_v1_evidence` returns, because both are handed around and a
+    caller should not have to know which one it holds.
+    """
+    if isinstance(source, dict) and "metadata" in source:
+        metadata = source.get("metadata")
+    else:
+        try:
+            raw = source["metadata_json"]
+        except (KeyError, IndexError, TypeError):
+            return None
+        try:
+            metadata = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    event_body = metadata.get("event_body")
+    ref = event_body.get("body_ref") if isinstance(event_body, dict) else None
+    return ref if is_body_ref(ref) else None
 
 
 def get_core_v1_evidence(conn: sqlite3.Connection, evidence_id: str) -> dict[str, Any] | None:
@@ -1936,56 +2066,48 @@ def record_core_v1_evidence(
     writer: str,
     session_id: str | None = None,
     artifact_ref: str | None = None,
+    body_ref: dict[str, Any] | None = None,
+    body_head: str | None = None,
+    identity_body: str | None = None,
 ) -> tuple[str, str]:
-    evidence_id = stable_id("evd", body, kind, artifact_ref or "", scope.scope_id)
+    """Append an ``evidence_recorded`` event, inline or as a pointer.
+
+    A pointer passes ``body=""`` with a ``body_ref`` naming the file the text
+    can be rebuilt from and a ``body_head`` excerpt of it. ``identity_body`` is
+    then the text the evidence id is derived from, so the id stays exactly what
+    it would have been with the text stored inline: the same window is the same
+    evidence, a re-windowed transcript is new evidence, and no existing id
+    moves. Everything the projection needs rides the event body, so replaying
+    an old inline event and a new pointer event both land the right row.
+    """
+    evidence_id = stable_id(
+        "evd",
+        body if identity_body is None else identity_body,
+        kind,
+        artifact_ref or "",
+        scope.scope_id,
+    )
+    event_body: dict[str, Any] = {
+        "schema_version": CORE_V1_EVENT_SCHEMA,
+        "subject": {"kind": "evidence", "id": evidence_id},
+        "evidence_id": evidence_id,
+        "kind": kind,
+        "body": body,
+        "artifact_ref": artifact_ref,
+        "scope": scope.to_dict(),
+    }
+    if body_ref is not None:
+        event_body["body_ref"] = body_ref
+        event_body["body_head"] = body_head or ""
     event_id = append_core_event(
         conn,
         "evidence_recorded",
-        {
-            "schema_version": CORE_V1_EVENT_SCHEMA,
-            "subject": {"kind": "evidence", "id": evidence_id},
-            "evidence_id": evidence_id,
-            "kind": kind,
-            "body": body,
-            "artifact_ref": artifact_ref,
-            "scope": scope.to_dict(),
-        },
+        event_body,
         writer=writer,
         session_id=session_id,
         project=True,
     )
     return evidence_id, event_id
-
-
-# Runtimes self-report a free-text name, and the same client arrives spelled a
-# dozen ways ("codex-desktop", "Codex desktop", "Codex desktop local macOS").
-# Ungrouped, that makes per-client analytics and feedback aggregation useless.
-# Match the client where one is identifiable and keep the slug otherwise, so an
-# unrecognized runtime stays legible instead of collapsing into "unknown".
-_RUNTIME_CANONICAL_MARKERS: tuple[tuple[str, str], ...] = (
-    ("codex", "codex"),
-    ("cursor", "cursor"),
-    ("claude", "claude-code"),
-    ("hermes", "hermes"),
-    ("telegram", "telegram"),
-)
-
-
-def canonical_runtime(runtime: str | None) -> str | None:
-    """Collapse a self-reported runtime name to a stable slug.
-
-    Returns ``None`` unchanged so "not reported" stays distinct from "reported
-    but unrecognized". The raw value is preserved by callers alongside this.
-    """
-    if runtime is None:
-        return None
-    slug = "-".join(re.findall(r"[a-z0-9]+", runtime.lower()))
-    if not slug:
-        return None
-    for marker, canonical in _RUNTIME_CANONICAL_MARKERS:
-        if marker in slug:
-            return canonical
-    return slug[:64]
 
 
 def record_core_v1_retrieval(
@@ -1998,13 +2120,24 @@ def record_core_v1_retrieval(
     task_ref: str | None,
     session_id: str | None,
     packet_schema: str = "ocbrain.context.v1",
+    provenance: Provenance | None = None,
 ) -> str:
+    """Append the read receipt for one served packet.
+
+    ``runtime`` and ``session_id`` are recorded verbatim as the model sent them.
+    They used to be run through a ``canonical_runtime`` collapser that guessed
+    which client a free-text string meant; that guess now lives read-side in
+    ``scripts/procmine`` where it belongs, because ``provenance`` carries what
+    the server actually observed and there is nothing left to guess about.
+
+    ``provenance`` is deliberately absent from the ``stable_id`` inputs and from
+    ``context_json``: two identical reads must stay the same read regardless of
+    which connection served them.
+    """
     rows = list(items)
     served_at = now_iso()
-    canonical = canonical_runtime(runtime)
-    if runtime is not None and runtime != canonical:
-        # Keep the operator's exact string; only the indexed column is collapsed.
-        context = {**context, "runtime_raw": runtime}
+    prov = provenance or EMPTY_PROVENANCE
+    prov_payload = prov.to_dict()
     retrieval_id = stable_id(
         "ret",
         served_at,
@@ -2018,12 +2151,14 @@ def record_core_v1_retrieval(
         """
         INSERT INTO retrieval_uses(
           id, served_to_runtime, task_ref, outcome, query_text, served_ids_json,
-          context_json, packet_schema, session_id, served_at
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?)
+          context_json, packet_schema, session_id, served_at,
+          server_connection_id, client_session_hint, client_runtime_key,
+          provenance_json
+        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
-            canonical,
+            runtime,
             task_ref,
             query,
             canonical_json(
@@ -2033,6 +2168,10 @@ def record_core_v1_retrieval(
             packet_schema,
             session_id,
             served_at,
+            prov.server_connection_id,
+            prov.client_session_hint,
+            prov.client_runtime_key,
+            canonical_json(prov_payload) if prov_payload else None,
         ),
     )
     for rank, item in enumerate(rows):
@@ -2340,10 +2479,12 @@ __all__ = [
     "compilation_block_reason",
     "conservative_legacy_scope",
     "core_v1_table_names",
+    "evidence_body_ref",
     "get_core_v1_belief",
     "get_core_v1_evidence",
     "init_core_v1",
     "is_core_v1",
+    "migrate_core_v1_columns",
     "project_core_v1",
     "rebuild_core_v1_search",
     "record_core_v1_evidence",

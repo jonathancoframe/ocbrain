@@ -40,7 +40,11 @@ hashes, and links during migration; new events continue from that verified head.
 
 Derived semantic projections are rebuilt from the event chain:
 
-- `evidence_objects` — normalized source-backed observations;
+- `evidence_objects` — normalized source-backed observations. Transcript
+  windows (`*_history_file`) are stored by reference: `body` is empty,
+  `body_head` holds the recorded excerpt, and `metadata_json.event_body.body_ref`
+  names the file and the hashes that let `brain.source` rebuild the window and
+  prove it rebuilt correctly (`src/ocbrain/history_window.py`);
 - `current_beliefs` — the current serving interpretation, never an independent
   second truth;
 - `belief_evidence` — explicit support/contradiction provenance;

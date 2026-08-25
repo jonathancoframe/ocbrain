@@ -13,7 +13,12 @@ from typing import Any
 
 from ocbrain import __version__
 from ocbrain.closeout import record_closeout
-from ocbrain.core_v1 import init_core_v1, is_core_v1, record_core_v1_retrieval
+from ocbrain.core_v1 import (
+    init_core_v1,
+    is_core_v1,
+    migrate_core_v1_columns,
+    record_core_v1_retrieval,
+)
 from ocbrain.db import (
     PUBLIC_SCOPES,
     approve_knowledge,
@@ -60,6 +65,7 @@ from ocbrain.mcp_v1 import (
     record_context_v1,
     search_v1,
 )
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance, connection_provenance
 from ocbrain.retrieve import retrieve
 from ocbrain.scope import (
     HOSTED_MODEL_TARGET,
@@ -239,7 +245,12 @@ def serve(
     conn = connect(db_path)
     conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
     if is_core_v1(conn):
-        pass
+        # An existing core is opened without init_core_v1, so the additive
+        # column set has to be applied here or a deployed server would write
+        # against columns its database has never been given. Idempotent, and a
+        # no-op read of two PRAGMAs once the core is current.
+        if migrate_core_v1_columns(conn):
+            conn.commit()
     elif _database_has_user_tables(conn):
         # Read/migrate an existing v0.x database only as an explicit
         # compatibility path. A fresh MCP database is v1 by default.
@@ -418,6 +429,10 @@ def handle_request(
                 client_info = params.get("clientInfo")
                 if isinstance(client_info, dict):
                     session_state["client_name"] = str(client_info.get("name") or "")
+                # Mint the connection id and read the harness environment here,
+                # once, so every later call on this transport carries the same
+                # server-observed identity.
+                connection_provenance(session_state)
             result = {
                 "protocolVersion": "2025-11-25",
                 "serverInfo": {
@@ -446,6 +461,7 @@ def handle_request(
                 params,
                 profile=resolved_profile,
                 delivery_target=resolved_delivery_target,
+                provenance=connection_provenance(session_state),
             )
         elif method == "resources/list":
             result = {
@@ -459,6 +475,7 @@ def handle_request(
                 conn,
                 params.get("uri"),
                 delivery_target=resolved_delivery_target,
+                provenance=connection_provenance(session_state),
             )
         else:
             response = error_response(request_id, -32601, f"unknown method: {method}")
@@ -483,6 +500,7 @@ def _call_tool_with_lock_retry(
     *,
     profile: str = RUNTIME_PROFILE,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     """Dispatch a tool call, bound-retrying on 'database is locked'.
 
@@ -493,12 +511,13 @@ def _call_tool_with_lock_retry(
     for attempt in range(WRITE_LOCK_RETRIES):
         try:
             if delivery_target == LOCAL_MODEL_TARGET:
-                return call_tool(conn, params, profile=profile)
+                return call_tool(conn, params, profile=profile, provenance=provenance)
             return call_tool(
                 conn,
                 params,
                 profile=profile,
                 delivery_target=delivery_target,
+                provenance=provenance,
             )
         except sqlite3.OperationalError as exc:
             if "database is locked" not in str(exc).lower() or attempt == WRITE_LOCK_RETRIES - 1:
@@ -522,6 +541,7 @@ def _log_retrieval_if_available(
     context: ScopeContext | None = None,
     query_text: str | None = None,
     served_ids: list[str] | None = None,
+    provenance: Provenance | None = None,
 ) -> tuple[str | None, str]:
     """Log a read without making it unavailable behind a long DB writer.
 
@@ -540,6 +560,7 @@ def _log_retrieval_if_available(
             query_text=query_text,
             served_ids=served_ids,
             session_id=(context.session if context else None),
+            provenance=provenance,
         )
         conn.commit()
         return retrieval_use_id, "recorded"
@@ -556,6 +577,7 @@ def _log_context_and_issue_if_available(
     handles: list[dict[str, Any]],
     *,
     context: ScopeContext,
+    provenance: Provenance | None = None,
 ) -> tuple[str | None, str]:
     """Atomically persist the read receipt and the source capabilities it issued."""
     try:
@@ -571,6 +593,7 @@ def _log_context_and_issue_if_available(
             query_text=payload["query"],
             served_ids=[str(item["id"]) for item in payload["items"]],
             session_id=context.session,
+            provenance=provenance,
         )
         issue_source_handles(conn, handles, retrieval_use_id=retrieval_use_id)
         conn.commit()
@@ -603,7 +626,9 @@ def call_tool(
     *,
     profile: str = RUNTIME_PROFILE,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
+    provenance = provenance or EMPTY_PROVENANCE
     profile = resolve_profile(profile=profile)
     delivery_target = normalize_delivery_target(delivery_target)
     name = params.get("name")
@@ -624,6 +649,7 @@ def call_tool(
             arguments,
             profile=profile,
             delivery_target=delivery_target,
+            provenance=provenance,
         )
     if delivery_target == HOSTED_MODEL_TARGET and name in LEGACY_HOSTED_READ_TOOLS:
         raise PermissionError(
@@ -646,6 +672,7 @@ def call_tool(
             payload,
             handles,
             context=context,
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_use_id
         payload["retrieval_use_status"] = retrieval_use_status
@@ -665,6 +692,7 @@ def call_tool(
             note=f"source_id={payload['id']};hash_verified=true",
             context=context,
             served_ids=[str(payload["object_id"])],
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_use_id
         payload["retrieval_use_status"] = retrieval_use_status
@@ -691,6 +719,7 @@ def call_tool(
                 context=context,
                 query_text=query,
                 served_ids=[str(item["belief_id"]) for item in payload["items"]],
+                provenance=provenance,
             )
             payload["retrieval_use_id"] = retrieval_use_id
             payload["retrieval_use_status"] = retrieval_use_status
@@ -704,6 +733,7 @@ def call_tool(
             note=f"limit={limit};filters={json.dumps(filters, sort_keys=True)}",
             query_text=query,
             served_ids=served_ids,
+            provenance=provenance,
         )
         result_rows = []
         for row in rows:
@@ -731,6 +761,7 @@ def call_tool(
             context=context_from_arguments(arguments),
             query_text=query,
             served_ids=[str(item["belief_id"]) for item in payload["items"]],
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_use_id
         payload["retrieval_use_status"] = retrieval_use_status
@@ -756,6 +787,7 @@ def call_tool(
             conn,
             None,
             task_ref="brain.digest",
+            provenance=provenance,
         )
         payload = knowledge_digest(conn, project=project, limit=limit)
         if context.to_dict() or since_ts or arguments.get("event_core"):
@@ -780,6 +812,7 @@ def call_tool(
                 None,
                 task_ref="brain.get",
                 note=f"object=belief;status={belief['status']};scope={belief['scope']['scope_id']}",
+                provenance=provenance,
             )
             return text_result(
                 {
@@ -801,6 +834,7 @@ def call_tool(
             row["id"],
             task_ref="brain.get",
             note=f"status={row['status']};scope={row['privacy_scope']}",
+            provenance=provenance,
         )
         row_dict = dict(row)
         row_dict["object_kind"] = "knowledge"
@@ -945,6 +979,7 @@ def call_tool(
             outcomes=object_list(arguments.get("outcomes"), "outcomes"),
             awaiting=optional_string(arguments, "awaiting"),
             actor=optional_string(arguments, "actor") or "agent",
+            provenance=provenance,
         )
         conn.commit()
         return text_result(receipt)
@@ -989,8 +1024,17 @@ def call_tool_v1(
     *,
     profile: str,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
-    """Dispatch the stable MCP surface without consulting the v0.x archive."""
+    """Dispatch the stable MCP surface without consulting the v0.x archive.
+
+    ``provenance`` is the connection's server-observed identity, minted at
+    ``initialize`` and carried on every call over that transport. It travels
+    beside the caller-supplied ``context`` rather than inside it: merging the
+    two would put a per-connection UUID into the retrieval ``stable_id`` and
+    make two identical reads two different reads.
+    """
+    provenance = provenance or EMPTY_PROVENANCE
     delivery_target = normalize_delivery_target(delivery_target)
     # The v1 core cannot serve an as-of view. Null/blank means no time travel,
     # but every meaningful value must be rejected rather than silently serving
@@ -1019,6 +1063,7 @@ def call_tool_v1(
             handles,
             context=context,
             delivery_target=delivery_target,
+            provenance=provenance,
         )
         bind_retrieval_id_v1(packet, retrieval_id)
         conn.commit()
@@ -1041,6 +1086,7 @@ def call_tool_v1(
             task_ref=context.task or f"brain.source:{payload['id']}",
             session_id=context.session,
             packet_schema="ocbrain.source.v1",
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_id
         payload["retrieval_use_status"] = "recorded"
@@ -1054,6 +1100,7 @@ def call_tool_v1(
             limit=min(max(int_arg(arguments, "limit", 10), 1), 50),
             cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
+            provenance=provenance,
         )
         conn.commit()
         return text_result(payload)
@@ -1075,6 +1122,7 @@ def call_tool_v1(
             handles,
             context=context,
             delivery_target=delivery_target,
+            provenance=provenance,
         )
         bind_retrieval_id_v1(packet, retrieval_id)
         conn.commit()
@@ -1113,6 +1161,7 @@ def call_tool_v1(
             task_ref=context.task or "brain.digest",
             session_id=context.session,
             packet_schema="ocbrain.digest.v1",
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_id
         payload["retrieval_use_status"] = "recorded"
@@ -1147,6 +1196,7 @@ def call_tool_v1(
             task_ref=context.task or "brain.get",
             session_id=context.session,
             packet_schema="ocbrain.object.v1",
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_id
         payload["retrieval_use_status"] = "recorded"
@@ -1194,6 +1244,7 @@ def call_tool_v1(
             outcomes=object_list(arguments.get("outcomes"), "outcomes"),
             awaiting=optional_string(arguments, "awaiting"),
             actor=optional_string(arguments, "actor") or "agent",
+            provenance=provenance,
         )
         conn.commit()
         return text_result(payload)
@@ -1298,7 +1349,9 @@ def read_resource(
     uri: str | None,
     *,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
+    provenance = provenance or EMPTY_PROVENANCE
     delivery_target = normalize_delivery_target(delivery_target)
     if is_core_v1(conn):
         if uri != "brain://digest/current":
@@ -1319,6 +1372,7 @@ def read_resource(
             task_ref="resources/read:brain://digest/current",
             session_id=None,
             packet_schema="ocbrain.digest.v1",
+            provenance=provenance,
         )
         payload["retrieval_use_id"] = retrieval_id
         conn.commit()

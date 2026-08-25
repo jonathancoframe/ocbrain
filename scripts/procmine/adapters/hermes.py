@@ -1,7 +1,8 @@
 """Hermes adapter — two sources of very different quality.
 
-Per-profile ``state.db`` (rich)
-    ``~/.hermes/profiles/<profile>/state.db`` has a ``messages`` table where
+Default and per-profile ``state.db`` stores (rich)
+    ``~/.hermes/state.db`` and ``~/.hermes/profiles/<profile>/state.db`` have a
+    ``messages`` table where
     assistant rows carry ``tool_calls`` (OpenAI-shaped ``function.name`` +
     ``arguments`` JSON) and the following tool rows carry the result, usually a
     JSON body with ``exit_code``/``error``. Joined to ``sessions`` for identity
@@ -29,6 +30,7 @@ from ..normalize import Trace, TraceEvent, arg_signature, error_fingerprint, res
 
 _BAD = {"error", "refused", "timeout"}
 HERMES_PROFILES = Path(os.path.expanduser("~/.hermes/profiles"))
+HERMES_DEFAULT_DB = Path(os.path.expanduser("~/.hermes/state.db"))
 HERMES_LEGACY_EXPORT = Path(os.path.expanduser("~/.hermes/sessions/export"))
 
 
@@ -99,28 +101,29 @@ def _open_ro(path: Path) -> sqlite3.Connection:
 
 def iter_hermes_profile_traces(root: Path | None = None) -> Iterator[Trace]:
     base = root or HERMES_PROFILES
-    if not base.exists():
-        return
-    for profile_dir in sorted(p for p in base.iterdir() if p.is_dir()):
-        db_path = profile_dir / "state.db"
-        if not db_path.exists():
-            continue
+    stores: list[tuple[str, Path]] = []
+    if root is None and HERMES_DEFAULT_DB.exists():
+        stores.append(("default", HERMES_DEFAULT_DB))
+    if base.exists():
+        stores.extend(
+            (profile_dir.name, profile_dir / "state.db")
+            for profile_dir in sorted(p for p in base.iterdir() if p.is_dir())
+            if (profile_dir / "state.db").exists()
+        )
+    for profile, db_path in stores:
         try:
             conn = _open_ro(db_path)
         except sqlite3.Error:
             continue
         try:
-            yield from _profile_traces(conn, profile_dir.name, db_path)
+            yield from _profile_traces(conn, profile, db_path)
         finally:
             conn.close()
 
 
 def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> Iterator[Trace]:
     sessions = {
-        row[0]: row
-        for row in conn.execute(
-            "select id, started_at, ended_at, cwd from sessions"
-        )
+        row[0]: row for row in conn.execute("select id, started_at, ended_at, cwd from sessions")
     }
     rows = conn.execute(
         "select session_id, role, tool_calls, tool_name, content, timestamp, id, tool_call_id "

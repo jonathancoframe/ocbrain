@@ -131,6 +131,13 @@ _CANONICAL_RETRIEVAL_COLUMNS = {
     "feedback_source",
     "feedback_at",
     "served_at",
+    # Server-observed caller identity (ocbrain.provenance). Additive and
+    # nullable; the legacy rebuild must carry them through like any other
+    # canonical column.
+    "server_connection_id",
+    "client_session_hint",
+    "client_runtime_key",
+    "provenance_json",
 }
 
 # The exact live legacy retrieval_uses shape: the original 7 columns plus the

@@ -8,6 +8,8 @@ it cannot support.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -17,6 +19,7 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from procmine.adapters import hermes as hermes_adapter  # noqa: E402
 from procmine.dag import (  # noqa: E402
     MIN_FAMILY_EPISODES,
     Family,
@@ -237,6 +240,75 @@ def test_normalize_runtime_folds_free_text_and_admits_ignorance():
     assert normalize_runtime("wombat") == "unknown"
 
 
+def test_hermes_adapter_includes_default_state_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        create table sessions (
+          id text primary key, started_at real, ended_at real, cwd text
+        );
+        create table messages (
+          id integer primary key, session_id text, role text, content text,
+          tool_call_id text, tool_calls text, tool_name text, timestamp real
+        );
+        """
+    )
+    conn.execute(
+        "insert into sessions values (?, ?, ?, ?)",
+        ("session-1", 1.0, 2.0, str(tmp_path)),
+    )
+    conn.execute(
+        "insert into messages values (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "session-1",
+            "assistant",
+            None,
+            None,
+            json.dumps(
+                [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "terminal",
+                            "arguments": '{"command":"git status"}',
+                        },
+                    }
+                ]
+            ),
+            None,
+            1.0,
+        ),
+    )
+    conn.execute(
+        "insert into messages values (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            2,
+            "session-1",
+            "tool",
+            '{"output":"clean","exit_code":0}',
+            "call-1",
+            None,
+            "terminal",
+            2.0,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    monkeypatch.setattr(hermes_adapter, "HERMES_DEFAULT_DB", db_path)
+    monkeypatch.setattr(hermes_adapter, "HERMES_PROFILES", profiles)
+
+    traces = list(hermes_adapter.iter_hermes_profile_traces())
+    assert len(traces) == 1
+    assert traces[0].runtime == "hermes:default"
+    assert traces[0].events[0].arg_signature == "bash:git status"
+    assert traces[0].events[0].result_class == "ok"
+
+
 # --- sequence machinery ----------------------------------------------------
 
 
@@ -265,7 +337,9 @@ def _episode(closeout_id: str, steps: list[str], grade: str = "verifier-receipte
         summary="s",
         runtime_raw="codex",
         runtime="codex",
+        runtime_slug="codex",
         session_id=None,
+        session_hint=None,
         project=None,
         repo=None,
         grade=grade,
@@ -363,8 +437,7 @@ def test_mine_repairs_rejects_a_pair_seen_in_only_one_session():
 
 def test_mine_repairs_finds_a_pair_spread_across_sessions():
     spread = [
-        {"trace_id": f"s{i}", "runtime": "codex", "events": _repair_session(2)}
-        for i in range(6)
+        {"trace_id": f"s{i}", "runtime": "codex", "events": _repair_session(2)} for i in range(6)
     ]
     mined = mine_repairs(spread)["repairs"]
     assert mined

@@ -1,19 +1,37 @@
+"""Caller identity on the write path, and the read-side folder it replaced.
+
+``canonical_runtime`` used to run on every retrieval write, collapsing a
+free-text self-report into a guessed slug. Server-captured provenance made the
+guess unnecessary for new rows, so the folder moved to ``scripts/procmine``
+where the historical corpus still needs it. These tests pin both halves: the
+write path records what the model said verbatim beside what the server
+observed, and the relocated folder still folds the spellings it always did.
+"""
+
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
+from ocbrain import core_v1
 from ocbrain.core_v1 import (
     append_core_event,
-    canonical_runtime,
     init_core_v1,
     record_core_v1_retrieval,
     set_automatic_activation,
 )
 from ocbrain.db import connect
 from ocbrain.mcp_v1 import correct_v1, decide_proposal_v1, ingest_v1
+from ocbrain.provenance import Provenance
 from ocbrain.scope import ScopeContext, ScopeTag
+
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from procmine.runtimes import canonical_runtime  # noqa: E402
 
 SCOPE = ScopeTag(
     "project",
@@ -55,9 +73,14 @@ def test_canonical_runtime_collapses_client_spellings(reported, expected) -> Non
     assert canonical_runtime(reported) == expected
 
 
-def test_recorded_retrieval_stores_canonical_runtime_and_keeps_the_raw_string(
-    tmp_path: Path,
-) -> None:
+def test_recorded_retrieval_keeps_the_self_report_verbatim(tmp_path: Path) -> None:
+    """No guessing on the write path, and no duplicate raw copy in the context.
+
+    The stored runtime is exactly what the caller sent. Collapsing it to a slug
+    here destroyed the only record of what was actually reported and forced a
+    ``runtime_raw`` side-channel into ``context_json`` to put it back -- inside
+    the value that feeds the retrieval ``stable_id``.
+    """
     conn = _core(tmp_path)
     retrieval_id = record_core_v1_retrieval(
         conn,
@@ -74,26 +97,80 @@ def test_recorded_retrieval_stores_canonical_runtime_and_keeps_the_raw_string(
         "SELECT served_to_runtime, context_json FROM retrieval_uses WHERE id=?",
         (retrieval_id,),
     ).fetchone()
-    assert row["served_to_runtime"] == "codex"
-    assert "Codex desktop local macOS" in row["context_json"]
+    assert row["served_to_runtime"] == "Codex desktop local macOS"
+    assert "runtime_raw" not in row["context_json"]
 
 
-def test_already_canonical_runtime_does_not_add_a_raw_copy(tmp_path: Path) -> None:
+def test_recorded_retrieval_separates_observed_identity_from_the_self_report(
+    tmp_path: Path,
+) -> None:
     conn = _core(tmp_path)
     retrieval_id = record_core_v1_retrieval(
         conn,
         query="probe",
         context={"project": "bountiful"},
         items=[],
-        runtime="codex",
+        runtime="whatever the model felt like typing",
         task_ref=None,
-        session_id=None,
+        session_id="a-human-slug-not-a-session",
+        provenance=Provenance.capture(
+            client_name="claude-code",
+            env={"CLAUDE_CODE_SESSION_ID": "3ebe3a24-6162-4af2-a4ee-4e8c1de121f7"},
+        ),
     )
     conn.commit()
+
     row = conn.execute(
-        "SELECT context_json FROM retrieval_uses WHERE id=?", (retrieval_id,)
+        "SELECT served_to_runtime, session_id, server_connection_id, "
+        "client_session_hint, client_runtime_key, provenance_json, context_json "
+        "FROM retrieval_uses WHERE id=?",
+        (retrieval_id,),
     ).fetchone()
-    assert "runtime_raw" not in row["context_json"]
+    # What the model said, unaltered.
+    assert row["served_to_runtime"] == "whatever the model felt like typing"
+    assert row["session_id"] == "a-human-slug-not-a-session"
+    # What the server saw, in its own columns.
+    assert len(row["server_connection_id"]) == 32
+    assert row["client_session_hint"] == "3ebe3a24-6162-4af2-a4ee-4e8c1de121f7"
+    assert row["client_runtime_key"] == "claude-code"
+    assert "harness_attested" in row["provenance_json"]
+    # And never mixed into the value the retrieval id is derived from.
+    assert "server_connection_id" not in row["context_json"]
+
+
+def test_the_retrieval_stable_id_ignores_provenance(tmp_path: Path, monkeypatch) -> None:
+    """Two identical reads are one read, whoever served them.
+
+    ``context_json`` is a ``stable_id`` input. If provenance leaked into it, a
+    reconnect would change the id of an otherwise identical retrieval and the
+    ledger would stop being content-addressed.
+    """
+    conn = _core(tmp_path)
+    # Freeze served_at: it is the one legitimate reason two reads differ, and
+    # this test is about the other inputs.
+    monkeypatch.setattr(core_v1, "now_iso", lambda: "2026-08-25T00:00:00+00:00")
+    ids = set()
+    for connection in range(2):
+        conn.execute("DELETE FROM retrieval_uses")
+        ids.add(
+            record_core_v1_retrieval(
+                conn,
+                query="probe",
+                context={"project": "bountiful"},
+                items=[],
+                runtime="codex",
+                task_ref=None,
+                session_id=None,
+                provenance=Provenance.capture(
+                    client_name=f"client-{connection}",
+                    env={"CLAUDE_CODE_SESSION_ID": f"session-{connection}"},
+                    connection_id=f"connection-{connection}",
+                ),
+            )
+        )
+    conn.rollback()
+    # Same served_at second, same query, same context, same items -> same id.
+    assert len(ids) == 1
 
 
 def test_ingest_survives_a_blocked_auto_recompile(tmp_path: Path) -> None:

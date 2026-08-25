@@ -41,6 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ocbrain.history_window import HISTORY_HEAD_CHARS
 from ocbrain.text import significant_tokens
 
 DESLOP_VERSION = "deslop-v1"
@@ -753,7 +754,9 @@ def install_doctrine(
 # to stay inside the head half of every window the importer produces. Measured
 # against the live corpus: at 2,000 characters the gate suppresses exactly the
 # re-windowed rows (102 -> 1, 89 -> 1) and keeps all 476 genuine head changes.
-REWINDOW_HEAD_CHARS = 2_000
+# Same value as the excerpt a pointer row keeps, and imported rather than
+# repeated so the gate below cannot drift away from the column it reads.
+REWINDOW_HEAD_CHARS = HISTORY_HEAD_CHARS
 
 
 def rewindowed_evidence_id(
@@ -771,6 +774,11 @@ def rewindowed_evidence_id(
     selects only the newest evidence per source. Returns ``None`` when the head
     differs, which is the signal that the file was rotated or rewritten and the
     new content is genuinely new.
+
+    A pointer row's ``body`` is empty and its excerpt lives in ``body_head``, so
+    the comparison reads whichever the row has. Matching on ``body`` alone would
+    make every pointer row's head compare equal to the empty string and collapse
+    unrelated transcripts onto one evidence id.
     """
     if len(text) < head_chars:
         # Too short to have been windowed at all -- the body IS the file, so a
@@ -780,7 +788,8 @@ def rewindowed_evidence_id(
         """
         SELECT evidence_id
         FROM evidence_objects
-        WHERE source_uri=? AND kind=? AND substr(body, 1, ?) = ?
+        WHERE source_uri=? AND kind=?
+          AND substr(COALESCE(NULLIF(body, ''), body_head), 1, ?) = ?
         ORDER BY recorded_at DESC
         LIMIT 1
         """,
@@ -805,7 +814,8 @@ def plan_volume_eviction(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute(
         """
         WITH ranked AS (
-          SELECT evidence_id, source_uri, kind, length(body) AS body_bytes,
+          SELECT evidence_id, source_uri, kind,
+                 length(body) + length(COALESCE(body_head, '')) AS body_bytes,
                  ROW_NUMBER() OVER (
                    PARTITION BY source_uri, kind ORDER BY recorded_at DESC, evidence_id
                  ) AS recency

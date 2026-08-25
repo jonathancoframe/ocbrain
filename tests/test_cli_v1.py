@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import ocbrain.cli as cli_module
+import ocbrain.history_window as history_window_module
 from ocbrain.cli import build_parser, main
 from ocbrain.core_v1 import get_core_v1_evidence, is_core_v1
 from ocbrain.db import connect
@@ -638,9 +639,18 @@ def test_history_import_excludes_credential_files_from_dry_run_and_write(tmp_pat
     assert imported["imported"] == 1
     assert imported["skipped_count"] == 2
     conn = _strict_v1(db)
-    bodies = "\n".join(str(row[0]) for row in conn.execute("SELECT body FROM evidence_objects"))
+    # Transcript evidence is a pointer row: the text it kept is in body_head.
+    bodies = "\n".join(
+        str(row[0])
+        for row in conn.execute(
+            "SELECT COALESCE(NULLIF(body, ''), body_head, '') FROM evidence_objects"
+        )
+    )
     assert "safe history sentinel" in bodies
     assert credential_sentinel not in bodies
+    # And the credential file left no trace in the ledger either, pointer or not.
+    events = "\n".join(str(row[0]) for row in conn.execute("SELECT body_json FROM brain_events"))
+    assert credential_sentinel not in events
     conn.close()
 
 
@@ -734,7 +744,9 @@ def test_history_window_bounds_redaction_work_for_large_active_transcripts(
     def refuse_full_redaction(_path):
         raise AssertionError("large history window must not regex-scan the complete transcript")
 
-    monkeypatch.setattr(cli_module, "iter_redacted_history", refuse_full_redaction)
+    # The window builder moved to ocbrain.history_window when transcript
+    # evidence became a pointer; patch it where it now lives.
+    monkeypatch.setattr(history_window_module, "iter_redacted_history", refuse_full_redaction)
     window = cli_module.history_text_window(history, max_bytes=1_024)
 
     assert "head-visible" in window
