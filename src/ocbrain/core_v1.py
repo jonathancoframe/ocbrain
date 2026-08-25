@@ -919,6 +919,16 @@ def _project_compilation_decision(
     belief_body = str(body.get("edited_body") or proposed.get("body") or "")
     scope = _scope_dict(proposed.get("scope"))
     evidence_ids = [str(item) for item in proposed.get("evidence_ids") or []]
+    # A pin is a standing operator decision about a belief, not a property of
+    # one revision of its text. Hardcoding ``pinned=False`` here meant every
+    # recompilation silently unpinned whatever an operator had pinned, and a
+    # scheduled curator recompiles constantly -- which is why one real corpus
+    # held exactly one pinned belief. Carry the stored value forward instead.
+    # Deterministic under replay: the ``pin`` correction that set it is an
+    # earlier event, so a full rebuild reaches this row with the same value.
+    existing = conn.execute(
+        "SELECT pinned FROM current_beliefs WHERE belief_id=?", (belief_id,)
+    ).fetchone()
     _write_belief(
         conn,
         belief_id=belief_id,
@@ -930,7 +940,7 @@ def _project_compilation_decision(
         evidence_ids=evidence_ids,
         status="current",
         serve=True,
-        pinned=False,
+        pinned=bool(existing["pinned"]) if existing is not None else False,
         approved_event_id=event["id"],
         last_event_id=event["id"],
         compiled_at=event["ts"],
