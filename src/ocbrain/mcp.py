@@ -1383,7 +1383,14 @@ def tool_list(
                             "runtime": {"type": "string"},
                         },
                     },
-                    "cross_scope": {"type": "boolean"},
+                    "cross_scope": {
+                        "type": "boolean",
+                        "description": (
+                            "Deprecated and ignored. Local retrieval ranks every scope "
+                            "by affinity instead of filtering, so there is no narrower "
+                            "mode left to widen. Accepted so existing callers keep working."
+                        ),
+                    },
                     "at_ts": {"type": "string"},
                 },
                 "required": ["query"],
@@ -1449,7 +1456,14 @@ def tool_list(
                             "runtime": {"type": "string"},
                         },
                     },
-                    "cross_scope": {"type": "boolean"},
+                    "cross_scope": {
+                        "type": "boolean",
+                        "description": (
+                            "Deprecated and ignored. Local retrieval ranks every scope "
+                            "by affinity instead of filtering, so there is no narrower "
+                            "mode left to widen. Accepted so existing callers keep working."
+                        ),
+                    },
                     "at_ts": {"type": "string"},
                 },
                 "required": ["query"],
@@ -1536,7 +1550,14 @@ def tool_list(
                     "id": {"type": "string"},
                     "include_candidate": {"type": "boolean"},
                     "include_private": {"type": "boolean"},
-                    "cross_scope": {"type": "boolean"},
+                    "cross_scope": {
+                        "type": "boolean",
+                        "description": (
+                            "Deprecated and ignored. Local retrieval ranks every scope "
+                            "by affinity instead of filtering, so there is no narrower "
+                            "mode left to widen. Accepted so existing callers keep working."
+                        ),
+                    },
                     "context": {
                         "type": "object",
                         "properties": {

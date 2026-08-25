@@ -374,11 +374,16 @@ def test_v1_feedback_treats_blank_note_as_absent(tmp_path):
     assert "error" not in response, response
 
 
-def test_v1_context_accepts_stringly_booleans(tmp_path):
+def test_v1_context_accepts_the_deprecated_cross_scope_argument(tmp_path):
+    """Five live clients still send ``cross_scope``. It must never fault.
+
+    It no longer changes anything: local retrieval ranks every scope, so there
+    is no narrower mode to widen. The packet reports the mode it actually ran
+    rather than echoing the argument back.
+    """
     conn = _seed_v1(tmp_path)
-    for request_id, (sent, expected) in enumerate(
-        [("false", False), ("true", True), ("", False)], start=1
-    ):
+    baseline: list[str] | None = None
+    for request_id, sent in enumerate(["false", "true", "", True, False, None], start=1):
         served = _payload(
             handle_request(
                 conn,
@@ -393,7 +398,12 @@ def test_v1_context_accepts_stringly_booleans(tmp_path):
                 ),
             )
         )
-        assert served["cross_scope"] is expected, (sent, served["cross_scope"])
+        assert "cross_scope" not in served, sent
+        assert served["retrieval_mode"] == "ranked", sent
+        item_ids = [item["id"] for item in served["items"]]
+        if baseline is None:
+            baseline = item_ids
+        assert item_ids == baseline, (sent, item_ids, baseline)
 
 
 def test_v1_context_accepts_stringly_limit(tmp_path):

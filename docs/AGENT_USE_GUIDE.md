@@ -42,16 +42,22 @@ Pass all context you actually know:
 
 - Ingest at the narrowest known scope.
 - Do not widen project/client/private material into global doctrine.
-- `cross_scope` is an explicit discovery request, not permission to reveal
-  confidential foreign scopes.
-- A scoped read that returns nothing retries once across scopes on its own and
-  reports it in `coverage.scope_fallback`. Read the `scope` on each item before
-  reusing it: those results come from a neighbouring scope, not yours. Set
-  `retrieval.scope_fallback_enabled` to `false` to keep strict isolation.
-- A source handle can be expanded only within its original scope. If the source
-  changed, request a fresh context packet.
-- `brain.get` is not an ID bypass: scope, confidentiality, quarantine, and
-  lifecycle gates still apply.
+- Local reads rank by scope rather than filtering on it. A packet may contain
+  material from a neighbouring project, ranked below your own; the scope you
+  pass decides the order, not the reach. **Read the `scope` on each item before
+  reusing it.** `coverage.scope_mix` reports what you were actually served, by
+  scope, and `retrieval_mode` is `ranked` for local delivery.
+- `cross_scope` is deprecated and ignored. It is still accepted so existing
+  callers keep working. There is no narrower mode left for it to widen.
+- Confidentiality is unchanged and is not a ranking signal: confidential and
+  secret material outside its own scope is never served, locally or otherwise.
+- Hosted delivery is unchanged. It still selects by an explicit scope list, and
+  only `hosted_ok` material ever leaves the machine; `retrieval_mode` is
+  `scoped` there.
+- A source handle expands locally on presentation, and only within its original
+  scope for hosted delivery. If the source changed, request a fresh packet.
+- `brain.get` resolves a local object by id from any project — you already hold
+  the id. Confidentiality, quarantine, and lifecycle gates still apply.
 
 ## Stable runtime tools
 

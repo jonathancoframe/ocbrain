@@ -261,7 +261,13 @@ def test_unscoped_ingest_is_quarantined_not_global(tmp_path: Path) -> None:
     assert body["scope"]["provenance"] == "quarantined"
 
 
-def test_specific_scope_preserves_client_confidentiality() -> None:
+def test_runtime_client_label_does_not_classify_a_write_confidential() -> None:
+    """``client`` is a runtime label a caller picks, not a tenant boundary.
+
+    Stamping ``confidential`` from its mere presence reclassified ordinary
+    task/session/repo writes as private because a caller had introduced itself
+    as ``client="codex"``. Confidentiality must come from an explicit scope.
+    """
     contexts = [
         (ScopeContext(client="acme", task="audit"), "task", "task:audit"),
         (ScopeContext(client="acme", session="s1"), "session", "session:s1"),
@@ -271,8 +277,21 @@ def test_specific_scope_preserves_client_confidentiality() -> None:
     for context, expected_type, expected_id in contexts:
         scope = resolve_write_scope(context)
         assert (scope.scope_type, scope.scope_id) == (expected_type, expected_id)
-        assert scope.visibility == "confidential"
-        assert scope.egress_policy == "local_only"
+        assert scope.visibility == "internal"
+        assert scope.egress_policy == "approval_required"
+        assert scope.confidential is False
+
+    # An explicitly confidential scope is still honoured verbatim.
+    explicit = resolve_write_scope(
+        ScopeContext(client="acme", task="audit"),
+        explicit={
+            "scope_type": "project",
+            "scope_id": "project:acme",
+            "visibility": "confidential",
+            "egress_policy": "local_only",
+        },
+    )
+    assert explicit.confidential is True
 
 
 def test_pending_compilation_is_invisible_until_decided(tmp_path: Path) -> None:
