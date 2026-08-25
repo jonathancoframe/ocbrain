@@ -1,11 +1,10 @@
 """Retire beliefs that have stopped being worth serving.
 
 The compiler only ever grows the corpus. Without a retirement pass, a brain
-accumulates facts that expired, were never once retrieved, or are consistently
-judged unhelpful when they are -- and precision decays until someone runs a
-one-off sweep by hand.
+accumulates facts that expired or restate a fact it already carries, and
+precision decays until someone runs a one-off sweep by hand.
 
-Four independent classes, each separately counted so a run says *why* it acted:
+Two independent classes, each separately counted so a run says *why* it acted:
 
 ``expired``
     Past its ``valid_until``, or explicitly marked ``superseded_by`` another
@@ -18,23 +17,18 @@ Four independent classes, each separately counted so a run says *why* it acted:
     belief instead of updating the first -- exact-body dedup never sees it, and
     every scheduled run adds a phrasing.
 
-``unused``
-    Never returned by any retrieval and older than a grace window. A fact nobody
-    has ever been served is costing precision for no benefit.
-
-``unhelpful``
-    Consistently judged badly when served. Gated behind a watermark so only
-    feedback recorded *after* a ranking change counts: verdicts collected while a
-    ranker was serving a belief for unrelated queries say more about the ranker
-    than the belief, and acting on them would retire good facts for the ranker's
-    mistakes.
+There were two more, ``unused`` and ``unhelpful``, and they are gone. Across 155
+consecutive scheduled runs neither ever selected a belief. ``unhelpful`` also
+refused to act at all until an operator set a feedback watermark, and no
+operator ever did -- so the whole watermark subsystem existed to make a class
+safe that never fired.
 
 Every retirement is a **soft** retraction, and :func:`restore` undoes one. That
 pairing is what makes an unattended sweep defensible: a wrongly retired fact is
 one command from serving again. A *hard* retraction would instead block the
-belief id permanently, and because auto-compiled ids are content-addressed it
-would block all future identical content -- turning a routine cleanup into a
-permanent content ban. Tombstoned and hard-corrected beliefs are not restorable;
+belief id permanently, and because compiled ids are content-addressed it would
+block all future identical content -- turning a routine cleanup into a permanent
+content ban. Tombstoned and hard-corrected beliefs are not restorable;
 those were deliberate, permanent decisions.
 
 Nothing here deletes anything. The event ledger is append-only by trigger; a
@@ -46,54 +40,26 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from ocbrain.core_v1 import (
     append_core_event,
     is_core_v1,
-    now_iso,
     project_core_v1,
 )
 from ocbrain.text import DEFAULT_RESTATEMENT_SIMILARITY, is_restatement
 
 HYGIENE_VERSION = "belief-hygiene-v2"
 WRITER = f"maintenance:{HYGIENE_VERSION}"
-FEEDBACK_WATERMARK_KEY = "hygiene_feedback_watermark"
 
 DEFAULT_BATCH_CAP = 200
-DEFAULT_MIN_AGE_DAYS = 30
-DEFAULT_MIN_FEEDBACK_OBSERVATIONS = 5
-# Mean of the per-outcome signal used by retrieval ranking. Below this a belief
-# is being actively judged bad, not merely ignored.
-DEFAULT_UNHELPFUL_THRESHOLD = -0.5
 # Token overlap above which two served beliefs are treated as one fact restated.
 # Conservative on purpose: this runs unattended, and under-retiring leaves a
 # little redundancy while over-retiring loses knowledge.
 DEFAULT_RESTATEMENT_THRESHOLD = DEFAULT_RESTATEMENT_SIMILARITY
 
-CLASSES = ("expired", "redundant", "unused", "unhelpful")
-
-
-def get_feedback_watermark(conn: sqlite3.Connection) -> str | None:
-    """Timestamp after which retrieval feedback counts toward retirement."""
-    row = conn.execute(
-        "SELECT value FROM schema_meta WHERE key=?", (FEEDBACK_WATERMARK_KEY,)
-    ).fetchone()
-    if row is None:
-        return None
-    value = str(row[0]).strip()
-    return value or None
-
-
-def set_feedback_watermark(conn: sqlite3.Connection, when: str | None = None) -> str:
-    """Mark now (or ``when``) as the point from which feedback is trustworthy."""
-    stamp = when or now_iso()
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
-        (FEEDBACK_WATERMARK_KEY, stamp),
-    )
-    return stamp
+CLASSES = ("expired", "redundant")
 
 
 def _expired_targets(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, str]]:
@@ -126,82 +92,6 @@ def _expired_targets(conn: sqlite3.Connection, *, now: datetime) -> list[dict[st
                     "belief_id": str(row["belief_id"]),
                     "reason": "expired",
                     "detail": f"past valid_until {valid_until}",
-                }
-            )
-    return targets
-
-
-def _unused_targets(
-    conn: sqlite3.Connection, *, now: datetime, min_age_days: int
-) -> list[dict[str, str]]:
-    cutoff = (now - timedelta(days=min_age_days)).isoformat(timespec="seconds")
-    rows = conn.execute(
-        """
-        SELECT cb.belief_id, cb.last_compiled_at
-        FROM current_beliefs cb
-        WHERE cb.status='current' AND cb.serve=1
-          AND cb.pinned=0
-          AND COALESCE(cb.belief_type,'') != 'wiki_fact'
-          AND cb.last_compiled_at < ?
-          AND NOT EXISTS (
-                SELECT 1 FROM retrieval_items ri WHERE ri.object_id = cb.belief_id
-          )
-        ORDER BY cb.belief_id
-        """,
-        (cutoff,),
-    ).fetchall()
-    return [
-        {
-            "belief_id": str(row["belief_id"]),
-            "reason": "unused",
-            "detail": f"never retrieved, compiled {row['last_compiled_at']}",
-        }
-        for row in rows
-    ]
-
-
-def _unhelpful_targets(
-    conn: sqlite3.Connection,
-    *,
-    watermark: str,
-    min_observations: int,
-    threshold: float,
-) -> list[dict[str, str]]:
-    rows = conn.execute(
-        """
-        SELECT cb.belief_id,
-               SUM(CASE ru.outcome
-                     WHEN 'helpful' THEN 2.0 WHEN 'used' THEN 1.0
-                     WHEN 'irrelevant' THEN -1.5 WHEN 'ignored' THEN -0.5
-                     WHEN 'harmful' THEN -4.0 ELSE 0.0 END) AS signal,
-               SUM(CASE WHEN ru.outcome IN
-                     ('helpful','used','irrelevant','ignored','harmful')
-                     THEN 1 ELSE 0 END) AS n
-        FROM current_beliefs cb
-        JOIN retrieval_items ri ON ri.object_id = cb.belief_id
-        JOIN retrieval_uses ru ON ru.id = ri.retrieval_use_id
-        WHERE cb.status='current' AND cb.serve=1
-          AND cb.pinned=0
-          AND COALESCE(cb.belief_type,'') != 'wiki_fact'
-          AND ru.served_at >= ?
-        GROUP BY cb.belief_id
-        HAVING n >= ?
-        ORDER BY cb.belief_id
-        """,
-        (watermark, min_observations),
-    ).fetchall()
-    targets: list[dict[str, str]] = []
-    for row in rows:
-        count = int(row["n"] or 0)
-        if not count:
-            continue
-        average = float(row["signal"] or 0.0) / count
-        if average <= threshold:
-            targets.append(
-                {
-                    "belief_id": str(row["belief_id"]),
-                    "reason": "unhelpful",
-                    "detail": f"mean feedback {average:.2f} over {count} judged retrievals",
                 }
             )
     return targets
@@ -268,9 +158,6 @@ def plan_retirements(
     *,
     classes: tuple[str, ...] = CLASSES,
     now: datetime | None = None,
-    min_age_days: int = DEFAULT_MIN_AGE_DAYS,
-    min_feedback_observations: int = DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
-    unhelpful_threshold: float = DEFAULT_UNHELPFUL_THRESHOLD,
     restatement_threshold: float = DEFAULT_RESTATEMENT_THRESHOLD,
     batch_cap: int = DEFAULT_BATCH_CAP,
 ) -> dict[str, Any]:
@@ -283,30 +170,10 @@ def plan_retirements(
     resolved_now = now or datetime.now(UTC)
 
     candidates: list[dict[str, str]] = []
-    skipped: dict[str, str] = {}
     if "expired" in classes:
         candidates += _expired_targets(conn, now=resolved_now)
     if "redundant" in classes:
         candidates += _redundant_targets(conn, threshold=restatement_threshold)
-    if "unused" in classes:
-        candidates += _unused_targets(conn, now=resolved_now, min_age_days=min_age_days)
-    if "unhelpful" in classes:
-        watermark = get_feedback_watermark(conn)
-        if watermark is None:
-            # Refusing is the point: with no watermark every historical verdict
-            # would count, including any collected while retrieval was serving
-            # beliefs for unrelated queries.
-            skipped["unhelpful"] = (
-                "no feedback watermark set; run `ocbrain hygiene set-watermark` "
-                "after a ranking change so only feedback gathered since then counts"
-            )
-        else:
-            candidates += _unhelpful_targets(
-                conn,
-                watermark=watermark,
-                min_observations=min_feedback_observations,
-                threshold=unhelpful_threshold,
-            )
 
     # One belief can qualify twice; keep the first (most explicit) reason.
     deduped: dict[str, dict[str, str]] = {}
@@ -322,7 +189,6 @@ def plan_retirements(
         "hygiene_version": HYGIENE_VERSION,
         "classes": sorted(classes),
         "at": resolved_now.isoformat(timespec="seconds"),
-        "min_age_days": min_age_days,
         "restatement_threshold": restatement_threshold,
         "batch_cap": batch_cap,
         "eligible_total": len(ordered),
@@ -332,7 +198,6 @@ def plan_retirements(
         "deferred_by_cap": max(0, len(ordered) - len(capped)),
         "targets_by_reason": by_reason,
         "targets": capped,
-        "skipped_classes": skipped,
     }
 
 
@@ -500,16 +365,10 @@ def supersede(
 __all__ = [
     "CLASSES",
     "DEFAULT_BATCH_CAP",
-    "DEFAULT_MIN_AGE_DAYS",
-    "DEFAULT_MIN_FEEDBACK_OBSERVATIONS",
-    "DEFAULT_UNHELPFUL_THRESHOLD",
-    "FEEDBACK_WATERMARK_KEY",
     "HYGIENE_VERSION",
     "apply_retirements",
-    "get_feedback_watermark",
     "plan_retirements",
     "restore",
-    "set_feedback_watermark",
     "supersede",
     "verify_serving_invariants",
 ]

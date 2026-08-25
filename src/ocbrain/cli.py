@@ -69,14 +69,10 @@ from ocbrain.hybrid import build_vector_index, vector_status
 from ocbrain.hygiene import CLASSES as HYGIENE_CLASSES
 from ocbrain.hygiene import (
     DEFAULT_BATCH_CAP,
-    DEFAULT_MIN_AGE_DAYS,
-    DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
     DEFAULT_RESTATEMENT_THRESHOLD,
-    DEFAULT_UNHELPFUL_THRESHOLD,
     apply_retirements,
     plan_retirements,
     restore,
-    set_feedback_watermark,
     supersede,
     verify_serving_invariants,
 )
@@ -189,16 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="soft-retract the selected beliefs (default: report only)",
     )
-    hygiene_parser.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS)
     hygiene_parser.add_argument("--batch-cap", type=int, default=DEFAULT_BATCH_CAP)
-    hygiene_parser.add_argument(
-        "--min-feedback-observations",
-        type=int,
-        default=DEFAULT_MIN_FEEDBACK_OBSERVATIONS,
-    )
-    hygiene_parser.add_argument(
-        "--unhelpful-threshold", type=float, default=DEFAULT_UNHELPFUL_THRESHOLD
-    )
     hygiene_parser.add_argument(
         "--restatement-threshold",
         type=float,
@@ -206,14 +193,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "token overlap above which two served beliefs count as one fact "
             "restated; lower retires more aggressively"
-        ),
-    )
-    hygiene_parser.add_argument(
-        "--set-watermark",
-        action="store_true",
-        help=(
-            "stamp now as the point from which retrieval feedback counts, then exit; "
-            "run this after a ranking change so stale verdicts do not retire good facts"
         ),
     )
     hygiene_parser.add_argument(
@@ -775,11 +754,6 @@ def cmd_curated_apply(args: argparse.Namespace) -> int:
 def cmd_hygiene(args: argparse.Namespace) -> int:
     conn = open_existing_core_v1(args.db)
     try:
-        if args.set_watermark:
-            stamp = set_feedback_watermark(conn)
-            conn.commit()
-            output(args, {"action": "hygiene", "feedback_watermark": stamp})
-            return 0
         if args.supersede:
             belief_id, successor_id = args.supersede
             result = supersede(conn, belief_id=belief_id, successor_id=successor_id)
@@ -794,10 +768,7 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
         plan = plan_retirements(
             conn,
             classes=tuple(args.classes) if args.classes else HYGIENE_CLASSES,
-            min_age_days=args.min_age_days,
             batch_cap=args.batch_cap,
-            min_feedback_observations=args.min_feedback_observations,
-            unhelpful_threshold=args.unhelpful_threshold,
             restatement_threshold=args.restatement_threshold,
         )
         if args.apply:

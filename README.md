@@ -186,46 +186,35 @@ and conflicting pages that share a key:
 ### Retiring knowledge
 
 Compilation only grows the corpus. `ocbrain hygiene` retires beliefs that
-expired (`valid_until` / `superseded_by`), were never once retrieved, or are
-consistently judged unhelpful. It reports by default and retires only with
-`--apply`; every retirement is a soft retraction, undoable with `--restore`.
-
-The `unhelpful` class refuses to act until you set a watermark, and then counts
-only feedback recorded after it — verdicts gathered while a ranker was serving a
-belief for unrelated queries describe the ranker, not the belief. Set the
-watermark after any ranking change.
+expired (`valid_until` / `superseded_by`) and beliefs that restate a fact a
+newer one already carries in the same scope. It reports by default and retires
+only with `--apply`; every retirement is a soft retraction, undoable with
+`--restore`.
 
 ```bash
 ocbrain --db /absolute/core.sqlite hygiene                      # report
 ocbrain --db /absolute/core.sqlite hygiene --class expired --apply
-ocbrain --db /absolute/core.sqlite hygiene --set-watermark      # after a ranker change
 ocbrain --db /absolute/core.sqlite hygiene --restore belief_... # undo
 ```
 
-Note `packages/ops` maintenance (`prune_knowledge`,
-`archive_unreferenced_catalog`) targets the **legacy** `knowledge` table and
-raises `no such table: knowledge` against a v1 core. Use `ocbrain hygiene`.
+Two further classes, `unused` and `unhelpful`, were removed in v2: neither ever
+selected a belief across 155 scheduled runs, and `unhelpful` needed a feedback
+watermark no operator ever set.
 
-### Repairing knowledge
+### Keeping knowledge well-written
 
-Hygiene retires beliefs that stopped earning their place. `ocbrain deslop`
-handles the other failure: a belief that is well-formed, sourced, schema-valid,
-and still fails to function as knowledge — several facts fused into one body, a
-durable claim written in the present tense, a present-state claim that can never
-age out. It **repairs rather than deletes**, and a repair may only subtract or
-reorganize the original's own words, never add to them.
+Hygiene retires beliefs that stopped earning their place. A separate set of
+mechanical rules catches the other failure: a belief that is well-formed,
+sourced, schema-valid, and still fails to function as knowledge — several facts
+fused into one body, a durable claim written in the present tense, a
+present-state claim that can never age out.
 
-```bash
-ocbrain --db /absolute/core.sqlite deslop --mechanical-only   # free, deterministic
-ocbrain --db /absolute/core.sqlite deslop                     # adds the judged rule
-ocbrain --db /absolute/core.sqlite deslop --apply             # repair
-ocbrain --db /absolute/core.sqlite deslop --volume            # re-windowed evidence
-ocbrain --db /absolute/core.sqlite deslop --install-doctrine  # teach the standard
-```
-
-The same rules run at write time, so the curator rejects a slop claim before it
-becomes a belief and a closeout receipt reports findings back to whoever wrote
-it. See [docs/DESLOP.md](docs/DESLOP.md).
+Those rules are a **write-time gate**, not a cleanup pass. The curator rejects a
+slop claim before it becomes a belief, a closeout receipt reports findings back
+to whoever wrote it, and `scripts/wiki-lint.py` checks the materialized tree. A
+post-hoc sweep also existed and found nothing in 155 consecutive runs, because
+the gate had already done the work; it is gone. See
+[docs/DESLOP.md](docs/DESLOP.md).
 
 ### Running it continuously
 
