@@ -538,8 +538,11 @@ def init_core_v1(conn: sqlite3.Connection) -> None:
     """Initialize a fresh v1 core; refuse to layer it over legacy tables."""
     if is_core_v1(conn):
         assert_core_v1_inventory(conn)
-        conn.executescript(CORE_V1_SCHEMA)
+        # Migrate columns before replaying the current schema. The schema also
+        # declares indexes on additive columns; on an older core those indexes
+        # cannot be prepared until the columns exist.
         migrate_core_v1_columns(conn)
+        conn.executescript(CORE_V1_SCHEMA)
         return
     existing = [
         str(row[0])

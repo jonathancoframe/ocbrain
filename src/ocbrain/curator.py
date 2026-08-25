@@ -1244,6 +1244,12 @@ def apply_claims(
                 "the curator model adjudicated this claim and the stored belief as a "
                 "conflict the claim resolves"
             )
+        elif coexist_ids:
+            # An explicit coexist verdict outranks the mechanical cosine guess.
+            # Leaving that guess as the target would retire the very belief the
+            # model selected to keep, then make the annotation a no-op because
+            # the target no longer serves.
+            target = None
 
         claim_belief_id: str | None = None
         if target is not None:

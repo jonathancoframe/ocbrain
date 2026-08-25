@@ -348,6 +348,42 @@ def test_coexist_writes_contradicts_on_both(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_declared_coexist_overrides_mechanical_supersede(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The model's explicit coexist verdict outranks the cosine heuristic."""
+    conn = _core(tmp_path)
+    standing = apply_claims(
+        conn,
+        [_claim("holdout-share", "The project holdout share is five percent.")],
+        model="test",
+        project=PROJECT,
+    )["applied"][0]
+    _stub_neighbors(monkeypatch, [{"belief_id": standing, "similarity": 0.91}])
+
+    result = apply_claims(
+        conn,
+        [
+            _claim(
+                "experiment-holdout-share",
+                "The experiment-level holdout share is ten percent.",
+                conflicts_with=[{"belief_id": standing, "resolution": "coexist"}],
+            )
+        ],
+        model="test",
+        project=PROJECT,
+    )
+
+    assert result["superseded"] == []
+    assert len(result["applied"]) == 1
+    minted = result["applied"][0]
+    assert set(_serving(conn)) == {standing, minted}
+    assert result["coexist_marked"] == [
+        {"belief_id": minted, "other_belief_id": standing}
+    ]
+    conn.close()
+
+
 def test_low_confidence_claim_defers_instead_of_killing_high_confidence_belief(
     tmp_path: Path,
 ) -> None:

@@ -184,7 +184,7 @@ def test_historical_rows_are_not_backfilled(tmp_path):
     assert historical["task_ref_norm"] is None
 
 
-def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
+def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path, monkeypatch):
     """The additive migration adds the columns; it never rewrites a row."""
     path = tmp_path / "old-core.sqlite"
     conn = connect(path)
@@ -192,16 +192,35 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
     # schema and relying on ALTER TABLE DROP COLUMN to reverse it. Python 3.11's
     # bundled SQLite cannot reliably drop a column from a table with triggers,
     # which made this migration test fail in CI before it reached the code under
-    # test. A minimal v1 inventory is sufficient: migrate_core_v1_columns only
-    # inspects existing tables and adds nullable columns/indexes.
+    # test. This focused fixture intentionally includes only the tables touched
+    # by the migration; bypass the unrelated whole-inventory assertion so
+    # init_core_v1 still exercises its real migrate-before-schema ordering.
     conn.executescript(
         """
         CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT INTO schema_meta(key, value) VALUES ('core_schema', 'ocbrain.core.v1');
         CREATE TABLE retrieval_uses (
           id TEXT PRIMARY KEY,
+          knowledge_id TEXT,
+          served_to_runtime TEXT,
+          task_ref TEXT,
+          affected_decision INTEGER,
+          corrected INTEGER,
+          outcome TEXT NOT NULL DEFAULT 'unknown',
+          note TEXT,
+          query_text TEXT,
+          served_ids_json TEXT,
+          context_json TEXT,
+          packet_schema TEXT,
+          session_id TEXT,
+          feedback_source TEXT,
+          feedback_at TEXT,
           served_at TEXT NOT NULL,
-          client_session_hint TEXT
+          source_event_id TEXT,
+          server_connection_id TEXT,
+          client_session_hint TEXT,
+          client_runtime_key TEXT,
+          provenance_json TEXT
         );
         CREATE TABLE task_closeouts (
           id TEXT PRIMARY KEY,
@@ -252,12 +271,16 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
         ("close_before00000001",),
     ).fetchone()
 
-    added = migrate_core_v1_columns(conn)
+    monkeypatch.setattr("ocbrain.core_v1.assert_core_v1_inventory", lambda _conn: None)
+    init_core_v1(conn)
     conn.commit()
 
-    assert "task_closeouts.parent_closeout_id" in added
-    assert "task_closeouts.task_ref_norm" in added
-    assert "retrieval_uses.task_ref_norm" in added
+    assert {
+        row[1] for row in conn.execute("PRAGMA table_info(task_closeouts)")
+    } >= {"parent_closeout_id", "task_ref_norm"}
+    assert "task_ref_norm" in {
+        row[1] for row in conn.execute("PRAGMA table_info(retrieval_uses)")
+    }
     assert migrate_core_v1_columns(conn) == []
     indexes = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
