@@ -1256,3 +1256,65 @@ def test_same_key_same_body_elsewhere_is_unchanged(tmp_path: Path) -> None:
     assert second["applied"] == []
     assert second["unchanged"] == [first["applied"][0]]
     conn.close()
+
+
+def test_a_restatement_never_renames_a_key_another_belief_holds(tmp_path: Path) -> None:
+    """Key identity outranks body similarity when choosing the update target.
+
+    Writing a claim's attributes onto a restatement target renames that
+    target's key. If the claim's key is already served by a different belief,
+    that rename produces two serving beliefs sharing one key — which is how
+    `hermes-auxiliary-routing-fix` collided on the live corpus, a belief minted
+    under one key being rekeyed onto another belief's key an hour later.
+    """
+    from ocbrain.curator import apply_claims
+
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+
+    def claim(key: str, body: str) -> dict:
+        return {
+            "key": key,
+            "title": "Routing defect",
+            "body": body,
+            "category": "system",
+            "lifecycle": "durable",
+            "confidence": 0.85,
+            "evidence_ids": ["evd_shared"],
+        }
+
+    # An older belief under its own key, phrased close to what comes next.
+    older = apply_claims(
+        conn,
+        [claim("aux-api-mode-defect", "Auxiliary routing sends calls without an explicit api_mode.")],
+        model="test",
+        project="coframe",
+    )["applied"][0]
+    # A belief that owns the key the next claim will use.
+    owner = apply_claims(
+        conn,
+        [claim("aux-routing-fix", "Routing was repaired by pinning the auxiliary api_mode.")],
+        model="test",
+        project="coframe",
+    )["applied"][0]
+    assert older != owner
+
+    # Same key as the owner, worded as a restatement of the OLDER belief.
+    apply_claims(
+        conn,
+        [
+            claim(
+                "aux-routing-fix",
+                "Auxiliary routing sends calls without an explicit api_mode set.",
+            )
+        ],
+        model="test",
+        project="coframe",
+    )
+
+    keys = conn.execute(
+        "SELECT json_extract(attributes_json,'$.key') k, COUNT(*) n FROM current_beliefs "
+        "WHERE serve=1 GROUP BY 1 HAVING n > 1"
+    ).fetchall()
+    assert keys == [], f"a key is served by more than one belief: {[tuple(r) for r in keys]}"
+    conn.close()
