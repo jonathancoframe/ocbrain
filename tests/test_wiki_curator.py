@@ -1286,7 +1286,12 @@ def test_a_restatement_never_renames_a_key_another_belief_holds(tmp_path: Path) 
     # An older belief under its own key, phrased close to what comes next.
     older = apply_claims(
         conn,
-        [claim("aux-api-mode-defect", "Auxiliary routing sends calls without an explicit api_mode.")],
+        [
+            claim(
+                "aux-api-mode-defect",
+                "Auxiliary routing sends calls without an explicit api_mode.",
+            )
+        ],
         model="test",
         project="coframe",
     )["applied"][0]
