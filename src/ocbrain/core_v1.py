@@ -919,6 +919,16 @@ def _project_compilation_decision(
     belief_body = str(body.get("edited_body") or proposed.get("body") or "")
     scope = _scope_dict(proposed.get("scope"))
     evidence_ids = [str(item) for item in proposed.get("evidence_ids") or []]
+    # A pin is a standing operator decision about a belief, not a property of
+    # one revision of its text. Hardcoding ``pinned=False`` here meant every
+    # recompilation silently unpinned whatever an operator had pinned, and a
+    # scheduled curator recompiles constantly -- which is why one real corpus
+    # held exactly one pinned belief. Carry the stored value forward instead.
+    # Deterministic under replay: the ``pin`` correction that set it is an
+    # earlier event, so a full rebuild reaches this row with the same value.
+    existing = conn.execute(
+        "SELECT pinned FROM current_beliefs WHERE belief_id=?", (belief_id,)
+    ).fetchone()
     _write_belief(
         conn,
         belief_id=belief_id,
@@ -930,7 +940,7 @@ def _project_compilation_decision(
         evidence_ids=evidence_ids,
         status="current",
         serve=True,
-        pinned=False,
+        pinned=bool(existing["pinned"]) if existing is not None else False,
         approved_event_id=event["id"],
         last_event_id=event["id"],
         compiled_at=event["ts"],
@@ -980,6 +990,42 @@ def _project_correction(conn: sqlite3.Connection, event: sqlite3.Row, body: dict
     elif op in {"mark_wrong", "retract"}:
         updated["status"] = "retracted"
         updated["serve"] = 0
+    elif op == "supersede":
+        # Replacement, not destruction. Every correction an agent has ever
+        # issued had to spell this as "retract the wrong belief, then type the
+        # right one into a body field nothing indexes and nothing serves". Here
+        # the retirement and the forward pointer land in one event: the old
+        # belief stops serving, its era closes at this event's timestamp, and
+        # ``superseded_by`` names the successor so a reader holding the old id
+        # is walked forward instead of refused.
+        #
+        # Removal from the FTS index is free -- ``_write_belief`` deletes the
+        # search row in the same statement that writes a non-serving belief.
+        successor_id = str(body.get("successor_id") or "").strip()
+        if not successor_id:
+            return
+        attributes = json.loads(updated.get("attributes_json") or "{}")
+        attributes["superseded_by"] = successor_id
+        attributes["valid_until"] = str(event["ts"])
+        updated["attributes_json"] = canonical_json(attributes)
+        updated["status"] = "retracted"
+        updated["serve"] = 0
+    elif op == "annotate":
+        # Metadata only: never status, serve, body, or confidence. This is the
+        # writer ``attributes.contradicts`` never had, and the way a mined
+        # statistic gets republished -- recompute and replace, never increment,
+        # so a replay that folds the same event twice cannot drift. A key whose
+        # patch value is ``null`` is deleted rather than stored as null.
+        patch = body.get("attributes_patch")
+        if not isinstance(patch, dict):
+            return
+        attributes = json.loads(updated.get("attributes_json") or "{}")
+        for key, value in patch.items():
+            if value is None:
+                attributes.pop(str(key), None)
+            else:
+                attributes[str(key)] = value
+        updated["attributes_json"] = canonical_json(attributes)
     elif op == "restore":
         # The inverse of a soft retraction, and the reason a soft retraction is
         # worth distinguishing from a hard one at all. Refused for anything
@@ -1012,6 +1058,24 @@ def _restore_blocked(conn: sqlite3.Connection, belief_id: str) -> str | None:
     ).fetchone()
     if hard is not None:
         return "hard-corrected"
+    # A restore that puts a superseded belief back beside its replacement would
+    # serve both halves of a contradiction the ledger has already resolved.
+    # Only a *serving* successor blocks: once the replacement is itself retired,
+    # restoring the original is a legitimate way back.
+    successor = conn.execute(
+        "SELECT json_extract(attributes_json, '$.superseded_by') AS successor_id "
+        "FROM current_beliefs WHERE belief_id=?",
+        (belief_id,),
+    ).fetchone()
+    successor_id = str((successor["successor_id"] if successor else None) or "").strip()
+    if successor_id:
+        serving = conn.execute(
+            "SELECT 1 FROM current_beliefs "
+            "WHERE belief_id=? AND status='current' AND serve=1 LIMIT 1",
+            (resolve_object_id(conn, successor_id),),
+        ).fetchone()
+        if serving is not None:
+            return f"superseded by {successor_id}"
     return None
 
 

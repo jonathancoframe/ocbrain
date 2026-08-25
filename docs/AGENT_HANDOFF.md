@@ -82,7 +82,7 @@ For non-trivial work, clients use this sequence:
 reads. They do not replace the context/source/feedback/closeout acceptance
 sequence.
 
-The default runtime profile exposes eight bounded tools. Administrative
+The default runtime profile exposes nine bounded tools. Administrative
 correction, proposal, preview, and tombstone operations require the admin
 profile. The historical `--allow-writes` flag is a deprecated alias for that
 profile, not a no-op.

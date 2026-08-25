@@ -412,6 +412,7 @@ def test_v1_runtime_and_admin_profiles_are_distinct(tmp_path):
         "brain.feedback",
         "brain.ingest",
         "brain.closeout",
+        "brain.supersede",
     }
 
     admin = handle_request(
@@ -531,6 +532,7 @@ def test_v1_stdio_loop_survives_malformed_frames_and_keeps_runtime_surface(tmp_p
         "brain.feedback",
         "brain.ingest",
         "brain.closeout",
+        "brain.supersede",
     }
 
 
@@ -595,6 +597,9 @@ def test_v1_initialize_teaches_the_shared_context_closeout_contract(tmp_path):
     assert "brain.closeout" in instructions
     assert "hosted judgment" in instructions
     assert "exhausted loop families" not in instructions
+    # The primitive is only useful if agents know it exists. The server
+    # instructions are the one surface every client is guaranteed to read.
+    assert "brain.supersede" in instructions
 
 
 def test_v1_get_enforces_scope_and_context_does_not_ignore_at_ts(tmp_path):

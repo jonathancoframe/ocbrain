@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+- Add `brain.supersede`: correct a belief by replacing it, not by deleting it.
+  The ledger held 719 correction events and 718 of them were retracts, because
+  retracting was the only correction the store could express. All 11 corrections
+  an agent had ever issued took the same shape — soft-retract the wrong belief,
+  then type the replacement fact into the correction's `body`, a column nothing
+  indexes and nothing serves. So correcting the brain *subtracted* from it: the
+  next agent asked the same question and got the same wrong answer, or nothing.
+  One runtime call now retires the old belief, closes its era with `valid_until`,
+  compiles the replacement in the **same scope**, and leaves the old id pointing
+  forward, in one transaction with one commit. Nothing is deleted — the retired
+  belief keeps its body, evidence, feedback, and retrieval history; only its
+  service stops.
+- Bound that authority in the primitive rather than behind a profile gate. The
+  replacement's scope is copied from the superseded belief byte-for-byte, so a
+  supersession can never widen reach; confidence is capped at
+  `min(old, 0.7)`, so a claim does not gain authority by arriving later (the
+  deliberate rejection of recency-always-wins); a replacement that restates the
+  original after whitespace and case folding is refused; and each caller has a
+  bounded number of direct supersessions per 24 hours, matched on the
+  harness-attested session hint. Doctrine (`global:*`), pinned targets, and
+  rate-cap overflow are **routed, never refused**: they become an undecided
+  `compilation_proposed` carrying `attributes.supersedes`, which is the pending
+  ledger — no new table, no new status. `brain.proposal_decide` completes the
+  pair atomically, recording the deciding admin as author and preserving the
+  requesting agent as `requested_by`; a rejection changes nothing and leaves the
+  agent's rationale in the corpus as curatable evidence. `brain.digest` reports
+  the queue depth as `pending_corrections`. `OCBRAIN_SUPERSEDE_TIER=pending_all`
+  routes every supersession to review; `OCBRAIN_SUPERSEDE_DIRECT_CAP` (default 8)
+  sets the cap. Both code paths exist under either setting — the flag only picks
+  the routing predicate.
+- Add two correction ops the projector understands. `supersede` sets
+  `attributes.superseded_by`, stamps `valid_until` from the **event's own
+  timestamp** (not the wall clock, so a replay reproduces it), and retires the
+  belief; removal from the FTS index is free, since `_write_belief` already
+  deletes the search row in the same statement that writes a non-serving belief.
+  `annotate` merges an `attributes_patch` and touches nothing else — no status,
+  serve, body, or confidence — with a `null` value deleting its key, so a mined
+  statistic is republished by recompute-and-replace rather than incremented in
+  place. `annotate` is the writer `attributes.contradicts` never had.
+  **Caveat:** an *older* binary doing a full reprojection treats `op="supersede"`
+  as an unknown no-op and would resurrect every superseded belief. Roll the code
+  back and the corpus is fine until something calls `project_core_v1(full=True)`;
+  do not run an old binary's full rebuild against a core that has superseded
+  beliefs in it.
+- Record who issued a correction. `correct_v1` now carries the connection's
+  `Provenance` and writes it into the event body along with the harness-attested
+  session id, which every one of the 719 existing correction events lacks
+  (`session_id` NULL on all of them, `author` defaulting to the literal string
+  "human"). The most consequential events in the ledger were the least
+  attributable.
+- Stop unpinning beliefs on every recompilation. `_project_compilation_decision`
+  hardcoded `pinned=False`, so an approved proposal silently dropped whatever an
+  operator had pinned — and a scheduled curator recompiles constantly. That is
+  why one real corpus held exactly one pinned belief. The stored value is now
+  carried forward, which is deterministic under replay because the `pin`
+  correction that set it is an earlier event.
+- Refuse to restore a belief whose successor is currently serving. A restore
+  that put a superseded fact back beside its replacement would serve both halves
+  of a conflict the ledger has already resolved. Once the successor is itself
+  retired, the original is restorable again — the block is about serving a
+  contradiction, not about permanence. Joins `tombstoned` and `hard-corrected`
+  as the third `_restore_blocked` reason.
+- `ocbrain hygiene --supersede` retires the old belief immediately instead of
+  stamping an attribute and waiting for the next `expired` sweep. Between the
+  two, the corpus served the fact an operator had just declared wrong alongside
+  its replacement — up to a day on the scheduled cadence. The CLI interface is
+  unchanged, and the `expired` class still retires anything carrying
+  `superseded_by` from before this release.
+- `brain.get` gains `mode`. `resolve` (the default) follows `superseded_by`
+  forward to whatever serves now, reporting `resolved_from` and
+  `resolution_hops`, so an agent holding an id from an old transcript gets the
+  current fact instead of a refusal; the walk is cycle-guarded and bounded at 10
+  hops. `as_stored` returns the retired belief itself, labelled `invalidated`
+  with its `valid_from`/`valid_until` era, which is how drift is measured. A
+  retracted belief with **no** successor stays refused in both modes: filtering
+  invalidated facts by default is the point, not an oversight.
+- Flag conflicting beliefs at serve time. `contradictions` has always been in the
+  context packet and has always been empty, because `attributes.contradicts` had
+  no writer. A packet-local advisory pass now flags two same-`attributes.key`
+  beliefs as `duplicate_key` (the key is a wiki fact's identity, so two of them
+  in one packet is two answers to one question) and near-identical pairs as
+  `embedding_similarity` at cosine >= 0.90 from the local vector sidecar. Bounded
+  by the packet and not the corpus — at most 12 items is at most 66 comparisons —
+  it makes no network call, and it stands down silently when the sidecar is
+  missing, stale, or unreadable.
+- Add the `supersede` config section (`tier`, `direct_cap`), bringing the
+  surface to five sections.
+
 - Store transcript evidence by reference instead of by value. Measured on a
   177 MB core: `*_history_file` bodies were 53.3 MB (99.13% of all evidence body
   bytes), their `evidence_recorded` events 73.9 MB (82.4% of the ledger), and

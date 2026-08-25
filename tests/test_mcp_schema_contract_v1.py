@@ -32,6 +32,7 @@ SEMANTIC_REQUIRED = {
     "brain.feedback": {"retrieval_use_id", "outcome"},
     "brain.ingest": {"body"},
     "brain.closeout": {"status", "summary"},
+    "brain.supersede": {"target", "body", "reason"},
     "brain.preview": {"query"},
     "brain.egress_preview": set(),
     "brain.correct": {"target", "layer", "op"},

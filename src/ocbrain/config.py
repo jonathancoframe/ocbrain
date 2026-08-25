@@ -1,10 +1,11 @@
 """ocbrain configuration surface.
 
-Four sections, one per thing that actually reads configuration: ``retrieval``
+Five sections, one per thing that actually reads configuration: ``retrieval``
 (the ``search_core_v1`` ranking gates), ``scopes`` (scope folding and the alias
-table), ``curator`` (``scripts/wiki-curator.py``), and ``deslop`` (the
-write-time closeout gate). There were seventeen; the other thirteen configured
-subsystems that were deleted or were never read at all.
+table), ``curator`` (``scripts/wiki-curator.py``), ``deslop`` (the write-time
+closeout gate), and ``supersede`` (how much authority a runtime supersession
+carries). There were seventeen; thirteen configured subsystems that were
+deleted or were never read at all.
 
 The public entry point is :func:`load_config`, which layers, in order:
 
@@ -160,11 +161,37 @@ class DeslopConfig:
 
 
 @dataclass(frozen=True)
+class SupersedeConfig:
+    """How much authority one runtime ``brain.supersede`` call carries.
+
+    ``tier`` picks the routing predicate, never which code paths exist -- both
+    the direct and the pending path are always compiled and always reachable.
+
+    ``project``
+        The default. A project/repo/client/task-scoped, unpinned target under
+        the rate cap is replaced immediately; a pinned target, anything in a
+        ``global:*`` scope, and every call over the cap becomes an undecided
+        proposal for an admin instead.
+    ``pending_all``
+        Every supersession becomes a proposal. For an operator who wants a
+        human between an agent and the serving corpus at all times.
+
+    ``direct_cap`` bounds how many direct supersessions one caller may land in
+    a trailing 24 hours. Overflow is *routed*, never refused: an agent that
+    hits the cap still gets its correction recorded, as a proposal.
+    """
+
+    tier: str = "project"
+    direct_cap: int = 8
+
+
+@dataclass(frozen=True)
 class OcbrainConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     scopes: ScopesConfig = field(default_factory=ScopesConfig)
     curator: CuratorConfig = field(default_factory=CuratorConfig)
     deslop: DeslopConfig = field(default_factory=DeslopConfig)
+    supersede: SupersedeConfig = field(default_factory=SupersedeConfig)
 
 
 def _coerce(current: Any, incoming: Any) -> Any:

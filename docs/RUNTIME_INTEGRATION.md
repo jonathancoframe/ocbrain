@@ -58,12 +58,16 @@ openclaw mcp doctor ocbrain
 openclaw mcp probe ocbrain
 ```
 
-The runtime profile should expose exactly eight tools:
+The runtime profile should expose exactly nine tools:
 
 ```text
 brain.context   brain.source   brain.search   brain.digest
 brain.get       brain.feedback brain.ingest   brain.closeout
+brain.supersede
 ```
+
+`brain.supersede` is only published on a v1 core; a legacy core has no event to
+project it onto, so it is filtered out of that core's tool list.
 
 OpenClaw normalizes dotted MCP names to provider-safe names such as
 `ocbrain__brain-context`; that is transport naming, not a different API.
@@ -155,7 +159,7 @@ scripts/ocbrain-mcp --profile admin
 
 The deprecated `--allow-writes` flag selects that same profile. Admin adds six
 tools — correction, proposal decision, proposal listing, tombstone, local
-preview, and egress preview — for fourteen in total. It adds no hosted
+preview, and egress preview — for fifteen in total. It adds no hosted
 judgment, embedding, teacher, training, scheduler, or watchdog tool, and
 `brain.mark_stale` no longer exists in either profile.
 
