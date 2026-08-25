@@ -44,8 +44,8 @@ A 15-minute interval suits a machine in daily use.
 ## brain-promote.sh — promote and retire
 
 A daily snapshot, then five ordered stages: curate → hygiene → rematerialize
-wiki → lint → rebuild vectors. Each continues on failure so one bad stage cannot
-strand the rest. The snapshot runs once per UTC day rather than hourly, through
+wiki → lint → rebuild vectors, plus an opt-in sixth. Each continues on failure so
+one bad stage cannot strand the rest. The snapshot runs once per UTC day rather than hourly, through
 the SQLite online-backup API so it is safe against the live WAL, and a failed
 snapshot aborts the cycle before anything can retire or rewrite a belief.
 
@@ -206,10 +206,51 @@ ocbrain --db "$OCBRAIN_DB" vector-status | python3 -m json.tool | grep -E 'healt
 If `compilation_decided` has no recent timestamp while `evidence_recorded` does,
 the brain is in the write-only state described at the top of this document.
 
+## The procmine stage — off unless you turn it on twice
+
+A sixth stage runs after the vector rebuild and does nothing at all unless
+`OCBRAIN_PROCMINE=1`. It extracts every runtime's tool-call history, refreshes
+the procedure atlas and the episodes artifact, and mints mined gotchas as
+beliefs.
+
+Two switches, because the two risks differ:
+
+| Variable | Default | What it unlocks |
+|---|---|---|
+| `OCBRAIN_PROCMINE` | `0` | The stage runs at all: extract, atlas, and a report-only mint |
+| `OCBRAIN_PROCMINE_APPLY` | `0` | The mint may write beliefs |
+| `OCBRAIN_PROCMINE_DIR` | `~/.ocbrain/procmine` | Where state, segments, and artifacts live |
+| `OCBRAIN_PROCMINE_BUDGET_SECONDS` | `1800` | Wall-clock cap on extract and atlas |
+
+Extraction reads every agent transcript on the machine, which is a wider read
+than anything else in this script; minting adds rows to the serving corpus. An
+operator may reasonably want the atlas refreshed without the second, so the
+default with `OCBRAIN_PROCMINE=1` alone is a mint that prints what it *would*
+write and writes nothing.
+
+Nothing here leaves the machine. There is no model call in the mining path: the
+gotcha wording is generated from the counts, so it cannot drift from the
+evidence, and the mint is deterministic.
+
+The stage is affordable on an hourly loop because extraction is incremental. Each
+source file is fingerprinted by `(mtime_ns, size)` and unchanged files replay
+from cached JSONL segments under `$OCBRAIN_PROCMINE_DIR/cache`. On this corpus a
+cold walk is about 80 seconds and a quiet cycle is about one. A change to the
+normalizer bumps `procmine.normalize.NORMALIZER_VERSION` and discards the whole
+cache, because a source file's fingerprint cannot notice that the redaction rules
+moved.
+
+Writes are capped: at most twelve gotchas per run, each under a belief id derived
+from `(signature, scope_id)`, so a re-mint replaces the previous row rather than
+adding one. A gotcha carries `valid_until` at +45 days and is retired by the
+ordinary `expired` hygiene class if the miner stops re-confirming it.
+
 ## What is deliberately not here
 
 No autopilot, no hosted judge, no training, no stale-marking daemon, and no
-promotion inside the MCP surface. Promotion stays out of the client-facing tool
+promotion inside the MCP surface. The procmine stage above is not an exception:
+it ships disabled, OCBrain still installs no scheduler, and an operator opts in
+by loading a launchd agent exactly as for the rest of this script. Promotion stays out of the client-facing tool
 set: `decide_proposal_v1` is admin-only, and these two scripts are the only
 unattended writers.
 
