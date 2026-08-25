@@ -78,6 +78,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_publicsafety.py, which drives the scanner against
     # throwaway git repos rather than this one.
     repo_guard_acceptance = {"public-safety-check", "install-hooks"}
+    # Covered in tests/test_compact.py, which drives the dry run, the --apply
+    # refusal without --yes, the applying path, and the undo.
+    compaction_acceptance = {"compact"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
@@ -85,6 +88,7 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         | hygiene_acceptance
         | scope_acceptance
         | repo_guard_acceptance
+        | compaction_acceptance
     )
 
 
