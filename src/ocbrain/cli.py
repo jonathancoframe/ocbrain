@@ -693,8 +693,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             "database": result,
             "operating_model": {
                 "core": "explicit one-shot commands plus stdio MCP",
-                "training": "optional manual companion (`ocbrain-training`)",
-                "watchdog": "optional manual companion (`ocbrain-watchdog`)",
                 "scheduler_installed_by_core": False,
             },
         },
