@@ -362,3 +362,67 @@ def test_any_post_proposal_correction_makes_the_pending_decision_stale(tmp_path)
         == 0
     )
     conn.close()
+
+
+def test_closeout_records_receipt_despite_unknown_retrieval_id(tmp_path) -> None:
+    """One mangled retrieval id must not void the whole receipt.
+
+    An agent holding a bad id cannot repair its own context — a live fleet
+    retried the same unknown id three times in one evening and lost the
+    closeout entirely. The receipt now records, links only the ids that exist,
+    and carries the rest verbatim as unmatched so nothing is fabricated and
+    nothing is lost.
+    """
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    retrieval_id = record_core_v1_retrieval(
+        conn,
+        query="receipt",
+        context={"project": "ocbrain"},
+        items=[],
+        runtime="hermes",
+        task_ref="tolerant-receipt",
+        session_id="session-1",
+    )
+    receipt = record_closeout(
+        conn,
+        task_ref="tolerant-receipt",
+        status="completed",
+        summary="verified",
+        retrieval_use_ids=[retrieval_id, "ocbret_definitely_not_real"],
+        decision_impact="informed",
+        verifier_refs=[{"uri": "pytest://tolerant", "status": "passed"}],
+    )
+    assert receipt["retrieval_use_ids"] == [retrieval_id]
+    assert receipt["unmatched_retrieval_use_ids"] == ["ocbret_definitely_not_real"]
+    linked = [
+        str(row["retrieval_use_id"])
+        for row in conn.execute(
+            "SELECT retrieval_use_id FROM task_closeout_retrievals WHERE closeout_id=?",
+            (receipt["id"],),
+        )
+    ]
+    assert linked == [retrieval_id]
+    conn.close()
+
+
+def test_closeout_with_only_unknown_ids_still_records(tmp_path) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    receipt = record_closeout(
+        conn,
+        task_ref="all-unknown",
+        status="completed",
+        summary="verified",
+        retrieval_use_ids=["ret_0000000000000000"],
+        decision_impact="none",
+        verifier_refs=[{"uri": "pytest://all-unknown", "status": "passed"}],
+    )
+    assert receipt["retrieval_use_ids"] == []
+    assert receipt["unmatched_retrieval_use_ids"] == ["ret_0000000000000000"]
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_closeout_retrievals WHERE closeout_id=?",
+        (receipt["id"],),
+    ).fetchone()
+    assert int(row["n"]) == 0
+    conn.close()
