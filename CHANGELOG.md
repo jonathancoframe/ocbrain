@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Store transcript evidence by reference instead of by value. Measured on a
+  177 MB core: `*_history_file` bodies were 53.3 MB (99.13% of all evidence body
+  bytes), their `evidence_recorded` events 73.9 MB (82.4% of the ledger), and
+  the beliefs compiled from them another 20.9 MB across `current_beliefs` and
+  `compilation_proposed` — 148 MB of 177 MB, growing ~106 MB a month. Import now
+  emits `body: ""` plus a `body_ref` naming the source file and the hashes that
+  rebuild its window, a 2,000-character head excerpt in `evidence_objects
+  .body_head`, and the `source_content_hash` that was empty on every history row
+  ever written. Replaying the same corpus under the new scheme: 19.9 MB, and
+  ~14 MB a month. **New events only — no migration**; existing rows keep their
+  bodies. `brain.source` re-reads the file, rebuilds the window, and verifies it
+  against the recorded hash before serving a byte; a transcript that has grown,
+  rotated, or been deleted (12.4% of recorded source URIs already dangle) comes
+  back as a typed `content_unavailable` with a reason and the recorded head
+  excerpt, never as a raised tool error. The evidence id is still derived from
+  the full window text, so no identity moves. The belief compiled from a
+  transcript now carries the head rather than the whole window — required, not
+  incidental: a re-windowed transcript has to compare unchanged, and it cannot
+  compare against a body the store no longer holds. The import-time re-window
+  gate reads `COALESCE(NULLIF(body, ''), body_head)`, and bundle export sends
+  the head excerpt instead of refusing a pointer row as `invalid_body_size`.
 - Capture caller identity at the server rather than accepting the model's word
   for it. Runtime and session were free text a model typed into `context`: 129
   distinct `served_to_runtime` spellings, no session id at all on 44.7% of
