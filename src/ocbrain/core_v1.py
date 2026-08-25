@@ -38,6 +38,11 @@ from ocbrain.scope import (
 CORE_V1_APPLICATION_ID = 0x4F434231  # ASCII-ish "OCB1"
 CORE_V1_USER_VERSION = 10_000
 CORE_V1_SCHEMA_VERSION = "ocbrain.core.v1"
+
+# The one belief_type retrieval treats specially. Full procedure serving is not
+# shipped; this constant exists so degraded mode can refuse a procedure the day
+# one is minted, rather than the day someone remembers to add the guard.
+PROCEDURE_BELIEF_TYPE = "procedure"
 CORE_V1_EVENT_SCHEMA = "ocbrain.event.v1"
 HYBRID_RRF_K = 60
 # Qwen3's low positive tail is not evidence of topical relevance. Keep a
@@ -1930,6 +1935,25 @@ def search_core_v1(
     # is set and every dense score is absent — holding lexical hits to a dense
     # floor then would return nothing at all, so the extra gate stands down.
     dense_arm_healthy = dense_fallback is None
+    degraded_excluded_procedures = 0
+    if not dense_arm_healthy:
+        # A wrong belief is a wrong sentence; a wrong procedure is a wrong
+        # afternoon. With the dense arm down the floors below stand down and a
+        # single shared token is enough to serve a row, which is a tolerable
+        # risk for a claim and not for a multi-step recipe an agent will follow.
+        # Gotchas are sentence-shaped and keep serving normally.
+        eligible = {
+            belief_id: row
+            for belief_id, row in eligible.items()
+            if str(row["belief_type"] or "") != PROCEDURE_BELIEF_TYPE
+        }
+        kept_lexical = [
+            row
+            for row in lexical_rows
+            if str(row["belief_type"] or "") != PROCEDURE_BELIEF_TYPE
+        ]
+        degraded_excluded_procedures = len(lexical_rows) - len(kept_lexical)
+        lexical_rows = kept_lexical
     if lexical_uncorroborated and dense_arm_healthy:
         # No lexical row cleared the multi-term bar and dense retrieval is
         # available to answer instead. Without a working dense arm these rows are
@@ -1958,6 +1982,7 @@ def search_core_v1(
                 "min_lexical_query_term_matches": min_lexical_matches,
                 "min_redundant_lexical_strength_ratio": min_redundant_ratio,
                 "require_dense_support": require_dense_support and dense_arm_healthy,
+                "degraded_excluded_procedures": degraded_excluded_procedures,
             },
         }
     feedback = _retrieval_feedback_scores(
@@ -2106,6 +2131,10 @@ def search_core_v1(
             "min_lexical_query_term_matches": min_lexical_matches,
             "min_redundant_lexical_strength_ratio": min_redundant_ratio,
             "require_dense_support": require_dense_support and dense_arm_healthy,
+            # Procedures dropped because the dense arm was unavailable. Zero in
+            # healthy mode; a non-zero value says the packet is deliberately
+            # thinner than the corpus could support.
+            "degraded_excluded_procedures": degraded_excluded_procedures,
         },
     }
 
@@ -2530,6 +2559,7 @@ __all__ = [
     "CORE_V1_TABLES",
     "CORE_V1_USER_VERSION",
     "LEGACY_IMPORT_KINDS",
+    "PROCEDURE_BELIEF_TYPE",
     "append_core_event",
     "assert_core_v1_inventory",
     "canonical_json",

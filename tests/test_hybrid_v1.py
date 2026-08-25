@@ -42,6 +42,7 @@ def _seed_belief(
     visibility: str = "internal",
     scope: ScopeTag | None = None,
     attributes: dict | None = None,
+    belief_type: str = "curated_fact",
 ) -> None:
     scope = scope or ScopeTag(
         "project",
@@ -55,7 +56,7 @@ def _seed_belief(
         "compilation_proposed",
         {
             "belief_id": belief_id,
-            "belief_type": "curated_fact",
+            "belief_type": belief_type,
             "body": body,
             "evidence_ids": [],
             "scope": scope.to_dict(),
@@ -1056,6 +1057,61 @@ def test_lexical_hit_kept_when_dense_arm_is_unavailable(tmp_path: Path, monkeypa
     assert [item["belief_id"] for item in result["items"]] == [target]
     assert result["ranking"]["dense_fallback"] == "vector_sidecar_missing"
     assert result["ranking"]["require_dense_support"] is False
+    assert result["ranking"]["degraded_excluded_procedures"] == 0
+
+
+def test_degraded_mode_drops_procedures_but_keeps_gotchas(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A wrong belief is a wrong sentence; a wrong procedure is a wrong afternoon.
+
+    With the dense arm down the relevance floors stand down, so a procedure
+    could be served on one shared token. Gotchas are sentence-shaped claims and
+    carry the same risk a belief does, so they keep serving.
+    """
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    _seed_belief(
+        conn,
+        belief_id="procedure:bountiful:release",
+        body="Deployment probes run after each production release.",
+        belief_type="procedure",
+    )
+    _seed_belief(
+        conn,
+        belief_id="gotcha:bountiful:release",
+        body="Deployment probes fail on 46% of production release calls.",
+        belief_type="gotcha",
+    )
+    conn.commit()
+    query = "production release deployment probes"
+    context = ScopeContext(project="bountiful")
+
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: (
+            [
+                {"belief_id": "procedure:bountiful:release", "similarity": 0.91},
+                {"belief_id": "gotcha:bountiful:release", "similarity": 0.90},
+            ],
+            None,
+        ),
+    )
+    healthy = search_core_v1(conn, query, context=context, limit=10)
+    assert {item["belief_id"] for item in healthy["items"]} == {
+        "procedure:bountiful:release",
+        "gotcha:bountiful:release",
+    }
+    assert healthy["ranking"]["degraded_excluded_procedures"] == 0
+
+    monkeypatch.setattr(
+        "ocbrain.core_v1.semantic_neighbors",
+        lambda *_args, **_kwargs: ([], "vector_sidecar_missing"),
+    )
+    degraded = search_core_v1(conn, query, context=context, limit=10)
+
+    assert [item["belief_id"] for item in degraded["items"]] == ["gotcha:bountiful:release"]
+    assert degraded["ranking"]["degraded_excluded_procedures"] == 1
 
 
 def test_uncorroborated_multi_term_query_drops_every_lexical_row(
