@@ -188,12 +188,53 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
     """The additive migration adds the columns; it never rewrites a row."""
     path = tmp_path / "old-core.sqlite"
     conn = connect(path)
-    init_core_v1(conn)
-    # Simulate the pre-chain shape by dropping the columns from a fresh core.
-    conn.execute("DROP INDEX IF EXISTS idx_task_closeouts_chain")
-    for column in ("parent_closeout_id", "task_ref_norm"):
-        conn.execute(f"ALTER TABLE task_closeouts DROP COLUMN {column}")
-    conn.execute("ALTER TABLE retrieval_uses DROP COLUMN task_ref_norm")
+    # Build the actual pre-chain table shape instead of creating the current
+    # schema and relying on ALTER TABLE DROP COLUMN to reverse it. Python 3.11's
+    # bundled SQLite cannot reliably drop a column from a table with triggers,
+    # which made this migration test fail in CI before it reached the code under
+    # test. A minimal v1 inventory is sufficient: migrate_core_v1_columns only
+    # inspects existing tables and adds nullable columns/indexes.
+    conn.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta(key, value) VALUES ('core_schema', 'ocbrain.core.v1');
+        CREATE TABLE retrieval_uses (
+          id TEXT PRIMARY KEY,
+          served_at TEXT NOT NULL,
+          client_session_hint TEXT
+        );
+        CREATE TABLE task_closeouts (
+          id TEXT PRIMARY KEY,
+          schema_version TEXT NOT NULL,
+          closed_at TEXT NOT NULL,
+          task_ref TEXT NOT NULL,
+          status TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          decision_impact TEXT NOT NULL,
+          decision_note TEXT,
+          awaiting TEXT,
+          runtime TEXT,
+          session_id TEXT,
+          context_json TEXT NOT NULL,
+          artifact_refs_json TEXT NOT NULL,
+          verifier_refs_json TEXT NOT NULL,
+          provenance_json TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL UNIQUE,
+          server_connection_id TEXT,
+          client_session_hint TEXT,
+          client_runtime_key TEXT
+        );
+        CREATE TRIGGER task_closeouts_no_update
+        BEFORE UPDATE ON task_closeouts BEGIN
+          SELECT RAISE(ABORT, 'task_closeouts is append-only');
+        END;
+        CREATE TRIGGER task_closeouts_no_delete
+        BEFORE DELETE ON task_closeouts BEGIN
+          SELECT RAISE(ABORT, 'task_closeouts is append-only');
+        END;
+        """
+    )
     conn.execute(
         """
         INSERT INTO task_closeouts (
