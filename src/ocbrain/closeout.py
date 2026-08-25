@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -16,6 +17,46 @@ OUTCOME_SCHEMA_VERSION = "ocbrain.outcome.v1"
 CLOSEOUT_STATUSES = {"completed", "partial", "blocked", "failed", "cancelled"}
 DECISION_IMPACTS = {"none", "informed", "changed", "prevented_error", "unknown"}
 VERIFIER_STATUSES = {"passed", "failed", "unknown", "not_required"}
+
+# Wrapper syntax clients paste in front of an otherwise-fine reference, so that
+# `ocbrain:COFASC-292` and `COFASC-292` land in the same chain. Matched
+# case-insensitively because the wrapper is punctuation, not identity.
+TASK_REF_WRAPPER_PREFIXES: tuple[str, ...] = ("ocbrain:", "task:")
+# Long enough for every task_ref in a real 1,148-row corpus (longest: 164
+# chars), short enough that a pasted document cannot become an index key.
+MAX_TASK_REF_NORM = 256
+_TASK_REF_WHITESPACE = re.compile(r"\s+")
+
+
+def normalize_task_ref(task_ref: Any) -> str:
+    """Fold a free-text ``task_ref`` into the key two closeouts chain on.
+
+    Trims, collapses internal whitespace, strips the wrapper prefixes above, and
+    bounds the length. **Case is preserved.** This column carries Linear ids
+    (`COFASC-292`) and raw UUIDs, and ``scope.py`` gives the reasoning for the
+    same decision about task and session ids: they are machine-minted,
+    high-cardinality, and often case-significant, so folding them risks
+    collapsing two distinct references into one. Only the spellings a human
+    varies by accident are folded.
+
+    Idempotent: ``normalize_task_ref(normalize_task_ref(x)) == normalize_task_ref(x)``.
+    A value that is nothing but wrapper prefixes folds back to its trimmed self
+    rather than to the empty string, so an odd input cannot chain itself onto
+    every other odd input.
+
+    The raw ``task_ref`` column keeps the verbatim value forever; this is a
+    derived key stored beside it, never a replacement.
+    """
+    collapsed = _TASK_REF_WHITESPACE.sub(" ", str(task_ref or "")).strip()
+    stripped = collapsed
+    peeled = True
+    while peeled:
+        peeled = False
+        for prefix in TASK_REF_WRAPPER_PREFIXES:
+            if stripped[: len(prefix)].lower() == prefix:
+                stripped = stripped[len(prefix) :].strip()
+                peeled = True
+    return (stripped or collapsed)[:MAX_TASK_REF_NORM]
 
 
 def record_closeout(
@@ -34,6 +75,7 @@ def record_closeout(
     outcomes: list[dict[str, Any]] | None = None,
     awaiting: str | None = None,
     actor: str = "agent",
+    parent_closeout_id: str | None = None,
     provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     """Append a generic execution outcome receipt without promoting knowledge.
@@ -45,6 +87,13 @@ def record_closeout(
     hashed provenance block, so two byte-identical closeouts written from two
     different connections are two distinct receipts rather than a UNIQUE
     collision on ``content_hash``.
+
+    ``parent_closeout_id`` names the closeout this one continues. It is
+    validated against ``task_closeouts.id``, and an unresolved value is recorded
+    in the receipt as a claim with ``chain.parent_unresolved`` set rather than
+    refused: a closeout must never fail over a bad parent, for the same reason
+    an unknown ``retrieval_use_id`` no longer voids the whole receipt. Only a
+    resolved parent reaches the column, so the pointer is never dangling.
     """
     task_ref = _required_text(task_ref, "task_ref")
     summary = _required_text(summary, "summary")
@@ -67,6 +116,18 @@ def record_closeout(
     verification_status = _verification_status(verifiers)
     resolved = context or ScopeContext()
     closed_at = now_iso()
+    task_ref_norm = normalize_task_ref(task_ref)
+    parent_claim = parent_closeout_id.strip() if isinstance(parent_closeout_id, str) else None
+    resolved_parent = _resolve_parent(conn, parent_claim)
+    chain: dict[str, Any] = {
+        "parent_closeout_id": parent_claim or None,
+        # One indexed read on (task_ref_norm, closed_at). Historical rows carry
+        # a NULL norm and are deliberately not rewritten, so a chain begins at
+        # the first closeout written by a server that has this column.
+        "previous_in_chain": _previous_in_chain(conn, task_ref_norm),
+    }
+    if parent_claim and resolved_parent is None:
+        chain["parent_unresolved"] = True
     observed = provenance or EMPTY_PROVENANCE
     provenance_block: dict[str, Any] = {
         "source": "agent_reported",
@@ -95,6 +156,8 @@ def record_closeout(
         "outcomes": normalized_outcomes,
         "verification_status": verification_status,
         "awaiting": awaiting.strip() if awaiting and awaiting.strip() else None,
+        "task_ref_norm": task_ref_norm,
+        "chain": chain,
         "context": resolved.to_dict(),
         "provenance": provenance_block,
     }
@@ -108,9 +171,10 @@ def record_closeout(
           decision_impact, decision_note, awaiting, runtime, session_id,
           context_json, artifact_refs_json, verifier_refs_json, provenance_json,
           receipt_json, content_hash,
-          server_connection_id, client_session_hint, client_runtime_key
+          server_connection_id, client_session_hint, client_runtime_key,
+          parent_closeout_id, task_ref_norm
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             closeout_id,
@@ -133,6 +197,8 @@ def record_closeout(
             observed.server_connection_id,
             observed.client_session_hint,
             observed.client_runtime_key,
+            resolved_parent,
+            task_ref_norm,
         ),
     )
     for retrieval_use_id in retrieval_ids:
@@ -154,6 +220,40 @@ def get_closeout(conn: sqlite3.Connection, closeout_id: str) -> dict[str, Any] |
         (closeout_id,),
     ).fetchone()
     return json.loads(row["receipt_json"]) if row is not None else None
+
+
+def _resolve_parent(conn: sqlite3.Connection, parent_closeout_id: str | None) -> str | None:
+    """Return the parent id only if a closeout by that id exists.
+
+    An unresolved claim is kept in the receipt and out of the column, mirroring
+    how ``_partition_retrieval_ids`` treats an unknown retrieval id: the claim
+    is evidence, a dangling pointer is not.
+    """
+    if not parent_closeout_id:
+        return None
+    row = conn.execute(
+        "SELECT id FROM task_closeouts WHERE id=?", (parent_closeout_id,)
+    ).fetchone()
+    return str(row["id"]) if row is not None else None
+
+
+def _previous_in_chain(conn: sqlite3.Connection, task_ref_norm: str) -> str | None:
+    """The most recent closeout already filed against the same normalized ref.
+
+    This is what gives an agent chain continuity without having to remember an
+    id across sessions: it never has to pass ``parent_closeout_id`` to find out
+    what the last run on this task concluded. Ordered by ``closed_at`` with the
+    id as a tiebreaker, so two closeouts written inside the same clock tick
+    still resolve deterministically.
+    """
+    if not task_ref_norm:
+        return None
+    row = conn.execute(
+        "SELECT id FROM task_closeouts WHERE task_ref_norm=? "
+        "ORDER BY closed_at DESC, id DESC LIMIT 1",
+        (task_ref_norm,),
+    ).fetchone()
+    return str(row["id"]) if row is not None else None
 
 
 def _partition_retrieval_ids(
