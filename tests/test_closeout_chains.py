@@ -14,7 +14,12 @@ import sqlite3
 import pytest
 
 from ocbrain.closeout import MAX_TASK_REF_NORM, normalize_task_ref, record_closeout
-from ocbrain.core_v1 import init_core_v1, migrate_core_v1_columns, record_core_v1_retrieval
+from ocbrain.core_v1 import (
+    CORE_V1_SCHEMA,
+    init_core_v1,
+    migrate_core_v1_columns,
+    record_core_v1_retrieval,
+)
 from ocbrain.db import connect, init_db
 from ocbrain.scope import ScopeContext
 
@@ -188,30 +193,49 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
     """The additive migration adds the columns; it never rewrites a row."""
     path = tmp_path / "old-core.sqlite"
     conn = connect(path)
-    init_core_v1(conn)
-    # Simulate the pre-chain shape by dropping the columns from a fresh core.
+    # Build a core exactly as it was before the chain columns existed, by
+    # initialising it from a schema with those column definitions removed.
     #
-    # The triggers have to come off first and go back on after. SQLite re-parses
-    # every schema entry that references a table when a column is dropped, and
-    # builds older than the one this was written on reject the append-only
-    # triggers during that pass ("error in table task_closeouts after drop
-    # column: incomplete input"). Dropping a column is only a fixture detail
-    # here, so the test must not depend on which SQLite the runner ships.
-    conn.execute("DROP INDEX IF EXISTS idx_task_closeouts_chain")
-    triggers = [
-        row[0]
-        for row in conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='task_closeouts'"
-        )
-        if row[0]
-    ]
-    for name in ("task_closeouts_no_update", "task_closeouts_no_delete"):
-        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-    for column in ("parent_closeout_id", "task_ref_norm"):
-        conn.execute(f"ALTER TABLE task_closeouts DROP COLUMN {column}")
-    conn.execute("ALTER TABLE retrieval_uses DROP COLUMN task_ref_norm")
-    for statement in triggers:
-        conn.execute(statement)
+    # The obvious fixture -- init the current schema, then ALTER TABLE ... DROP
+    # COLUMN -- is not portable. SQLite re-parses every schema entry that
+    # references the table during a column drop, and builds older than the
+    # developer's abort on this core's append-only triggers with "error in
+    # table task_closeouts after drop column: incomplete input". That made the
+    # test pass locally and fail in CI. Simulating the old core, rather than
+    # mutating a new one down to it, is also the more faithful fixture: it
+    # exercises the migration against a schema that genuinely lacks the
+    # columns, which is what an operator's existing database looks like.
+    old_schema = CORE_V1_SCHEMA
+    for fragment, replacement in (
+        # Each removal takes the preceding comma with it, or the column before
+        # it is left dangling one and the CREATE TABLE will not parse.
+        (",\n  provenance_json TEXT,\n"
+         "  -- The folded form of `task_ref` above, so a retrieval and the closeout that\n"
+         "  -- links it agree on which task they belong to. NULL on historical rows.\n"
+         "  task_ref_norm TEXT\n",
+         ",\n  provenance_json TEXT\n"),
+        (",\n  -- Chain pointers. `parent_closeout_id` is the closeout this one continues,\n"
+         "  -- written only when it resolved; `task_ref_norm` is the folded form of\n"
+         "  -- `task_ref` above, which stays verbatim. Both are NULL on every row written\n"
+         "  -- before they existed: the fold happens at write time and history is never\n"
+         "  -- rewritten. See ocbrain.closeout.normalize_task_ref.\n"
+         "  parent_closeout_id TEXT,\n"
+         "  task_ref_norm TEXT\n",
+         "\n"),
+        ("CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain\n"
+         "  ON task_closeouts(task_ref_norm, closed_at);\n",
+         ""),
+    ):
+        assert fragment in old_schema, "schema text moved; update this fixture"
+        old_schema = old_schema.replace(fragment, replacement)
+    assert "task_ref_norm" not in old_schema
+    conn.executescript(old_schema)
+
+    def columns(table: str) -> set[str]:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    assert not columns("task_closeouts") & {"parent_closeout_id", "task_ref_norm"}
+    assert "task_ref_norm" not in columns("retrieval_uses")
     conn.execute(
         """
         INSERT INTO task_closeouts (
