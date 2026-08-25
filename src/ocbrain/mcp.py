@@ -978,6 +978,7 @@ def call_tool(
             outcomes=object_list(arguments.get("outcomes"), "outcomes"),
             awaiting=optional_string(arguments, "awaiting"),
             actor=optional_string(arguments, "actor") or "agent",
+            parent_closeout_id=optional_string(arguments, "parent_closeout_id"),
             provenance=provenance,
         )
         conn.commit()
@@ -1235,6 +1236,7 @@ def call_tool_v1(
             outcomes=object_list(arguments.get("outcomes"), "outcomes"),
             awaiting=optional_string(arguments, "awaiting"),
             actor=optional_string(arguments, "actor") or "agent",
+            parent_closeout_id=optional_string(arguments, "parent_closeout_id"),
             provenance=provenance,
         )
         conn.commit()
@@ -1718,6 +1720,17 @@ def tool_list(
                         "summary": {
                             "type": "string",
                             "description": "Required. One-line outcome of the task.",
+                        },
+                        "parent_closeout_id": {
+                            "type": "string",
+                            "description": (
+                                "Bare id of the closeout this one continues (close_..., "
+                                "no prefix). Optional: the receipt also reports "
+                                "previous_in_chain, the latest closeout already filed "
+                                "against the same normalized task_ref. An id that does "
+                                "not resolve is recorded as an unresolved claim rather "
+                                "than refused."
+                            ),
                         },
                         "retrieval_use_ids": {
                             "type": "array",
