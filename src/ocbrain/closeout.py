@@ -46,8 +46,9 @@ def record_closeout(
         )
     if status == "blocked" and not (awaiting and awaiting.strip()):
         raise ValueError("blocked closeouts require awaiting")
-    retrieval_ids = _dedupe_text(retrieval_use_ids or [])
-    _validate_retrieval_ids(conn, retrieval_ids)
+    retrieval_ids, unmatched_retrieval_ids = _partition_retrieval_ids(
+        conn, _dedupe_text(retrieval_use_ids or [])
+    )
     artifacts = [_normalize_artifact_ref(value) for value in artifact_refs or []]
     verifiers = [_normalize_verifier_ref(value) for value in verifier_refs or []]
     normalized_actions = [_normalize_action(value) for value in actions or []]
@@ -73,6 +74,7 @@ def record_closeout(
             "note": decision_note.strip() if decision_note and decision_note.strip() else None,
         },
         "retrieval_use_ids": retrieval_ids,
+        "unmatched_retrieval_use_ids": unmatched_retrieval_ids,
         "artifact_refs": artifacts,
         "verifier_refs": verifiers,
         "actions": normalized_actions,
@@ -136,9 +138,21 @@ def get_closeout(conn: sqlite3.Connection, closeout_id: str) -> dict[str, Any] |
     return json.loads(row["receipt_json"]) if row is not None else None
 
 
-def _validate_retrieval_ids(conn: sqlite3.Connection, retrieval_ids: list[str]) -> None:
+def _partition_retrieval_ids(
+    conn: sqlite3.Connection, retrieval_ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Split linked retrieval ids into (known, unknown), refusing neither.
+
+    This used to raise on any unknown id, which voided the entire receipt: an
+    agent holding one mangled id — a live fleet retried `ocbret_…` three times
+    in one evening — cannot repair its own context, so the retry fails
+    identically and the closeout is simply lost. A receipt with one unlinked id
+    recorded as unmatched is strictly more evidence than no receipt. Unknown ids
+    are carried in the receipt verbatim, and never inserted into
+    ``task_closeout_retrievals``, so no join is ever fabricated.
+    """
     if not retrieval_ids:
-        return
+        return [], []
     placeholders = ",".join("?" for _ in retrieval_ids)
     found = {
         str(row["id"])
@@ -147,9 +161,9 @@ def _validate_retrieval_ids(conn: sqlite3.Connection, retrieval_ids: list[str]) 
             retrieval_ids,
         )
     }
-    missing = [value for value in retrieval_ids if value not in found]
-    if missing:
-        raise ValueError(f"retrieval use not found: {', '.join(missing)}")
+    known = [value for value in retrieval_ids if value in found]
+    unknown = [value for value in retrieval_ids if value not in found]
+    return known, unknown
 
 
 def _normalize_artifact_ref(value: Any) -> dict[str, Any]:

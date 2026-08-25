@@ -757,6 +757,35 @@ def apply_claims(
         ):
             unchanged.append(belief_id)
             continue
+        # The key IS a wiki fact's identity: wiki-lint enforces one serving
+        # belief per key across the whole corpus, so a claim whose key is
+        # already served anywhere is an update to that belief, never a new one.
+        # Body similarity cannot carry this test — a multi-project fleet run
+        # reworded the asa2 fact below the restatement threshold and minted a
+        # doctrine fact's second copy under its own project. Prefer the
+        # doctrine-scoped copy when several already exist; hygiene owns
+        # collapsing the remainder.
+        key_row = conn.execute(
+            """
+            SELECT belief_id, body, evidence_ids
+            FROM current_beliefs
+            WHERE belief_type='wiki_fact' AND status='current' AND serve=1
+              AND json_extract(attributes_json, '$.key') = ?
+            ORDER BY (scope_type='global') DESC, last_compiled_at DESC, belief_id
+            LIMIT 1
+            """,
+            (claim["key"],),
+        ).fetchone()
+        rehomed_by_key = key_row is not None and str(key_row["belief_id"]) != belief_id
+        if rehomed_by_key:
+            if (
+                str(key_row["body"]) == claim["body"]
+                and json.loads(key_row["evidence_ids"] or "[]") == claim["evidence_ids"]
+            ):
+                unchanged.append(str(key_row["belief_id"]))
+                continue
+            belief_id = str(key_row["belief_id"])
+            existing = get_core_v1_belief(conn, belief_id)
         # Look in this project AND in global doctrine. Once a fact is promoted to
         # `global:doctrine`, a project-scoped run that only searched its own scope
         # would not see it and would mint a fresh per-project copy of something
@@ -782,7 +811,7 @@ def apply_claims(
             ),
             None,
         )
-        if equivalent_id is not None:
+        if equivalent_id is not None and not rehomed_by_key:
             unchanged.append(equivalent_id)
             continue
         # A belief is keyed by the topic name the model happened to choose, so a
@@ -806,16 +835,20 @@ def apply_claims(
             "egress_policy": "local_only",
             "provenance": "wiki_curator",
         }
-        if restated_id is not None:
+        if restated_id is not None and not rehomed_by_key:
             belief_id = restated_id
             existing = get_core_v1_belief(conn, belief_id)
-            # An approved proposal writes its scope onto the belief, so a claim
-            # that `claim_scope` typed as project-scoped would quietly demote the
-            # doctrine fact it restates. Only a `scope_promoted` event with a
-            # named approver may move a belief between tiers; a rewording keeps
-            # the belief exactly where it already is.
-            if existing is not None and str(existing["scope"]["scope_id"]) != scope_id:
-                proposal_scope = dict(existing["scope"])
+        # An approved proposal writes its scope onto the belief, so a claim
+        # that `claim_scope` typed as project-scoped would quietly demote the
+        # doctrine fact it restates or shares a key with. Only a
+        # `scope_promoted` event with a named approver may move a belief
+        # between tiers; an update keeps the belief exactly where it is.
+        if (
+            (rehomed_by_key or restated_id is not None)
+            and existing is not None
+            and str(existing["scope"]["scope_id"]) != scope_id
+        ):
+            proposal_scope = dict(existing["scope"])
         if existing is not None and existing.get("status") in {"retracted", "tombstoned"}:
             blocked.append(belief_id)
             continue
