@@ -14,7 +14,13 @@ import sqlite3
 import pytest
 
 from ocbrain.closeout import MAX_TASK_REF_NORM, normalize_task_ref, record_closeout
-from ocbrain.core_v1 import init_core_v1, migrate_core_v1_columns, record_core_v1_retrieval
+from ocbrain.core_v1 import (
+    CORE_V1_SCHEMA,
+    CORE_V1_SCHEMA_VERSION,
+    init_core_v1,
+    migrate_core_v1_columns,
+    record_core_v1_retrieval,
+)
 from ocbrain.db import connect, init_db
 from ocbrain.scope import ScopeContext
 
@@ -184,76 +190,53 @@ def test_historical_rows_are_not_backfilled(tmp_path):
     assert historical["task_ref_norm"] is None
 
 
-def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path, monkeypatch):
+def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
     """The additive migration adds the columns; it never rewrites a row."""
     path = tmp_path / "old-core.sqlite"
     conn = connect(path)
-    # Build the actual pre-chain table shape instead of creating the current
-    # schema and relying on ALTER TABLE DROP COLUMN to reverse it. Python 3.11's
-    # bundled SQLite cannot reliably drop a column from a table with triggers,
-    # which made this migration test fail in CI before it reached the code under
-    # test. This focused fixture intentionally includes only the tables touched
-    # by the migration; bypass the unrelated whole-inventory assertion so
-    # init_core_v1 still exercises its real migrate-before-schema ordering.
-    conn.executescript(
-        """
-        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO schema_meta(key, value) VALUES ('core_schema', 'ocbrain.core.v1');
-        CREATE TABLE retrieval_uses (
-          id TEXT PRIMARY KEY,
-          knowledge_id TEXT,
-          served_to_runtime TEXT,
-          task_ref TEXT,
-          affected_decision INTEGER,
-          corrected INTEGER,
-          outcome TEXT NOT NULL DEFAULT 'unknown',
-          note TEXT,
-          query_text TEXT,
-          served_ids_json TEXT,
-          context_json TEXT,
-          packet_schema TEXT,
-          session_id TEXT,
-          feedback_source TEXT,
-          feedback_at TEXT,
-          served_at TEXT NOT NULL,
-          source_event_id TEXT,
-          server_connection_id TEXT,
-          client_session_hint TEXT,
-          client_runtime_key TEXT,
-          provenance_json TEXT
-        );
-        CREATE TABLE task_closeouts (
-          id TEXT PRIMARY KEY,
-          schema_version TEXT NOT NULL,
-          closed_at TEXT NOT NULL,
-          task_ref TEXT NOT NULL,
-          status TEXT NOT NULL,
-          summary TEXT NOT NULL,
-          decision_impact TEXT NOT NULL,
-          decision_note TEXT,
-          awaiting TEXT,
-          runtime TEXT,
-          session_id TEXT,
-          context_json TEXT NOT NULL,
-          artifact_refs_json TEXT NOT NULL,
-          verifier_refs_json TEXT NOT NULL,
-          provenance_json TEXT NOT NULL,
-          receipt_json TEXT NOT NULL,
-          content_hash TEXT NOT NULL UNIQUE,
-          server_connection_id TEXT,
-          client_session_hint TEXT,
-          client_runtime_key TEXT
-        );
-        CREATE TRIGGER task_closeouts_no_update
-        BEFORE UPDATE ON task_closeouts BEGIN
-          SELECT RAISE(ABORT, 'task_closeouts is append-only');
-        END;
-        CREATE TRIGGER task_closeouts_no_delete
-        BEFORE DELETE ON task_closeouts BEGIN
-          SELECT RAISE(ABORT, 'task_closeouts is append-only');
-        END;
-        """
+    # Build a core exactly as it was before the chain columns existed. This
+    # incorporates the portable fixture added to #37 after #40 first opened,
+    # while calling init_core_v1 so the real migrate-before-index order is also
+    # under test.
+    old_schema = CORE_V1_SCHEMA
+    for fragment, replacement in (
+        (
+            ",\n  provenance_json TEXT,\n"
+            "  -- The folded form of `task_ref` above, so a retrieval and the closeout that\n"
+            "  -- links it agree on which task they belong to. NULL on historical rows.\n"
+            "  task_ref_norm TEXT\n",
+            ",\n  provenance_json TEXT\n",
+        ),
+        (
+            ",\n  -- Chain pointers. `parent_closeout_id` is the closeout this one continues,\n"
+            "  -- written only when it resolved; `task_ref_norm` is the folded form of\n"
+            "  -- `task_ref` above, which stays verbatim. Both are NULL on every row written\n"
+            "  -- before they existed: the fold happens at write time and history is never\n"
+            "  -- rewritten. See ocbrain.closeout.normalize_task_ref.\n"
+            "  parent_closeout_id TEXT,\n"
+            "  task_ref_norm TEXT\n",
+            "\n",
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain\n"
+            "  ON task_closeouts(task_ref_norm, closed_at);\n",
+            "",
+        ),
+    ):
+        assert fragment in old_schema, "schema text moved; update this fixture"
+        old_schema = old_schema.replace(fragment, replacement)
+    assert "task_ref_norm" not in old_schema
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('core_schema', ?)",
+        (CORE_V1_SCHEMA_VERSION,),
     )
+
+    def columns(table: str) -> set[str]:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    assert not columns("task_closeouts") & {"parent_closeout_id", "task_ref_norm"}
+    assert "task_ref_norm" not in columns("retrieval_uses")
     conn.execute(
         """
         INSERT INTO task_closeouts (
@@ -271,16 +254,11 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path, monkey
         ("close_before00000001",),
     ).fetchone()
 
-    monkeypatch.setattr("ocbrain.core_v1.assert_core_v1_inventory", lambda _conn: None)
     init_core_v1(conn)
     conn.commit()
 
-    assert {
-        row[1] for row in conn.execute("PRAGMA table_info(task_closeouts)")
-    } >= {"parent_closeout_id", "task_ref_norm"}
-    assert "task_ref_norm" in {
-        row[1] for row in conn.execute("PRAGMA table_info(retrieval_uses)")
-    }
+    assert columns("task_closeouts") >= {"parent_closeout_id", "task_ref_norm"}
+    assert "task_ref_norm" in columns("retrieval_uses")
     assert migrate_core_v1_columns(conn) == []
     indexes = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
