@@ -500,6 +500,36 @@ def build_parser() -> argparse.ArgumentParser:
     public_safety_parser.add_argument("--json", action="store_true", help="Emit JSON output")
     public_safety_parser.set_defaults(func=cmd_public_safety_check)
 
+    # Standing health scorecard. Read-only by construction, so it is safe to
+    # point at the live core an MCP server is serving from, and cheap enough to
+    # run hourly. Exits non-zero on any alarm so cron can gate on it.
+    selftest_parser = commands.add_parser(
+        "selftest", help="Score core health against documented thresholds (read-only)"
+    )
+    selftest_parser.add_argument(
+        "--since-days", type=int, default=30, help="window for windowed metrics (default: 30)"
+    )
+    selftest_parser.add_argument(
+        "--baseline", type=Path, help="a previously saved scorecard to diff against"
+    )
+    selftest_parser.add_argument("--out", type=Path, help="write this scorecard to a JSON file")
+    selftest_parser.add_argument(
+        "--transcript-root",
+        type=Path,
+        help="where session transcripts live (default: ~/.claude/projects)",
+    )
+    # SUPPRESS, not store_true: --pretty is a global flag, and a subparser
+    # default would overwrite the global value with False whenever the flag was
+    # given before the subcommand. Suppressing leaves the parent's value alone,
+    # so both `ocbrain --pretty selftest` and `ocbrain selftest --pretty` work.
+    selftest_parser.add_argument(
+        "--pretty",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="render the human-readable table instead of JSON",
+    )
+    selftest_parser.set_defaults(func=cmd_selftest)
+
     install_hooks_parser = commands.add_parser(
         "install-hooks", help="Symlink tracked git hooks (ops/hooks) into .git/hooks"
     )
@@ -2577,6 +2607,52 @@ def cmd_public_safety_check(args: argparse.Namespace) -> int:
     else:
         print(result.report(), file=sys.stderr)
     return 0 if result.ok else 1
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    from ocbrain.selftest import (
+        SelftestError,
+        diff_scorecards,
+        exit_code,
+        open_readonly,
+        render_pretty,
+        run_selftest,
+    )
+
+    try:
+        conn = open_readonly(args.db)
+    except SelftestError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    try:
+        scorecard = run_selftest(
+            conn,
+            since_days=args.since_days,
+            transcript_root=getattr(args, "transcript_root", None),
+        )
+    finally:
+        conn.close()
+
+    baseline_path = getattr(args, "baseline", None)
+    if baseline_path is not None:
+        try:
+            baseline = json.loads(Path(baseline_path).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            print(f"cannot read baseline {baseline_path}: {error}", file=sys.stderr)
+            return 2
+        scorecard["baseline_diff"] = diff_scorecards(baseline, scorecard)
+
+    out_path = getattr(args, "out", None)
+    if out_path is not None:
+        target = Path(out_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(scorecard, indent=2, sort_keys=True), encoding="utf-8")
+
+    if getattr(args, "pretty", False):
+        print(render_pretty(scorecard), end="")
+    else:
+        print(json.dumps(scorecard, indent=2, sort_keys=True))
+    return exit_code(scorecard)
 
 
 def cmd_install_hooks(args: argparse.Namespace) -> int:
