@@ -990,6 +990,42 @@ def _project_correction(conn: sqlite3.Connection, event: sqlite3.Row, body: dict
     elif op in {"mark_wrong", "retract"}:
         updated["status"] = "retracted"
         updated["serve"] = 0
+    elif op == "supersede":
+        # Replacement, not destruction. Every correction an agent has ever
+        # issued had to spell this as "retract the wrong belief, then type the
+        # right one into a body field nothing indexes and nothing serves". Here
+        # the retirement and the forward pointer land in one event: the old
+        # belief stops serving, its era closes at this event's timestamp, and
+        # ``superseded_by`` names the successor so a reader holding the old id
+        # is walked forward instead of refused.
+        #
+        # Removal from the FTS index is free -- ``_write_belief`` deletes the
+        # search row in the same statement that writes a non-serving belief.
+        successor_id = str(body.get("successor_id") or "").strip()
+        if not successor_id:
+            return
+        attributes = json.loads(updated.get("attributes_json") or "{}")
+        attributes["superseded_by"] = successor_id
+        attributes["valid_until"] = str(event["ts"])
+        updated["attributes_json"] = canonical_json(attributes)
+        updated["status"] = "retracted"
+        updated["serve"] = 0
+    elif op == "annotate":
+        # Metadata only: never status, serve, body, or confidence. This is the
+        # writer ``attributes.contradicts`` never had, and the way a mined
+        # statistic gets republished -- recompute and replace, never increment,
+        # so a replay that folds the same event twice cannot drift. A key whose
+        # patch value is ``null`` is deleted rather than stored as null.
+        patch = body.get("attributes_patch")
+        if not isinstance(patch, dict):
+            return
+        attributes = json.loads(updated.get("attributes_json") or "{}")
+        for key, value in patch.items():
+            if value is None:
+                attributes.pop(str(key), None)
+            else:
+                attributes[str(key)] = value
+        updated["attributes_json"] = canonical_json(attributes)
     elif op == "restore":
         # The inverse of a soft retraction, and the reason a soft retraction is
         # worth distinguishing from a hard one at all. Refused for anything

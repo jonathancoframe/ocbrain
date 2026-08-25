@@ -148,7 +148,15 @@ def test_expired_class_retires_past_valid_until(tmp_path: Path) -> None:
     assert rows[fresh] == "current"
 
 
-def test_expired_class_retires_superseded_beliefs(tmp_path: Path) -> None:
+def test_supersede_retires_the_old_belief_immediately(tmp_path: Path) -> None:
+    """An operator's supersession takes effect when they make it, not next sweep.
+
+    This used to stamp ``superseded_by`` on the still-serving belief and leave
+    the retirement to the next ``expired`` run, so until then the corpus served
+    the fact the operator had just declared wrong *alongside* its replacement --
+    up to a day on the scheduled cadence, with nothing telling a reader which
+    was which.
+    """
     conn = _core(tmp_path)
     old = "curated:bountiful:old-rule"
     new = "curated:bountiful:new-rule"
@@ -156,7 +164,40 @@ def test_expired_class_retires_superseded_beliefs(tmp_path: Path) -> None:
     _seed(conn, belief_id=new, body="Inventory decrements on completed exchange.")
     conn.commit()
 
-    supersede(conn, belief_id=old, successor_id=new)
+    result = supersede(conn, belief_id=old, successor_id=new)
+    assert result["status"] == "retracted"
+    assert result["serve"] is False
+    assert result["attributes"]["superseded_by"] == new
+    assert result["attributes"]["valid_until"]
+
+    rows = dict(
+        conn.execute("SELECT belief_id, serve FROM current_beliefs").fetchall()
+    )
+    assert rows[old] == 0
+    assert rows[new] == 1
+    # Nothing is left for the sweep to do; the retirement already happened.
+    assert plan_retirements(conn, classes=("expired",), now=NOW)["targets"] == []
+
+
+def test_expired_class_still_retires_a_belief_marked_superseded_by_hand(
+    tmp_path: Path,
+) -> None:
+    """The attribute path predates the correction op and still has to work.
+
+    Beliefs stamped ``superseded_by`` before this release, or by a curator
+    writing the attribute directly, are still serving and still have to be
+    retired by the sweep.
+    """
+    conn = _core(tmp_path)
+    old = "curated:bountiful:hand-marked"
+    _seed(
+        conn,
+        belief_id=old,
+        body="Inventory decrements on reservation.",
+        attributes={"superseded_by": "curated:bountiful:new-rule"},
+    )
+    conn.commit()
+
     plan = plan_retirements(conn, classes=("expired",), now=NOW)
     assert [target["belief_id"] for target in plan["targets"]] == [old]
     assert "superseded by" in plan["targets"][0]["detail"]

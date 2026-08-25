@@ -1,7 +1,8 @@
-"""Pins, and the recompilation that used to drop them."""
+"""Correction ops that update a belief instead of subtracting from it."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ocbrain.core_v1 import (
@@ -70,6 +71,74 @@ def _seed(
     )
     conn.commit()
     return belief_id
+
+
+# --------------------------------------------------------------------------- #
+# annotate
+# --------------------------------------------------------------------------- #
+def test_annotate_merges_attributes_without_touching_service(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    target = _seed(
+        conn,
+        belief_id="belief:vm",
+        body="The research VM is reached with ssh asa1.",
+        attributes={"key": "vm-access", "hits": 3},
+    )
+    before = get_core_v1_belief(conn, target)
+
+    correct_v1(
+        conn,
+        layer="belief",
+        target=target,
+        op="annotate",
+        body="mined contradiction and a recomputed statistic",
+        actor="maintenance:procmine",
+        hard=False,
+        attributes_patch={"contradicts": ["belief:other"], "hits": 11, "key": None},
+    )
+    conn.commit()
+
+    after = get_core_v1_belief(conn, target)
+    assert after["attributes"]["contradicts"] == ["belief:other"]
+    # Recompute-and-replace, never increment: replaying the same event twice
+    # cannot drift the number.
+    assert after["attributes"]["hits"] == 11
+    # A null value deletes its key rather than storing a null.
+    assert "key" not in after["attributes"]
+    for field in ("status", "serve", "body", "confidence"):
+        assert after[field] == before[field]
+    assert {str(row[0]) for row in conn.execute("SELECT doc_id FROM search_documents")} == {target}
+
+
+def test_annotate_is_replay_stable(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    target = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
+    correct_v1(
+        conn,
+        layer="belief",
+        target=target,
+        op="annotate",
+        body=None,
+        actor="maintenance:procmine",
+        hard=False,
+        attributes_patch={"contradicts": ["belief:other"], "hits": 11},
+    )
+    conn.commit()
+    before = json.loads(
+        conn.execute(
+            "SELECT attributes_json FROM current_beliefs WHERE belief_id=?", (target,)
+        ).fetchone()[0]
+    )
+
+    project_core_v1(conn, full=True)
+    conn.commit()
+
+    after = json.loads(
+        conn.execute(
+            "SELECT attributes_json FROM current_beliefs WHERE belief_id=?", (target,)
+        ).fetchone()[0]
+    )
+    assert after == before
 
 
 # --------------------------------------------------------------------------- #

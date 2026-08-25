@@ -308,15 +308,20 @@ def supersede(
     successor_id: str,
     actor: str = WRITER,
 ) -> dict[str, Any]:
-    """Mark ``belief_id`` as superseded by ``successor_id``.
+    """Retire ``belief_id`` now, naming ``successor_id`` as its replacement.
 
-    Recorded as an attribute on the still-serving belief so the wiki can render a
-    stale marker and the ``expired`` class can retire it on the next sweep. Goes
-    through a fresh proposal rather than a bespoke correction op, so the existing
-    approval and block checks apply unchanged.
+    This used to write ``superseded_by`` onto the still-serving belief and leave
+    the retirement to the next ``expired`` sweep, so between the two the corpus
+    served the fact an operator had just declared wrong *and* its replacement,
+    with nothing to tell a reader which was which. On the scheduled cadence that
+    window is up to a day. The ``supersede`` correction op does both halves in
+    one event, so the operator's decision takes effect when they make it.
+
+    The ``expired`` class still retires anything carrying ``superseded_by`` from
+    before this change, or set some other way; nothing about that path moved.
     """
     from ocbrain.core_v1 import get_core_v1_belief
-    from ocbrain.mcp_v1 import decide_proposal_v1
+    from ocbrain.mcp_v1 import correct_v1
 
     if belief_id == successor_id:
         raise ValueError("a belief cannot supersede itself")
@@ -325,40 +330,29 @@ def supersede(
         raise ValueError(f"belief not found: {belief_id}")
     if current.get("status") != "current" or not current.get("serve"):
         raise ValueError(f"belief is not currently served: {belief_id}")
-    if get_core_v1_belief(conn, successor_id) is None:
+    successor = get_core_v1_belief(conn, successor_id)
+    if successor is None:
         raise ValueError(f"successor belief not found: {successor_id}")
 
-    attributes = dict(current.get("attributes") or {})
-    attributes["superseded_by"] = successor_id
-    proposal_id = append_core_event(
+    correction = correct_v1(
         conn,
-        "compilation_proposed",
-        {
-            "schema_version": "ocbrain.compilation.v1",
-            "subject": {"kind": "belief", "id": belief_id},
-            "belief_id": belief_id,
-            "belief_type": current.get("belief_type"),
-            "body": current.get("body"),
-            "evidence_ids": current.get("evidence_ids") or [],
-            "scope": current.get("scope"),
-            "confidence": current.get("confidence"),
-            "attributes": attributes,
-        },
-        writer=actor,
-    )
-    decide_proposal_v1(
-        conn,
-        proposal_event_id=proposal_id,
-        decision="approve",
+        layer="belief",
+        target=belief_id,
+        op="supersede",
+        body=f"superseded by {successor_id}",
         actor=actor,
-        edited_body=None,
-        reason=f"marked superseded by {successor_id}",
+        hard=False,
+        successor_id=str(successor["canonical_id"]),
     )
     conn.commit()
+    retired = get_core_v1_belief(conn, belief_id) or {}
     return {
-        "belief_id": belief_id,
-        "superseded_by": successor_id,
-        "attributes": json.loads(json.dumps(attributes, sort_keys=True)),
+        "belief_id": str(current["canonical_id"]),
+        "superseded_by": str(successor["canonical_id"]),
+        "status": str(retired.get("status") or ""),
+        "serve": bool(retired.get("serve")),
+        "event_id": correction["event_id"],
+        "attributes": json.loads(json.dumps(retired.get("attributes") or {}, sort_keys=True)),
     }
 
 

@@ -34,7 +34,7 @@ from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
 from ocbrain.history_window import rehydrate_history_window
 from ocbrain.ids import stable_id
-from ocbrain.provenance import Provenance
+from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.scope import (
     HOSTED_MODEL_TARGET,
     LOCAL_MODEL_TARGET,
@@ -1303,26 +1303,53 @@ def correct_v1(
     body: str | None,
     actor: str,
     hard: bool,
+    successor_id: str | None = None,
+    attributes_patch: dict[str, Any] | None = None,
+    requested_by: str | None = None,
+    provenance: Provenance | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
+    """Append one correction event.
+
+    ``provenance`` is the connection's server-observed identity. A correction is
+    the most consequential thing anyone writes to this ledger and, until now,
+    the least attributable: ``actor`` defaulted to the literal string "human"
+    and every correction event in one real 719-event corpus carried a NULL
+    session id. Recording who and which connection issued it is what makes a
+    later audit of "who retired this belief" answerable at all.
+    """
     if layer not in {"knowledge", "belief"}:
         raise ValueError("layer must be knowledge or belief; evidence corrections are unsupported")
+    provenance = provenance or EMPTY_PROVENANCE
+    event_body: dict[str, Any] = {
+        "schema_version": "ocbrain.correction.v1",
+        "subject": {"kind": layer, "id": resolve_object_id(conn, target)},
+        "target_layer": layer,
+        "target_id": target,
+        "op": op,
+        "body": body,
+        "author": actor,
+        "hard": bool(hard),
+        "provenance": provenance.to_dict(),
+    }
+    if successor_id:
+        event_body["successor_id"] = successor_id
+    if attributes_patch is not None:
+        event_body["attributes_patch"] = attributes_patch
+    if requested_by:
+        event_body["requested_by"] = requested_by
     event_id = append_core_event(
         conn,
         "correction_recorded",
-        {
-            "schema_version": "ocbrain.correction.v1",
-            "subject": {"kind": layer, "id": resolve_object_id(conn, target)},
-            "target_layer": layer,
-            "target_id": target,
-            "op": op,
-            "body": body,
-            "author": actor,
-            "hard": bool(hard),
-        },
+        event_body,
         writer=actor,
+        # Harness-attested beats model-typed: the environment variable the
+        # client process was launched with is not something a model can invent.
+        session_id=provenance.client_session_hint or session_id,
         project=True,
     )
     return {"event_id": event_id, "kind": "correction_recorded"}
+
 
 
 def forget_v1(
