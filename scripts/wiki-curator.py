@@ -241,6 +241,9 @@ def main() -> int:
             "beliefs_applied": 0,
             "beliefs_unchanged": 0,
             "beliefs_blocked": 0,
+            "beliefs_superseded": 0,
+            "beliefs_coexist_marked": 0,
+            "beliefs_deferred": 0,
         }
         by_status: dict[str, list[str]] = {}
         for project in projects:
@@ -328,7 +331,10 @@ def main() -> int:
                     max_tokens=max(1_000, args.max_tokens),
                 )
                 claims, rejected = validate_claims(
-                    response, evidence=evidence, max_beliefs=max_beliefs
+                    response,
+                    evidence=evidence,
+                    max_beliefs=max_beliefs,
+                    existing=existing,
                 )
                 if not claims:
                     raise RuntimeError(
@@ -358,6 +364,9 @@ def main() -> int:
             totals["beliefs_applied"] += len(applied["applied"])
             totals["beliefs_unchanged"] += len(applied["unchanged"])
             totals["beliefs_blocked"] += len(applied["blocked"])
+            totals["beliefs_superseded"] += len(applied["superseded"])
+            totals["beliefs_coexist_marked"] += len(applied["coexist_marked"])
+            totals["beliefs_deferred"] += len(applied["deferred"])
             next_digests[project] = digest
             close_project(
                 by_status,
@@ -370,6 +379,9 @@ def main() -> int:
                     "applied": len(applied["applied"]),
                     "unchanged": len(applied["unchanged"]),
                     "blocked": len(applied["blocked"]),
+                    "superseded": len(applied["superseded"]),
+                    "coexist_marked": len(applied["coexist_marked"]),
+                    "deferred": len(applied["deferred"]),
                     "rejection_sample": rejected[:8],
                 },
             )
@@ -411,6 +423,9 @@ def main() -> int:
                 "applied_count": totals["beliefs_applied"],
                 "unchanged_count": totals["beliefs_unchanged"],
                 "blocked_count": totals["beliefs_blocked"],
+                "superseded_count": totals["beliefs_superseded"],
+                "coexist_marked_count": totals["beliefs_coexist_marked"],
+                "deferred_count": totals["beliefs_deferred"],
             },
         )
         emit(
