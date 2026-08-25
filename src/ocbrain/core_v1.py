@@ -1058,6 +1058,24 @@ def _restore_blocked(conn: sqlite3.Connection, belief_id: str) -> str | None:
     ).fetchone()
     if hard is not None:
         return "hard-corrected"
+    # A restore that puts a superseded belief back beside its replacement would
+    # serve both halves of a contradiction the ledger has already resolved.
+    # Only a *serving* successor blocks: once the replacement is itself retired,
+    # restoring the original is a legitimate way back.
+    successor = conn.execute(
+        "SELECT json_extract(attributes_json, '$.superseded_by') AS successor_id "
+        "FROM current_beliefs WHERE belief_id=?",
+        (belief_id,),
+    ).fetchone()
+    successor_id = str((successor["successor_id"] if successor else None) or "").strip()
+    if successor_id:
+        serving = conn.execute(
+            "SELECT 1 FROM current_beliefs "
+            "WHERE belief_id=? AND status='current' AND serve=1 LIMIT 1",
+            (resolve_object_id(conn, successor_id),),
+        ).fetchone()
+        if serving is not None:
+            return f"superseded by {successor_id}"
     return None
 
 

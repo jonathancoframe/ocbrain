@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -45,6 +47,7 @@ from ocbrain.scope import (
     resolve_write_scope,
 )
 from ocbrain.shared_context import issue_source_handles
+from ocbrain.text import compact_whitespace
 
 CONTEXT_SCHEMA_VERSION = "ocbrain.context.v1"
 SOURCE_SCHEMA_VERSION = "ocbrain.source.v1"
@@ -54,6 +57,14 @@ MAX_CONTEXT_QUERY_CHARS = 4_000
 MAX_ITEM_EXCERPT_CHARS = 1_600
 MAX_ITEM_SOURCE_HANDLES = 3
 RETRIEVAL_ID_PLACEHOLDER = "ret_0000000000000000"
+SUPERSEDE_SCHEMA_VERSION = "ocbrain.supersede.v1"
+# A replacement never *gains* authority by replacing. Recency-always-wins is the
+# obvious rule and the wrong one: it lets a confidently worded agent guess
+# outrank a curated, evidence-backed fact simply by being typed later. The
+# successor starts capped, and earns anything above this the same way the
+# original did.
+SUPERSEDE_CONFIDENCE_CAP = 0.7
+SUPERSEDE_TIERS = ("project", "pending_all")
 
 def shared_continuity_scope(context: ScopeContext) -> ScopeTag:
     """Scope for a closeout summary: broadest shared context, never hosted.
@@ -1018,6 +1029,10 @@ def digest_v1(
         "resolved_context": context.to_dict(),
         "counts": counts,
         "current": current,
+        # An operator who never asks about proposals still needs to know a
+        # correction is waiting on them: an unapproved supersession means the
+        # corpus is knowingly serving something an agent has already contested.
+        "pending_corrections": pending_supersede_count(conn),
         "recent_closeouts": _recent_closeouts_v1(
             conn,
             context=context,
@@ -1352,6 +1367,312 @@ def correct_v1(
 
 
 
+@contextmanager
+def _one_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run a multi-event write as one transaction, or join the caller's.
+
+    ``append_core_event`` opens and closes its own transaction only when it
+    finds the connection in autocommit mode, so holding one open around several
+    appends is what makes "retire the old belief and serve its replacement" a
+    single visible step. Committing stays the caller's job; a failure part-way
+    rolls back only the transaction this helper opened.
+    """
+    opened = not conn.in_transaction
+    if opened:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except Exception:
+        if opened and conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _normalized_body_hash(body: str) -> str:
+    """Hash a belief body modulo whitespace and case.
+
+    Self-supersession is the failure mode that would make this primitive worse
+    than useless: an agent re-typing the stored fact with a different indent
+    would retire a good belief and replace it with itself under a new id.
+    """
+    return sha256_text(compact_whitespace(body).casefold())
+
+
+def _supersede_config() -> tuple[str, int]:
+    config = load_config().supersede
+    tier = str(config.tier or "project").strip().lower()
+    if tier not in SUPERSEDE_TIERS:
+        tier = "project"
+    return tier, int(config.direct_cap)
+
+
+def _recent_supersede_count(
+    conn: sqlite3.Connection, *, actor: str, provenance: Provenance
+) -> int:
+    """Supersessions this caller has already landed in the trailing 24 hours.
+
+    Matched on the harness-attested session hint when there is one, because that
+    is the identity an agent cannot type for itself. ``writer`` is the fallback,
+    and it is a weaker key: two agents sharing an actor name share a budget.
+    """
+    since = (datetime.now(UTC) - timedelta(hours=24)).isoformat(timespec="microseconds")
+    hint = provenance.client_session_hint
+    if hint:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM brain_events WHERE kind='correction_recorded' AND ts >= ? "
+            "AND json_extract(body_json, '$.op')='supersede' "
+            "AND json_extract(body_json, '$.provenance.client_session_hint')=?",
+            (since, hint),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM brain_events WHERE kind='correction_recorded' AND ts >= ? "
+            "AND json_extract(body_json, '$.op')='supersede' AND writer=?",
+            (since, actor),
+        ).fetchone()
+    return int(row[0])
+
+
+def _supersede_route(
+    conn: sqlite3.Connection,
+    belief: dict[str, Any],
+    *,
+    actor: str,
+    provenance: Provenance,
+) -> str | None:
+    """Why this supersession needs an admin, or ``None`` to land it directly.
+
+    Both routes always exist. The tier flag picks the predicate, never which
+    code is compiled, so an operator turning ``pending_all`` on and off again
+    exercises paths that were live the whole time.
+    """
+    tier, cap = _supersede_config()
+    if tier == "pending_all":
+        return "tier is pending_all: every runtime supersession is reviewed"
+    scope_type = str((belief.get("scope") or {}).get("scope_type") or "")
+    scope_id = str((belief.get("scope") or {}).get("scope_id") or "")
+    if scope_type == "global":
+        return f"target is doctrine ({scope_id}); doctrine is never replaced unattended"
+    if belief.get("pinned"):
+        return "target is pinned; a pin is a standing operator decision"
+    recent = _recent_supersede_count(conn, actor=actor, provenance=provenance)
+    if cap >= 0 and recent >= cap:
+        return f"rate cap reached: {recent} supersessions in the trailing 24h (cap {cap})"
+    return None
+
+
+def supersede_v1(
+    conn: sqlite3.Connection,
+    *,
+    target: str,
+    body: str,
+    reason: str,
+    context: ScopeContext,
+    actor: str,
+    provenance: Provenance | None = None,
+) -> dict[str, Any]:
+    """Replace one serving belief with a corrected one, atomically.
+
+    This is the primitive the ledger has been missing. Every correction an agent
+    has ever issued took the only shape available to it -- soft-retract the wrong
+    belief, then type the replacement into the correction's ``body``, a field
+    nothing indexes and nothing serves -- so correcting the brain *destroyed*
+    knowledge instead of updating it. Here the replacement is a first-class
+    belief: it is compiled, scoped, evidenced, searchable, and reachable from the
+    id the old fact was known by.
+
+    Three properties are deliberate and are what separate this from "write the
+    new thing and hope":
+
+    * **The scope is copied verbatim.** A supersession can never widen reach. A
+      project fact's replacement is a project fact; there is no argument that
+      moves it to doctrine.
+    * **The confidence is capped.** ``min(old, 0.7)``: recency is not authority.
+    * **The old row keeps its history.** Feedback and retrieval rows are
+      append-only and stay attached to the belief that earned them; the
+      successor inherits none of that boost and earns its own.
+    """
+    _require_v1(conn)
+    provenance = provenance or EMPTY_PROVENANCE
+    statement = body.strip()
+    if not statement:
+        raise ValueError("body must carry the replacement statement")
+    rationale = reason.strip()
+    if not rationale:
+        raise ValueError("reason must say why the stored belief is wrong")
+
+    old = get_core_v1_belief(conn, target)
+    if old is None:
+        raise ValueError(f"belief not found: {target}")
+    old_id = str(old["canonical_id"])
+    if old.get("status") != "current" or not old.get("serve"):
+        raise ValueError(
+            f"only a serving belief can be superseded; {old_id} is {old.get('status')} "
+            f"and serve={int(bool(old.get('serve')))}"
+        )
+    if _normalized_body_hash(statement) == _normalized_body_hash(str(old.get("body") or "")):
+        raise ValueError(
+            "the replacement restates the stored belief; supersession must change the claim"
+        )
+
+    scope = ScopeTag.from_dict(dict(old.get("scope") or {}))
+    inherited = dict(old.get("attributes") or {})
+    successor_id = stable_id("belief", "sup", statement, scope.scope_id)
+    # Content-and-scope addressed, so two agents reaching the same conclusion
+    # converge on one belief instead of minting two -- and, because "sup" is part
+    # of the digest input, a successor id can never collide with the id of the
+    # belief it replaces.
+    head_seq = int(
+        conn.execute("SELECT COALESCE(MAX(event_seq), 0) FROM brain_events").fetchone()[0]
+    )
+    # Ask the same question the decision gate will ask, before writing anything,
+    # so a previously banned body comes back as a sentence instead of a
+    # PermissionError raised half-way through the transaction.
+    blocked = compilation_block_reason(conn, successor_id, proposal_event_seq=head_seq)
+    if blocked is not None:
+        raise ValueError(f"blocked: this content was previously {blocked}")
+
+    confidence = min(float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP),
+                     SUPERSEDE_CONFIDENCE_CAP)
+    attributes: dict[str, Any] = {
+        key: inherited[key]
+        for key in ("key", "title", "category", "lifecycle")
+        if key in inherited
+    }
+    attributes["supersedes"] = old_id
+    attributes["valid_from"] = now_iso()
+    slop = find_slop(statement, attributes, rules=ENFORCED_RULE_IDS)
+    pending_reason = _supersede_route(conn, old, actor=actor, provenance=provenance)
+
+    with _one_transaction(conn):
+        evidence_id, evidence_event_id = record_core_v1_evidence(
+            conn,
+            body=f"Superseding {old_id}. Reason: {rationale}\n\nReplacement claim: {statement}",
+            kind="correction",
+            scope=scope,
+            writer=actor,
+            session_id=provenance.client_session_hint or context.session,
+            artifact_ref=f"supersede:{old_id}",
+        )
+        attributes["correction_evidence_id"] = evidence_id
+        proposal_event_id = append_core_event(
+            conn,
+            "compilation_proposed",
+            {
+                "schema_version": "ocbrain.compilation.v1",
+                "subject": {"kind": "belief", "id": successor_id},
+                "belief_id": successor_id,
+                "belief_type": old.get("belief_type"),
+                "body": statement,
+                "evidence_ids": [evidence_id],
+                "scope": scope.to_dict(),
+                "confidence": confidence,
+                "attributes": attributes,
+                "supersede_reason": rationale,
+                "supersede_requested_by": actor,
+            },
+            writer=actor,
+            session_id=provenance.client_session_hint or context.session,
+        )
+        payload: dict[str, Any] = {
+            "schema_version": SUPERSEDE_SCHEMA_VERSION,
+            "mode": "pending" if pending_reason else "direct",
+            "superseded_id": old_id,
+            "successor_id": successor_id,
+            "scope": scope.to_dict(),
+            "confidence": confidence,
+            "correction_evidence_id": evidence_id,
+            "evidence_event_id": evidence_event_id,
+            "proposal_event_id": proposal_event_id,
+        }
+        if slop:
+            # Reported, never refused. The curator gate already stops slop from
+            # being promoted, and refusing here would leave the agent holding a
+            # correction it has nowhere to put -- which is the failure this whole
+            # primitive exists to end.
+            payload["slop_findings"] = [finding.to_dict() for finding in slop]
+        if pending_reason is not None:
+            payload["pending_reason"] = pending_reason
+            payload["next_step"] = (
+                "an admin approves this proposal with brain.proposal_decide; "
+                f"{old_id} keeps serving until they do"
+            )
+            return payload
+        decision = decide_proposal_v1(
+            conn,
+            proposal_event_id=proposal_event_id,
+            decision="approve",
+            actor=actor,
+            edited_body=None,
+            reason=f"runtime supersede; {rationale}",
+            provenance=provenance,
+        )
+        payload["decision_event_id"] = decision["event_id"]
+        payload["correction_event_id"] = decision.get("correction_event_id")
+        return payload
+
+
+def _complete_supersede_pair(
+    conn: sqlite3.Connection,
+    *,
+    proposal_body: dict[str, Any],
+    actor: str,
+    provenance: Provenance,
+) -> dict[str, Any] | None:
+    """Retire the belief a just-approved successor was proposed to replace.
+
+    An undecided proposal carrying ``attributes.supersedes`` *is* the pending
+    correction -- there is no second table and no new status. Approving one
+    therefore has to finish the pair here, in the same transaction and after the
+    decision, or the corpus would serve the old belief and its replacement side
+    by side and nothing would ever close the gap.
+    """
+    attributes = proposal_body.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    superseded_id = str(attributes.get("supersedes") or "").strip()
+    if not superseded_id:
+        return None
+    target = get_core_v1_belief(conn, superseded_id)
+    if target is None:
+        return {"supersede_status": f"target not found: {superseded_id}"}
+    if target.get("status") != "current" or not target.get("serve"):
+        # Retired already, by a competing approval, a retraction, or a
+        # tombstone. Saying so beats appending a correction that projects to no
+        # change and leaves an audit trail implying one happened.
+        return {"supersede_status": f"target already retired: {superseded_id}"}
+    correction = correct_v1(
+        conn,
+        layer="belief",
+        target=str(target["canonical_id"]),
+        op="supersede",
+        body=str(proposal_body.get("supersede_reason") or "").strip() or None,
+        actor=actor,
+        hard=False,
+        successor_id=str(proposal_body.get("belief_id") or ""),
+        requested_by=str(proposal_body.get("supersede_requested_by") or "") or None,
+        provenance=provenance,
+    )
+    return {
+        "supersede_status": "retired",
+        "superseded_id": str(target["canonical_id"]),
+        "correction_event_id": correction["event_id"],
+    }
+
+
+def pending_supersede_count(conn: sqlite3.Connection) -> int:
+    """Undecided supersede proposals: the queue an operator has to clear."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM brain_events AS proposal "
+        "WHERE proposal.kind='compilation_proposed' "
+        "AND json_extract(proposal.body_json, '$.attributes.supersedes') IS NOT NULL "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM brain_events AS decision WHERE decision.kind='compilation_decided' "
+        "  AND json_extract(decision.body_json, '$.proposal_event_id') = proposal.id)"
+    ).fetchone()
+    return int(row[0])
+
+
 def forget_v1(
     conn: sqlite3.Connection,
     *,
@@ -1421,7 +1742,15 @@ def decide_proposal_v1(
     actor: str,
     edited_body: str | None,
     reason: str | None,
+    provenance: Provenance | None = None,
 ) -> dict[str, Any]:
+    """Decide one compilation proposal, completing a supersession pair if it is one.
+
+    A rejection changes nothing: the belief under replacement keeps serving and
+    the rationale evidence stays in the corpus, curatable, so a refused
+    correction is still a recorded observation rather than a discarded one.
+    """
+    provenance = provenance or EMPTY_PROVENANCE
     if decision not in {"approve", "reject", "edit", "shadow"}:
         raise ValueError("decision must be approve, reject, edit, or shadow")
     proposal = conn.execute(
@@ -1437,8 +1766,8 @@ def decide_proposal_v1(
     ).fetchone()
     if existing is not None:
         raise ValueError(f"proposal already decided: {proposal_event_id}")
+    proposal_body = json.loads(proposal["body_json"])
     if decision in {"approve", "edit"}:
-        proposal_body = json.loads(proposal["body_json"])
         belief_id = str(proposal_body.get("belief_id") or "")
         reason_blocked = compilation_block_reason(
             conn,
@@ -1447,22 +1776,38 @@ def decide_proposal_v1(
         )
         if reason_blocked is not None:
             raise PermissionError(f"cannot {decision}: belief is {reason_blocked}: {belief_id}")
-    event_id = append_core_event(
-        conn,
-        "compilation_decided",
-        {
-            "schema_version": "ocbrain.compilation-decision.v1",
-            "subject": {"kind": "proposal", "id": proposal_event_id},
-            "proposal_event_id": proposal_event_id,
+    with _one_transaction(conn):
+        event_id = append_core_event(
+            conn,
+            "compilation_decided",
+            {
+                "schema_version": "ocbrain.compilation-decision.v1",
+                "subject": {"kind": "proposal", "id": proposal_event_id},
+                "proposal_event_id": proposal_event_id,
+                "decision": decision,
+                "actor": actor,
+                "edited_body": edited_body,
+                "reason": reason,
+            },
+            writer=actor,
+            session_id=provenance.client_session_hint,
+            project=True,
+        )
+        result: dict[str, Any] = {
+            "event_id": event_id,
+            "kind": "compilation_decided",
             "decision": decision,
-            "actor": actor,
-            "edited_body": edited_body,
-            "reason": reason,
-        },
-        writer=actor,
-        project=True,
-    )
-    return {"event_id": event_id, "kind": "compilation_decided", "decision": decision}
+        }
+        if decision in {"approve", "edit"}:
+            paired = _complete_supersede_pair(
+                conn,
+                proposal_body=proposal_body,
+                actor=actor,
+                provenance=provenance,
+            )
+            if paired is not None:
+                result.update(paired)
+        return result
 
 
 def _scope_allowed_for_delivery(
@@ -1791,8 +2136,10 @@ __all__ = [
     "forget_v1",
     "get_v1",
     "ingest_v1",
+    "pending_supersede_count",
     "prepare_retrieval_packet_v1",
     "proposals_v1",
     "record_context_v1",
     "search_v1",
+    "supersede_v1",
 ]
