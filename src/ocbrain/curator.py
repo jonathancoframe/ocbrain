@@ -820,13 +820,24 @@ def apply_claims(
         # scheduled run adds another phrasing and each copy costs a result slot:
         # one real brain reached 44 served beliefs carrying 33 distinct facts.
         # Update the belief that already states this fact instead of adding to it.
-        restated_id = next(
-            (
-                str(row["belief_id"])
-                for row in equivalent
-                if is_restatement(str(row["body"]), claim["body"])
-            ),
-            None,
+        # Key identity outranks body similarity. A restatement target carries its
+        # own key, and writing this claim's attributes onto it renames that key —
+        # so a claim whose key is already served elsewhere would move the name
+        # onto an occupied slot and produce two serving beliefs with one key.
+        # That is exactly how `hermes-auxiliary-routing-fix` collided in
+        # production: a belief minted as `hermes-api-mode-defect` was later
+        # matched as a restatement and rekeyed onto a key another belief held.
+        restated_id = (
+            None
+            if key_row is not None
+            else next(
+                (
+                    str(row["belief_id"])
+                    for row in equivalent
+                    if is_restatement(str(row["body"]), claim["body"])
+                ),
+                None,
+            )
         )
         proposal_scope: dict[str, Any] = {
             "scope_type": scope_type,
