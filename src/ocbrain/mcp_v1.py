@@ -7,6 +7,7 @@ It never queries a legacy relational knowledge table or a companion store.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -35,6 +36,7 @@ from ocbrain.core_v1 import (
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
 from ocbrain.history_window import rehydrate_history_window
+from ocbrain.hybrid import VECTOR_SCHEMA_VERSION, connection_path, vector_db_path
 from ocbrain.ids import stable_id
 from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
 from ocbrain.scope import (
@@ -48,6 +50,7 @@ from ocbrain.scope import (
 )
 from ocbrain.shared_context import issue_source_handles
 from ocbrain.text import compact_whitespace
+from ocbrain.vector import decode_embedding
 
 CONTEXT_SCHEMA_VERSION = "ocbrain.context.v1"
 SOURCE_SCHEMA_VERSION = "ocbrain.source.v1"
@@ -70,6 +73,14 @@ SUPERSEDE_TIERS = ("project", "pending_all")
 # from becoming an unbounded walk even before the seen-set catches it.
 MAX_RESOLUTION_HOPS = 10
 GET_MODES = ("resolve", "as_stored")
+# The advisory contradiction pass is O(n^2) over the packet, so it is bounded by
+# the packet, not by the corpus: at most 12 items is at most 66 pairs.
+MAX_ADVISORY_PAIR_ITEMS = 12
+MAX_CONTRADICTIONS = 12
+# Two independently compiled beliefs this close in embedding space are saying
+# the same thing about the same subject. Deliberately high: this is a serving
+# hint, and a false pair costs a reader more than a missed one.
+ADVISORY_COSINE_THRESHOLD = 0.90
 
 def shared_continuity_scope(context: ScopeContext) -> ScopeTag:
     """Scope for a closeout summary: broadest shared context, never hosted.
@@ -206,7 +217,7 @@ def build_context_v1(
         ),
         "at_ts": None,
         "items": items,
-        "contradictions": _explicit_contradictions(conn, items),
+        "contradictions": _packet_contradictions(conn, items),
         "coverage": {
             "requested_limit": limit,
             "returned": len(items),
@@ -2123,7 +2134,144 @@ def _explicit_contradictions(
                     )[:8],
                 }
             )
-    return result[:12]
+    return result[:MAX_CONTRADICTIONS]
+
+
+def _packet_contradictions(
+    conn: sqlite3.Connection, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Declared conflicts first, then the cheap packet-local advisory ones.
+
+    The declared pass has never had a writer, so in practice every packet has
+    shipped an empty ``contradictions`` list while carrying visibly conflicting
+    items. The advisory pass costs one indexed read and, at the twelve-item cap,
+    at most sixty-six comparisons -- bounded by the packet, never by the corpus.
+    """
+    conflicts = _explicit_contradictions(conn, items)
+    seen = {
+        tuple(sorted((conflict["belief_id"], conflict["other_belief_id"])))
+        for conflict in conflicts
+    }
+    for conflict in _advisory_contradictions(conn, items):
+        pair = tuple(sorted((conflict["belief_id"], conflict["other_belief_id"])))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        conflicts.append(conflict)
+    return conflicts[:MAX_CONTRADICTIONS]
+
+
+def _advisory_contradictions(
+    conn: sqlite3.Connection, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Flag same-key and near-duplicate pairs inside one packet.
+
+    Two signals, both local to the packet:
+
+    ``duplicate_key``
+        Two serving beliefs claiming the same ``attributes.key``. The key is a
+        wiki fact's identity and is supposed to be unique across the corpus, so
+        two of them in one packet means the reader is being handed two answers
+        to one question.
+    ``embedding_similarity``
+        Mutual cosine at or above the threshold in the local vector sidecar.
+        Stands down silently when the sidecar is missing, stale, or unreadable:
+        a retrieval must never fail because an optional index is absent.
+    """
+    if len(items) < 2 or len(items) > MAX_ADVISORY_PAIR_ITEMS:
+        return []
+    ids = [str(item["id"]) for item in items]
+    evidence = {
+        str(item["id"]): [str(value) for value in item.get("evidence_ids") or []]
+        for item in items
+    }
+    placeholders = ",".join("?" for _ in ids)
+    keys = {
+        str(row["belief_id"]): str(row["attribute_key"] or "").strip()
+        for row in conn.execute(
+            "SELECT belief_id, json_extract(attributes_json, '$.key') AS attribute_key "
+            f"FROM current_beliefs WHERE belief_id IN ({placeholders})",
+            ids,
+        )
+    }
+    vectors = _packet_embeddings(conn, ids)
+    found: list[dict[str, Any]] = []
+    for index, left in enumerate(ids):
+        for right in ids[index + 1 :]:
+            left_key = keys.get(left) or ""
+            if left_key and left_key == (keys.get(right) or ""):
+                reason = "duplicate_key"
+            elif (
+                left in vectors
+                and right in vectors
+                and _cosine(vectors[left], vectors[right]) >= ADVISORY_COSINE_THRESHOLD
+            ):
+                reason = "embedding_similarity"
+            else:
+                continue
+            found.append(
+                {
+                    "belief_id": left,
+                    "other_belief_id": right,
+                    "reason": reason,
+                    "advisory": True,
+                    "evidence_ids": list(
+                        dict.fromkeys([*evidence.get(left, []), *evidence.get(right, [])])
+                    )[:8],
+                }
+            )
+    return found
+
+
+def _packet_embeddings(
+    conn: sqlite3.Connection, belief_ids: list[str]
+) -> dict[str, list[float]]:
+    """Stored belief vectors for one packet, or nothing at all.
+
+    Reads the sidecar directly and never embeds anything, so this makes no
+    network call and cannot be the reason a retrieval is slow. Every failure
+    path returns an empty mapping: the advisory pass is a hint, and a hint that
+    can break a read is worse than no hint.
+    """
+    core_path = connection_path(conn)
+    if core_path is None:
+        return {}
+    path = vector_db_path(core_path)
+    if not path.is_file():
+        return {}
+    try:
+        sidecar = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        sidecar.row_factory = sqlite3.Row
+        meta = {str(row[0]): str(row[1]) for row in sidecar.execute("SELECT key, value FROM meta")}
+        if meta.get("schema_version") != VECTOR_SCHEMA_VERSION:
+            return {}
+        placeholders = ",".join("?" for _ in belief_ids)
+        vectors: dict[str, list[float]] = {}
+        for row in sidecar.execute(
+            f"SELECT belief_id, vector FROM belief_vectors WHERE belief_id IN ({placeholders})",
+            belief_ids,
+        ):
+            vector = decode_embedding(row["vector"])
+            if vector:
+                vectors[str(row["belief_id"])] = vector
+        return vectors
+    except (OSError, sqlite3.Error, ValueError):
+        return {}
+    finally:
+        sidecar.close()
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
 
 
 def prepare_retrieval_packet_v1(

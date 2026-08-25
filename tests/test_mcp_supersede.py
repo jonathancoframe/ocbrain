@@ -11,6 +11,8 @@ proposal an admin decides, and the proposal itself *is* the pending correction.
 from __future__ import annotations
 
 import json
+import sqlite3
+from array import array
 from pathlib import Path
 
 import pytest
@@ -582,6 +584,113 @@ def test_get_rejects_an_unknown_mode(tmp_path: Path) -> None:
     old = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
     response = _call(conn, "brain.get", {"id": old, "context": CONTEXT, "mode": "whatever"})
     assert "mode must be one of" in response["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Serve-time contradictions
+# --------------------------------------------------------------------------- #
+def test_context_flags_two_beliefs_claiming_the_same_key(tmp_path: Path) -> None:
+    """The key is a fact's identity; two of them in one packet is two answers."""
+    conn = _core(tmp_path)
+    _seed(
+        conn,
+        belief_id="belief:one",
+        body="The research VM is reached with ssh asa1 over the office VPN.",
+        attributes={"key": "vm-access"},
+    )
+    _seed(
+        conn,
+        belief_id="belief:two",
+        body="Research VM connections use the asa2 alias configured in ssh config.",
+        attributes={"key": "vm-access"},
+    )
+
+    packet = _payload(
+        _call(conn, "brain.context", {"query": "research VM ssh access", "context": CONTEXT})
+    )
+
+    duplicates = [
+        conflict for conflict in packet["contradictions"] if conflict["reason"] == "duplicate_key"
+    ]
+    assert duplicates, packet["contradictions"]
+    assert {duplicates[0]["belief_id"], duplicates[0]["other_belief_id"]} == {
+        "belief:one",
+        "belief:two",
+    }
+    assert duplicates[0]["advisory"] is True
+
+
+def test_context_flags_a_near_duplicate_pair_from_the_vector_sidecar(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    _seed(conn, belief_id="belief:one", body="The research VM is reached with ssh asa1.")
+    _seed(conn, belief_id="belief:two", body="Reach the research VM by running ssh asa1.")
+    _write_sidecar(
+        tmp_path / "core-vectors.sqlite",
+        {
+            "belief:one": [1.0, 0.0, 0.0],
+            # cos = 0.9578, above the 0.90 advisory threshold.
+            "belief:two": [0.96, 0.28, 0.0],
+        },
+    )
+
+    packet = _payload(
+        _call(conn, "brain.context", {"query": "research VM ssh access", "context": CONTEXT})
+    )
+
+    pairs = [
+        conflict
+        for conflict in packet["contradictions"]
+        if conflict["reason"] == "embedding_similarity"
+    ]
+    assert pairs, packet["contradictions"]
+    assert {pairs[0]["belief_id"], pairs[0]["other_belief_id"]} == {"belief:one", "belief:two"}
+
+
+def test_the_advisory_pass_stands_down_without_a_sidecar(tmp_path: Path) -> None:
+    """An optional index must never be able to break a retrieval."""
+    conn = _core(tmp_path)
+    _seed(conn, belief_id="belief:one", body="The research VM is reached with ssh asa1.")
+    _seed(conn, belief_id="belief:two", body="Reach the research VM by running ssh asa1.")
+    assert not (tmp_path / "core-vectors.sqlite").exists()
+
+    packet = _payload(
+        _call(conn, "brain.context", {"query": "research VM ssh access", "context": CONTEXT})
+    )
+
+    assert packet["contradictions"] == []
+
+
+def _write_sidecar(path: Path, vectors: dict[str, list[float]]) -> None:
+    """A minimal read-compatible vector sidecar. No embedding endpoint involved."""
+    sidecar = sqlite3.connect(path)
+    sidecar.executescript(
+        """
+        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE belief_vectors(
+          belief_id TEXT PRIMARY KEY,
+          content_hash TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          vector BLOB NOT NULL,
+          scope_type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          visibility TEXT NOT NULL,
+          egress_policy TEXT NOT NULL,
+          last_compiled_at TEXT NOT NULL
+        );
+        """
+    )
+    sidecar.execute(
+        "INSERT INTO meta VALUES ('schema_version', 'ocbrain.vectors.v2')",
+    )
+    for belief_id, values in vectors.items():
+        sidecar.execute(
+            "INSERT INTO belief_vectors VALUES (?, '', 'test', ?, ?, 'project', "
+            "'project:bountiful', 'internal', 'local_only', '2026-08-25T00:00:00+00:00')",
+            (belief_id, len(values), array("f", values).tobytes()),
+        )
+    sidecar.commit()
+    sidecar.close()
 
 
 @pytest.mark.parametrize("missing", ["target", "body", "reason"])
