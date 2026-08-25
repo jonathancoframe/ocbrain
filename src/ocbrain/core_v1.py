@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ocbrain.history_window import is_body_ref
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
 from ocbrain.provenance import EMPTY_PROVENANCE, Provenance
@@ -158,7 +159,11 @@ END;
 
 CREATE TABLE IF NOT EXISTS evidence_objects (
   evidence_id TEXT PRIMARY KEY,
+  -- Empty for a pointer row: the text lives in the file named by
+  -- metadata_json's body_ref, and `body_head` holds the recorded excerpt.
+  -- See ocbrain.history_window.
   body TEXT NOT NULL,
+  body_head TEXT,
   kind TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   source_content_hash TEXT,
@@ -477,6 +482,7 @@ def set_automatic_activation(conn: sqlite3.Connection, enabled: bool) -> None:
 # nullable only: no rewrite, no backfill, and an older binary reading a
 # migrated core simply ignores them.
 _ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("evidence_objects", "body_head", "TEXT"),
     ("retrieval_uses", "server_connection_id", "TEXT"),
     ("retrieval_uses", "client_session_hint", "TEXT"),
     ("retrieval_uses", "client_runtime_key", "TEXT"),
@@ -863,13 +869,25 @@ def _project_recorded_evidence(
     text = str(body.get("body") or "")
     scope = _scope_dict(body.get("scope"))
     evidence_id = str(body.get("evidence_id") or stable_id("evd", text))
+    # A pointer event carries no text. Its content hash is the hash of the
+    # window the pointer names, not of the empty string -- otherwise every
+    # pointer row would share one hash and the collision check below would
+    # stop meaning anything. Both values ride the event body, so a replay of
+    # an old and a new event produces the same rows either way.
+    body_ref = body.get("body_ref") if is_body_ref(body.get("body_ref")) else None
+    body_head = body.get("body_head")
     _upsert_evidence_object(
         conn,
         evidence_id=evidence_id,
         body=text,
+        body_head=str(body_head) if isinstance(body_head, str) else None,
         kind=str(body.get("kind") or "observation"),
-        content_hash=sha256_text(text),
-        source_content_hash=None,
+        content_hash=(
+            str(body_ref["window_sha256"]) if body_ref is not None else sha256_text(text)
+        ),
+        source_content_hash=(
+            str(body_ref["window_input_sha256"]) if body_ref is not None else None
+        ),
         source_type="event",
         source_runtime=event["writer"],
         source_uri=body.get("artifact_ref"),
@@ -890,10 +908,18 @@ def _project_recorded_evidence(
 
 
 def _metadata_event_body(body: dict[str, Any]) -> dict[str, Any]:
-    """The event body as projected metadata, without the duplicated text."""
-    slimmed = {key: value for key, value in body.items() if key != "body"}
+    """The event body as projected metadata, without any duplicated text.
+
+    ``body_head`` is dropped for the same reason ``body`` is: it has its own
+    column on this row. Two kilobytes per transcript, kept twice, is the whole
+    saving of the pointer given back.
+    """
+    duplicated = {"body", "body_head"}
+    slimmed = {key: value for key, value in body.items() if key not in duplicated}
     if "body" in body:
         slimmed["body_omitted"] = "see evidence_objects.body / brain_events.body_json"
+    if "body_head" in body:
+        slimmed["body_head_omitted"] = "see evidence_objects.body_head"
     return slimmed
 
 
@@ -1359,6 +1385,7 @@ def _upsert_evidence_object(
     evidence_id: str,
     body: str,
     kind: str,
+    body_head: str | None = None,
     content_hash: str,
     source_content_hash: str | None,
     source_type: str | None,
@@ -1386,13 +1413,14 @@ def _upsert_evidence_object(
     conn.execute(
         """
         INSERT INTO evidence_objects(
-          evidence_id, body, kind, content_hash, source_content_hash,
+          evidence_id, body, body_head, kind, content_hash, source_content_hash,
           source_type, source_runtime,
           source_uri, artifact_uri, artifact_hash, verifier_status, occurred_at,
           recorded_at, scope_type, scope_id, visibility, egress_policy,
           scope_provenance, metadata_json, recorded_event_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(evidence_id) DO UPDATE SET
+          body_head=COALESCE(excluded.body_head, evidence_objects.body_head),
           source_type=COALESCE(excluded.source_type, evidence_objects.source_type),
           source_runtime=COALESCE(excluded.source_runtime, evidence_objects.source_runtime),
           source_uri=COALESCE(excluded.source_uri, evidence_objects.source_uri),
@@ -1414,6 +1442,7 @@ def _upsert_evidence_object(
         (
             evidence_id,
             body,
+            body_head,
             kind,
             content_hash,
             source_content_hash,
@@ -1646,6 +1675,31 @@ def get_core_v1_belief(conn: sqlite3.Connection, object_id: str) -> dict[str, An
     result["evidence_ids"] = _json_list(row["evidence_ids"])
     result["attributes"] = json.loads(row["attributes_json"] or "{}")
     return result
+
+
+def evidence_body_ref(source: Any) -> dict[str, Any] | None:
+    """The body pointer on an evidence row, or ``None`` for an inline body.
+
+    Accepts either a raw ``evidence_objects`` row or the dict
+    :func:`get_core_v1_evidence` returns, because both are handed around and a
+    caller should not have to know which one it holds.
+    """
+    if isinstance(source, dict) and "metadata" in source:
+        metadata = source.get("metadata")
+    else:
+        try:
+            raw = source["metadata_json"]
+        except (KeyError, IndexError, TypeError):
+            return None
+        try:
+            metadata = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    event_body = metadata.get("event_body")
+    ref = event_body.get("body_ref") if isinstance(event_body, dict) else None
+    return ref if is_body_ref(ref) else None
 
 
 def get_core_v1_evidence(conn: sqlite3.Connection, evidence_id: str) -> dict[str, Any] | None:
@@ -2012,20 +2066,43 @@ def record_core_v1_evidence(
     writer: str,
     session_id: str | None = None,
     artifact_ref: str | None = None,
+    body_ref: dict[str, Any] | None = None,
+    body_head: str | None = None,
+    identity_body: str | None = None,
 ) -> tuple[str, str]:
-    evidence_id = stable_id("evd", body, kind, artifact_ref or "", scope.scope_id)
+    """Append an ``evidence_recorded`` event, inline or as a pointer.
+
+    A pointer passes ``body=""`` with a ``body_ref`` naming the file the text
+    can be rebuilt from and a ``body_head`` excerpt of it. ``identity_body`` is
+    then the text the evidence id is derived from, so the id stays exactly what
+    it would have been with the text stored inline: the same window is the same
+    evidence, a re-windowed transcript is new evidence, and no existing id
+    moves. Everything the projection needs rides the event body, so replaying
+    an old inline event and a new pointer event both land the right row.
+    """
+    evidence_id = stable_id(
+        "evd",
+        body if identity_body is None else identity_body,
+        kind,
+        artifact_ref or "",
+        scope.scope_id,
+    )
+    event_body: dict[str, Any] = {
+        "schema_version": CORE_V1_EVENT_SCHEMA,
+        "subject": {"kind": "evidence", "id": evidence_id},
+        "evidence_id": evidence_id,
+        "kind": kind,
+        "body": body,
+        "artifact_ref": artifact_ref,
+        "scope": scope.to_dict(),
+    }
+    if body_ref is not None:
+        event_body["body_ref"] = body_ref
+        event_body["body_head"] = body_head or ""
     event_id = append_core_event(
         conn,
         "evidence_recorded",
-        {
-            "schema_version": CORE_V1_EVENT_SCHEMA,
-            "subject": {"kind": "evidence", "id": evidence_id},
-            "evidence_id": evidence_id,
-            "kind": kind,
-            "body": body,
-            "artifact_ref": artifact_ref,
-            "scope": scope.to_dict(),
-        },
+        event_body,
         writer=writer,
         session_id=session_id,
         project=True,
@@ -2402,6 +2479,7 @@ __all__ = [
     "compilation_block_reason",
     "conservative_legacy_scope",
     "core_v1_table_names",
+    "evidence_body_ref",
     "get_core_v1_belief",
     "get_core_v1_evidence",
     "init_core_v1",

@@ -19,6 +19,7 @@ from ocbrain.core_v1 import (
     CORE_V1_EVENT_SCHEMA,
     append_core_event,
     canonical_json,
+    evidence_body_ref,
     is_core_v1,
     project_core_v1,
     sha256_text,
@@ -263,7 +264,13 @@ def _export_items(
         if scope.egress_policy == "approval_required" and not approve_egress:
             refused.append({"evidence_id": evidence_id, "reason": "approval_required"})
             continue
-        raw_body = str(row["body"])
+        # A pointer row's text is a window of a file on this machine, which the
+        # recipient of a bundle cannot read. Export the head excerpt the row
+        # actually holds, and say that is what it is -- the empty `body` would
+        # otherwise trip the size guard and drop the row from the export with a
+        # reason ("invalid_body_size") that describes nothing that is wrong.
+        pointer = evidence_body_ref(row) is not None
+        raw_body = str(row["body"]) or (str(row["body_head"] or "") if pointer else "")
         if not raw_body.strip() or len(raw_body) > MAX_ITEM_BODY_CHARS:
             refused.append({"evidence_id": evidence_id, "reason": "invalid_body_size"})
             continue
@@ -288,6 +295,10 @@ def _export_items(
                 "reason": (
                     "approved_export" if scope.egress_policy == "approval_required" else reason
                 ),
+                # Recorded in the local audit rather than in the item: the
+                # bundle item schema is a hash-verified interchange contract and
+                # is not widened for a detail only the exporting side can act on.
+                "body_storage": "pointer_head_excerpt" if pointer else "inline",
             }
         )
     if refused:

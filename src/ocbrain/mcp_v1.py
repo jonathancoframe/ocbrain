@@ -20,6 +20,7 @@ from ocbrain.core_v1 import (
     automatic_activation_enabled,
     canonical_json,
     compilation_block_reason,
+    evidence_body_ref,
     get_core_v1_belief,
     get_core_v1_evidence,
     is_core_v1,
@@ -32,6 +33,7 @@ from ocbrain.core_v1 import (
 )
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
 from ocbrain.events import SKILL_TELEMETRY_KINDS, validate_skill_telemetry
+from ocbrain.history_window import rehydrate_history_window
 from ocbrain.ids import stable_id
 from ocbrain.provenance import Provenance
 from ocbrain.scope import (
@@ -357,7 +359,33 @@ def expand_source_v1(
         ).fetchone()
         if linked is None:
             raise PermissionError("issued evidence is no longer current support for this belief")
-        content = str(source["body"])
+        body_ref = evidence_body_ref(source)
+        if body_ref is not None:
+            rehydrated = rehydrate_history_window(body_ref)
+            if not rehydrated.available:
+                # A transcript that has grown, rotated, or been deleted is a
+                # normal outcome, not an error: 12.4% of recorded source URIs
+                # already dangle. Say so in the result, with the reason and the
+                # head excerpt that *was* recorded, rather than raising a tool
+                # error that tells the caller nothing.
+                return _source_payload(
+                    conn,
+                    row,
+                    scope=scope,
+                    locator=locator,
+                    delivery_target=delivery_target,
+                    source_id=source_id,
+                    content="",
+                    max_chars=max_chars,
+                    hash_verified=False,
+                    content_availability="content_unavailable",
+                    unavailable_reason=rehydrated.reason,
+                    body_ref=body_ref,
+                    recorded_head_excerpt=str(source.get("body_head") or ""),
+                )
+            content = rehydrated.text
+        else:
+            content = str(source["body"])
     elif row["source_kind"] == "core_v1_belief":
         source = get_core_v1_belief(conn, str(locator["belief_id"]))
         if source is None:
@@ -376,6 +404,37 @@ def expand_source_v1(
     actual_hash = sha256_text(content)
     if actual_hash != row["content_hash"]:
         raise ValueError("source changed after issuance; request a fresh brain.context handle")
+    return _source_payload(
+        conn,
+        row,
+        scope=scope,
+        locator=locator,
+        delivery_target=delivery_target,
+        source_id=source_id,
+        content=content,
+        max_chars=max_chars,
+        hash_verified=True,
+        content_availability="available",
+    )
+
+
+def _source_payload(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    scope: ScopeTag,
+    locator: dict[str, Any],
+    delivery_target: str,
+    source_id: str,
+    content: str,
+    max_chars: int,
+    hash_verified: bool,
+    content_availability: str,
+    unavailable_reason: str | None = None,
+    body_ref: dict[str, Any] | None = None,
+    recorded_head_excerpt: str | None = None,
+) -> dict[str, Any]:
+    """One shape for both outcomes, so a caller never has to branch on absence."""
     excerpt, truncated = _bounded_excerpt(content, max_chars=max_chars)
     issued_by_count = int(
         conn.execute(
@@ -397,7 +456,7 @@ def expand_source_v1(
             uri = f"ocbrain://evidence/{locator['evidence_id']}"
         else:
             uri = f"ocbrain://belief/{locator['belief_id']}"
-    return {
+    payload: dict[str, Any] = {
         "schema_version": SOURCE_SCHEMA_VERSION,
         "core_schema": CORE_V1_SCHEMA_VERSION,
         "delivery_target": delivery_target,
@@ -407,7 +466,8 @@ def expand_source_v1(
         "uri": uri,
         "scope": scope.to_dict(),
         "content_hash": str(row["content_hash"]),
-        "hash_verified": True,
+        "hash_verified": hash_verified,
+        "content_availability": content_availability,
         "content": excerpt,
         "truncated": truncated,
         "characters": len(excerpt),
@@ -416,6 +476,19 @@ def expand_source_v1(
         "issued_by_count": issued_by_count,
         "issued_by_retrieval_use_ids": issued_by,
     }
+    if body_ref is not None:
+        payload["body_storage"] = "pointer"
+        payload["unavailable_reason"] = unavailable_reason
+        payload["source_uri"] = str(body_ref.get("source_uri") or "")
+        payload["source_bytes_at_import"] = body_ref.get("source_bytes")
+        # Recorded at import and carried in the hash-chained ledger, so it is
+        # verified as *what was written down* -- just not against whatever the
+        # file says now. Labelled that way rather than passed off as content.
+        payload["recorded_head_excerpt"] = recorded_head_excerpt or ""
+        payload["recorded_head_excerpt_note"] = (
+            "head recorded at import; not verified against the current source file"
+        )
+    return payload
 
 
 EXACT_MATCH_LIMIT = 8
@@ -1571,7 +1644,14 @@ def _source_handles_for_belief(
         )
         if not allowed:
             continue
-        content = str(row["body"])
+        # A pointer row has no inline body; the hash of the content it will
+        # actually serve is the window hash already stored on the row. Hashing
+        # the empty body instead would issue a handle that can never verify.
+        content_hash = (
+            str(row["content_hash"])
+            if evidence_body_ref(row) is not None
+            else sha256_text(str(row["body"]))
+        )
         handles.append(
             _make_source_handle(
                 object_id=canonical_id,
@@ -1583,7 +1663,7 @@ def _source_handles_for_belief(
                     or row["artifact_uri"]
                     or f"ocbrain://evidence/{row['evidence_id']}"
                 ),
-                content_hash=sha256_text(content),
+                content_hash=content_hash,
                 scope=scope,
                 locator={"evidence_id": str(row["evidence_id"])},
             )

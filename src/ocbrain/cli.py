@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import mmap
-import re
 import sys
 from collections.abc import Callable
 from importlib.metadata import entry_points
@@ -83,6 +81,12 @@ from ocbrain.events import (
     validate_skill_telemetry,
 )
 from ocbrain.fsutil import file_fingerprint, history_runtime
+from ocbrain.history_window import (
+    _PRIVATE_KEY_BEGIN_RE,
+    HistoryWindow,
+    build_history_window,
+    history_text_window,
+)
 from ocbrain.hybrid import build_vector_index, vector_status
 from ocbrain.hygiene import CLASSES as HYGIENE_CLASSES
 from ocbrain.hygiene import (
@@ -3115,8 +3119,6 @@ SENSITIVE_HISTORY_FILENAMES = frozenset(
         "keychain.json",
     }
 )
-_PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-_PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 
 
 def is_sensitive_history_file(path: Path) -> bool:
@@ -3308,11 +3310,14 @@ def import_history_file_v1(
     if path.stat().st_size == 0:
         return None
     runtime = history_runtime(path)
-    text = history_text_window(path, max_bytes=max_bytes)
+    # Transcript windows are the one kind of evidence stored by reference: they
+    # were 99.13% of all evidence body bytes and 82.4% of the ledger, and the
+    # file they came from is still on disk. Everything else stays inline.
+    window = build_history_window(path, max_bytes=max_bytes, source_uri=str(path.resolve()))
     return import_source_v1(
         conn,
         path=path,
-        text=text,
+        text=window.text,
         title=history_title(path, runtime),
         source_type=f"{runtime}_history_file",
         runtime=runtime,
@@ -3320,6 +3325,7 @@ def import_history_file_v1(
         privacy_scope=privacy_scope,
         confidence=0.55,
         activate=activate,
+        window=window,
     )
 
 
@@ -3335,17 +3341,30 @@ def import_source_v1(
     privacy_scope: str,
     confidence: float,
     activate: bool = True,
+    window: HistoryWindow | None = None,
 ) -> dict[str, object]:
+    """Record one local file as evidence, and compile it into one belief.
+
+    ``window`` marks the source as a transcript stored by reference. The
+    evidence id is still derived from the full window text, so identity is
+    exactly what it was when the text was stored inline; only where the text
+    lives changes. The *belief* body then carries the recorded head rather than
+    the whole window -- not a size optimization but a correctness one: a
+    re-windowed transcript must compare unchanged, and it cannot do that
+    against a body the store no longer has.
+    """
     source_uri = str(path.resolve())
     scope = scope_for_privacy(project, privacy_scope)
     evidence_id = stable_id("evd", text, source_type, source_uri, scope.scope_id)
     evidence_event_id = None
+    summary_text = window.head if window is not None else text
     # A transcript is imported as a head plus a sliding tail, so every append
     # mints a new content-addressed id for the same session. When the head is
-    # byte-identical, adopt the stored window wholesale -- id *and* body -- so
-    # the belief compares unchanged too and the import is a true no-op. Reusing
-    # only the id would still re-propose the belief on every harvest, which
-    # appends the transcript to the ledger a second time. See ocbrain.deslop.
+    # byte-identical, adopt the stored row wholesale -- id *and* summary text --
+    # so the belief compares unchanged too and the import is a true no-op.
+    # Reusing only the id would still re-propose the belief on every harvest,
+    # which appends the transcript to the ledger a second time. See
+    # ocbrain.deslop.
     known = get_core_v1_evidence(conn, evidence_id) is not None
     if not known and (
         rewindowed := rewindowed_evidence_id(
@@ -3354,20 +3373,27 @@ def import_source_v1(
     ):
         stored = get_core_v1_evidence(conn, rewindowed) or {}
         evidence_id = rewindowed
-        text = str(stored.get("body") or text)
+        summary_text = (
+            str(stored.get("body_head") or stored.get("body") or summary_text)
+            if window is not None
+            else str(stored.get("body") or summary_text)
+        )
         known = True
     if not known:
         evidence_id, evidence_event_id = record_core_v1_evidence(
             conn,
-            body=text,
+            body="" if window is not None else text,
             kind=source_type,
             scope=scope,
             writer=f"ocbrain-import:{runtime}",
             artifact_ref=source_uri,
+            body_ref=window.body_ref if window is not None else None,
+            body_head=window.head if window is not None else None,
+            identity_body=text if window is not None else None,
         )
 
     belief_id = stable_id("belief", "source", source_type, source_uri)
-    belief_body = f"{title}\n\n{text}".strip()
+    belief_body = f"{title}\n\n{summary_text}".strip()
     existing = get_core_v1_belief(conn, belief_id)
     unchanged = bool(
         existing
@@ -3634,106 +3660,6 @@ def current_history_fingerprints(conn) -> dict[tuple[str, str], str]:
             """
         )
     }
-
-
-def _iter_redacted_lines(lines, *, in_private_key: bool = False):
-    for raw_line in lines:
-        remaining = raw_line
-        while remaining:
-            if in_private_key:
-                end = _PRIVATE_KEY_END_RE.search(remaining)
-                if end is None:
-                    break
-                remaining = remaining[end.end() :]
-                in_private_key = False
-                continue
-
-            begin = _PRIVATE_KEY_BEGIN_RE.search(remaining)
-            if begin is None:
-                yield redact_secrets(remaining)
-                break
-
-            prefix = remaining[: begin.start()]
-            if prefix:
-                yield redact_secrets(prefix)
-            yield "[REDACTED_PRIVATE_KEY]"
-            remaining = remaining[begin.end() :]
-            in_private_key = True
-
-
-def iter_redacted_history(path: Path):
-    """Yield redacted history text without loading the whole file at once."""
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        yield from _iter_redacted_lines(handle)
-
-
-def _private_key_state_at(handle, offset: int) -> bool:
-    """Return whether ``offset`` lies inside a PEM private-key block."""
-    if offset <= 0:
-        return False
-    with mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ) as mapped:
-        state = False
-        cursor = 0
-        needle = b"PRIVATE KEY-----"
-        while True:
-            found = mapped.find(needle, cursor, offset)
-            if found < 0:
-                return state
-            prefix = mapped[max(0, found - 80) : found]
-            begin = prefix.rfind(b"-----BEGIN ")
-            end = prefix.rfind(b"-----END ")
-            if begin >= 0 and begin > end:
-                state = True
-            elif end >= 0:
-                state = False
-            cursor = found + len(needle)
-
-
-def _redact_history_fragment(raw: bytes, *, in_private_key: bool = False) -> bytes:
-    text = raw.decode("utf-8", errors="replace")
-    redacted = "".join(
-        _iter_redacted_lines(text.splitlines(keepends=True), in_private_key=in_private_key)
-    )
-    return redacted.encode("utf-8", errors="replace")
-
-
-def history_text_window(path: Path, *, max_bytes: int) -> str:
-    if max_bytes <= 0:
-        return ""
-    head_len = max_bytes // 2
-    tail_len = max_bytes - head_len
-    source_bytes = path.stat().st_size
-    sample_span = max(max_bytes * 4, 65_536)
-
-    if source_bytes <= sample_span:
-        complete = "".join(iter_redacted_history(path)).encode("utf-8", errors="replace")
-        if len(complete) <= max_bytes:
-            return complete.decode("utf-8", errors="replace")
-        marker = f"\n\n[... {len(complete) - max_bytes} bytes omitted from middle ...]\n\n".encode()
-        return (complete[:head_len] + marker + complete[-tail_len:]).decode(
-            "utf-8", errors="replace"
-        )
-
-    with path.open("rb") as handle:
-        head_raw = handle.read(sample_span)
-        # Drop a partially sampled history record; a credential could cross
-        # that arbitrary byte boundary and evade pattern-based redaction.
-        newline = head_raw.rfind(b"\n")
-        head_raw = head_raw[: newline + 1] if newline >= 0 else b""
-
-        tail_offset = max(source_bytes - sample_span, 0)
-        tail_private = _private_key_state_at(handle, tail_offset)
-        handle.seek(tail_offset)
-        tail_raw = handle.read()
-        newline = tail_raw.find(b"\n")
-        if tail_offset:
-            tail_raw = tail_raw[newline + 1 :] if newline >= 0 else b""
-
-    head = _redact_history_fragment(head_raw)[:head_len]
-    tail = _redact_history_fragment(tail_raw, in_private_key=tail_private)[-tail_len:]
-    omitted = max(source_bytes - len(head_raw) - len(tail_raw), 0)
-    marker = f"\n\n[... {omitted} source bytes omitted from middle ...]\n\n".encode()
-    return (head + marker + tail).decode("utf-8", errors="replace")
 
 
 def history_title(path: Path, runtime: str) -> str:
