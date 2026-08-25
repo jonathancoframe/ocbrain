@@ -19,14 +19,12 @@ from ocbrain.core_ops import (
 )
 from ocbrain.core_v1 import (
     append_core_event,
-    automatic_activation_enabled,
     get_core_v1_belief,
     get_core_v1_evidence,
     init_core_v1,
     is_core_v1,
     migrate_core_v1_columns,
     record_core_v1_evidence,
-    set_automatic_activation,
 )
 from ocbrain.curation import apply_curated_manifest
 from ocbrain.curator import PROVIDER_DEFAULTS
@@ -598,23 +596,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument("--active-db-file", type=Path, help=argparse.SUPPRESS)
     mcp_parser.set_defaults(func=cmd_mcp)
-    automatic_activation_parser = commands.add_parser(
-        "automatic-activation",
-        help="Show or set unattended evidence/closeout to belief promotion",
-    )
-    automatic_activation_group = automatic_activation_parser.add_mutually_exclusive_group()
-    automatic_activation_group.add_argument(
-        "--enable",
-        action="store_true",
-        help="auto-promote ingested evidence and closeouts into served beliefs",
-    )
-    automatic_activation_group.add_argument(
-        "--disable",
-        action="store_true",
-        help="keep promotion human-gated (the default)",
-    )
-    automatic_activation_parser.set_defaults(func=cmd_automatic_activation)
-
     # Public-safety enforcement lives in core, not an optional companion: it is
     # the gate that keeps private paths and secrets out of this public repo, and
     # CI runs it on every push. A guard nobody has installed is not a guard.
@@ -2925,22 +2906,6 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         active_db_file=getattr(args, "active_db_file", None),
         delivery_target=normalize_delivery_target(selected or None),
     )
-
-
-def cmd_automatic_activation(args: argparse.Namespace) -> int:
-    conn = open_db(args)
-    if not is_core_v1(conn):
-        raise SystemExit("automatic-activation requires an OCBrain v1 core")
-    if args.enable or args.disable:
-        set_automatic_activation(conn, bool(args.enable))
-        conn.commit()
-    output(args, {"automatic_activation": automatic_activation_enabled(conn)})
-    return 0
-
-
-# --------------------------------------------------------------------------- #
-# v0.2 autonomy + dataset factory commands (spec §8)
-# --------------------------------------------------------------------------- #
 def _resolve_repo_root(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit

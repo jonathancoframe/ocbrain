@@ -454,28 +454,6 @@ def is_core_v1(conn: sqlite3.Connection) -> bool:
     return version is not None and str(version[0]) == CORE_V1_SCHEMA_VERSION
 
 
-def automatic_activation_enabled(conn: sqlite3.Connection) -> bool:
-    """Return true when this core auto-promotes runtime writes into beliefs.
-
-    Off by default: the published contract keeps promotion a human-gated
-    curation step. An operator opts a local core into unattended compilation by
-    setting the ``automatic_activation`` flag, which the ingest and closeout
-    paths consult before promoting.
-    """
-    row = conn.execute(
-        "SELECT value FROM schema_meta WHERE key='automatic_activation'"
-    ).fetchone()
-    return row is not None and str(row[0]).strip().lower() == "true"
-
-
-def set_automatic_activation(conn: sqlite3.Connection, enabled: bool) -> None:
-    """Persist the automatic-activation flag for this core."""
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('automatic_activation', ?)",
-        ("true" if enabled else "false",),
-    )
-
-
 # Columns added to a v1 core after the first release. CORE_V1_SCHEMA uses
 # CREATE TABLE IF NOT EXISTS throughout, so an already-initialized core keeps
 # its original columns forever unless they are added explicitly. Additive and
@@ -557,7 +535,6 @@ def init_core_v1(conn: sqlite3.Connection) -> None:
         (
             ("core_schema", CORE_V1_SCHEMA_VERSION),
             ("semantic_authority", "brain_events"),
-            ("automatic_activation", "false"),
         ),
     )
     conn.execute(f"PRAGMA application_id={CORE_V1_APPLICATION_ID}")

@@ -509,18 +509,17 @@ def test_cli_hygiene_reports_then_applies(tmp_path: Path, capsys) -> None:
     assert json.loads(capsys.readouterr().out)["feedback_watermark"]
 
 
-def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: Path) -> None:
+def test_closeout_records_evidence_but_promotes_nothing(tmp_path: Path) -> None:
     """Recording evidence is not promotion, and must not be gated with it.
 
-    Both used to sit behind automatic_activation, so turning that flag off to stop
-    unattended promotion also stopped closeout summaries becoming evidence --
-    silently removing the largest supply of curator-eligible evidence.
+    Both used to sit behind the automatic_activation flag, so turning that flag
+    off to stop unattended promotion also stopped closeout summaries becoming
+    evidence -- silently removing the largest supply of curator-eligible
+    evidence. The flag is gone; the separation it broke is what this pins.
     """
-    from ocbrain.core_v1 import automatic_activation_enabled
     from ocbrain.mcp_v1 import closeout_v1
 
     conn = _core(tmp_path)
-    assert automatic_activation_enabled(conn) is False
     receipt = closeout_v1(
         conn,
         task_ref="task-with-activation-off",
@@ -547,8 +546,7 @@ def test_closeout_records_evidence_even_with_automatic_activation_off(tmp_path: 
     ).fetchone()
     assert row["kind"] == "task_closeout_summary"
     assert row["scope_id"] == "project:bountiful"
-    # But nothing was promoted, because that half is still gated.
-    assert "auto_compiled_belief_id" not in receipt
+    # But nothing was promoted: compilation stays a human-gated curation step.
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM current_beliefs WHERE serve=1 AND status='current'"

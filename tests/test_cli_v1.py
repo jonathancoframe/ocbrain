@@ -36,7 +36,6 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         "init",
         "status",
         "sync",
-        "automatic-activation",
         "evidence",
         "knowledge",
         "value",
@@ -176,9 +175,6 @@ def test_fresh_v1_operational_cli_routes(tmp_path, capsys, monkeypatch) -> None:
     )
     assert mcp_calls == [(db, False, "runtime", None, "hosted_model")]
 
-    assert _run(capsys, db, ["automatic-activation"])["automatic_activation"] is False
-    assert _run(capsys, db, ["automatic-activation", "--enable"])["automatic_activation"] is True
-    assert _run(capsys, db, ["automatic-activation", "--disable"])["automatic_activation"] is False
 
 
 def test_fresh_v1_cli_read_surfaces_and_event_lifecycle(tmp_path, capsys) -> None:
