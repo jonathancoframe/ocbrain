@@ -13,7 +13,7 @@ import ocbrain.curator
 from ocbrain.core_v1 import append_core_event, init_core_v1, record_core_v1_evidence
 from ocbrain.curator import ELIGIBLE_KINDS, select_evidence
 from ocbrain.db import connect
-from ocbrain.mcp_v1 import decide_proposal_v1
+from ocbrain.mcp_v1 import decide_proposal_v1, pending_supersede_count
 from ocbrain.scope import ScopeTag
 from ocbrain.wiki import current_wiki_beliefs
 
@@ -1163,16 +1163,22 @@ def test_rewording_a_doctrine_fact_does_not_demote_it(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_same_key_in_another_scope_updates_instead_of_minting(tmp_path: Path) -> None:
+def test_same_key_in_another_scope_never_mints_a_second_copy(tmp_path: Path) -> None:
     """A key already served anywhere names THE fact, whatever the wording.
 
     Restatement similarity is a heuristic and it missed on a live corpus: a
     coframe-scoped run reworded the doctrine-scoped asa2 fact below the
     threshold and minted a second serving copy of the same key, which wiki-lint
     then flagged as conflicting-key. Key equality is the identity test wiki-lint
-    already enforces corpus-wide, so minting must honor it too — and the update
-    must keep the belief at its existing scope rather than demoting doctrine to
-    the running project.
+    already enforces corpus-wide, so minting must honor it too.
+
+    What the collision *does* changed with the contradiction cascade. A key
+    collision carrying a different statement is a correction, and this target is
+    doctrine, which is never replaced unattended: the supersession is recorded
+    as a pending proposal and the doctrine fact keeps serving its own words
+    until an operator decides. What must not happen either way is a second
+    serving belief under the key, or doctrine quietly demoted to the running
+    project's scope.
     """
     from ocbrain.curator import apply_claims
 
@@ -1219,14 +1225,17 @@ def test_same_key_in_another_scope_updates_instead_of_minting(tmp_path: Path) ->
         project="coframe",
     )
 
-    assert second["applied"] == [doctrine_id]
+    assert second["applied"] == []
+    assert second["deferred"] == [doctrine_id]
     rows = conn.execute(
         "SELECT belief_id, scope_id, body FROM current_beliefs "
         "WHERE serve=1 AND json_extract(attributes_json,'$.key')='research-vm-live'"
     ).fetchall()
     assert len(rows) == 1
+    assert str(rows[0]["belief_id"]) == doctrine_id
     assert str(rows[0]["scope_id"]) == "global:doctrine"
-    assert "asa2 going forward" in str(rows[0]["body"])
+    assert "asa1 is terminated" in str(rows[0]["body"])
+    assert pending_supersede_count(conn) == 1
     conn.close()
 
 

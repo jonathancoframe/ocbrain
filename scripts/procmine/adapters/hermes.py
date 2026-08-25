@@ -26,7 +26,15 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..normalize import Trace, TraceEvent, arg_signature, error_fingerprint, result_class
+from ..normalize import (
+    Trace,
+    TraceEvent,
+    admit_token_edges,
+    arg_signature,
+    error_fingerprint,
+    provenance_tokens,
+    result_class,
+)
 
 _BAD = {"error", "refused", "timeout"}
 HERMES_PROFILES = Path(os.path.expanduser("~/.hermes/profiles"))
@@ -99,7 +107,8 @@ def _open_ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
-def iter_hermes_profile_traces(root: Path | None = None) -> Iterator[Trace]:
+def hermes_profile_stores(root: Path | None = None) -> list[tuple[str, Path]]:
+    """``(profile, state.db)`` for every store this adapter would read."""
     base = root or HERMES_PROFILES
     stores: list[tuple[str, Path]] = []
     if root is None and HERMES_DEFAULT_DB.exists():
@@ -110,15 +119,35 @@ def iter_hermes_profile_traces(root: Path | None = None) -> Iterator[Trace]:
             for profile_dir in sorted(p for p in base.iterdir() if p.is_dir())
             if (profile_dir / "state.db").exists()
         )
-    for profile, db_path in stores:
-        try:
-            conn = _open_ro(db_path)
-        except sqlite3.Error:
-            continue
-        try:
-            yield from _profile_traces(conn, profile, db_path)
-        finally:
-            conn.close()
+    return stores
+
+
+def hermes_profile_files(root: Path | None = None) -> list[Path]:
+    return [db_path for _profile, db_path in hermes_profile_stores(root)]
+
+
+def parse_hermes_profile_db(db_path: Path, profile: str | None = None) -> Iterator[Trace]:
+    """Traces from one ``state.db``. A store holds many sessions, not one.
+
+    ``profile`` is recovered from the path when not supplied, so the incremental
+    cache can call this with nothing but a file it fingerprinted.
+    """
+    if profile is None:
+        parent = db_path.parent
+        profile = "default" if parent == HERMES_DEFAULT_DB.parent else parent.name
+    try:
+        conn = _open_ro(db_path)
+    except sqlite3.Error:
+        return
+    try:
+        yield from _profile_traces(conn, profile, db_path)
+    finally:
+        conn.close()
+
+
+def iter_hermes_profile_traces(root: Path | None = None) -> Iterator[Trace]:
+    for profile, db_path in hermes_profile_stores(root):
+        yield from parse_hermes_profile_db(db_path, profile)
 
 
 def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> Iterator[Trace]:
@@ -137,6 +166,10 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
     pending: dict[str, tuple[str, str, str | None]] = {}
     pending_order: list[str] = []
     events: list[TraceEvent] = []
+    # Raw argument and result text, tokenized on sight and discarded. Only the
+    # token digest of an admitted edge survives into the trace.
+    pending_arg_tokens: dict[str, set[str]] = {}
+    edge_tokens: list[tuple[set[str], set[str]]] = []
 
     def flush() -> Trace | None:
         if current is None or not events:
@@ -150,6 +183,7 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
             ended_at=_iso(meta[2]) if meta else None,
             cwd=meta[3] if meta else None,
             events=list(events),
+            edges=admit_token_edges(list(edge_tokens)),
         )
 
     def drain_pending() -> None:
@@ -159,6 +193,7 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
             if entry is None:
                 continue
             name, signature, stamp = entry
+            edge_tokens.append((pending_arg_tokens.get(call_id, set()), set()))
             events.append(
                 TraceEvent(
                     step_index=len(events),
@@ -170,6 +205,7 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
             )
         pending.clear()
         pending_order.clear()
+        pending_arg_tokens.clear()
 
     for session_id, role, tool_calls, tool_name, content, timestamp, _row_id, call_id in rows:
         if session_id != current:
@@ -179,6 +215,7 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
                 yield trace
             current = session_id
             events = []
+            edge_tokens = []
         stamp = _iso(timestamp)
         if role == "assistant" and tool_calls:
             try:
@@ -198,6 +235,11 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
                         # compaction; keep both calls but keep the keys unique.
                         key = f"{key}#{len(pending_order)}"
                     pending[key] = (name, signature, stamp)
+                    pending_arg_tokens[key] = provenance_tokens(
+                        function.get("arguments")
+                        if isinstance(function.get("arguments"), str)
+                        else json.dumps(function.get("arguments"))
+                    )
                     pending_order.append(key)
         elif role == "tool":
             outcome = _result_from_tool_content(content)
@@ -206,10 +248,13 @@ def _profile_traces(conn: sqlite3.Connection, profile: str, db_path: Path) -> It
             if key is not None:
                 name, signature, stamp_at = pending.pop(key)
                 pending_order.remove(key)
+                consumed = pending_arg_tokens.pop(key, set())
             else:
                 name = tool_name or "unknown"
                 signature = f"tool:{name}"
                 stamp_at = stamp
+                consumed = set()
+            edge_tokens.append((consumed, provenance_tokens(content)))
             events.append(
                 TraceEvent(
                     step_index=len(events),
@@ -274,14 +319,25 @@ def parse_hermes_legacy_file(path: Path) -> Trace | None:
         ended_at=ended,
         cwd=None,
         events=events,
+        # The legacy export stored neither arguments nor raw results, so no edge
+        # here can ever be admitted on value provenance. Emitting them as
+        # `suspected` rather than omitting them keeps the distinction visible:
+        # the adjacency is real, the dependency claim is unavailable.
+        edges=admit_token_edges([(set(), set()) for _ in events]),
     )
 
 
-def iter_hermes_legacy_traces(root: Path | None = None) -> Iterator[Trace]:
+def hermes_legacy_files(root: Path | None = None) -> list[Path]:
     base = root or HERMES_LEGACY_EXPORT
-    if not base.exists():
-        return
-    for path in sorted(base.glob("*.jsonl")):
-        trace = parse_hermes_legacy_file(path)
-        if trace is not None:
-            yield trace
+    return sorted(base.glob("*.jsonl")) if base.exists() else []
+
+
+def parse_hermes_legacy_traces(path: Path) -> Iterator[Trace]:
+    trace = parse_hermes_legacy_file(path)
+    if trace is not None:
+        yield trace
+
+
+def iter_hermes_legacy_traces(root: Path | None = None) -> Iterator[Trace]:
+    for path in hermes_legacy_files(root):
+        yield from parse_hermes_legacy_traces(path)

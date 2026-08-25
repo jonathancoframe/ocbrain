@@ -292,8 +292,10 @@ _TRACE_FAMILY = {
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
 _WEAK_CONTEXT_TOKENS = {
-    "users", "jonathancoframe", "home", "documents", "coframe", "work", "repo",
+    "users", "home", "documents", "coframe", "work", "repo",
     "local", "macos", "codex", "hermes", "profiles", "sessions", "main", "root",
+    # See the note in dag._STOPWORDS: derived, not hardcoded.
+    os.path.basename(os.path.expanduser("~")).lower(),
 }
 
 

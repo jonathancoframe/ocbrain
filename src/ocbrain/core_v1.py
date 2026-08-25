@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ocbrain.closeout import normalize_task_ref
 from ocbrain.history_window import is_body_ref
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
@@ -37,6 +38,11 @@ from ocbrain.scope import (
 CORE_V1_APPLICATION_ID = 0x4F434231  # ASCII-ish "OCB1"
 CORE_V1_USER_VERSION = 10_000
 CORE_V1_SCHEMA_VERSION = "ocbrain.core.v1"
+
+# The one belief_type retrieval treats specially. Full procedure serving is not
+# shipped; this constant exists so degraded mode can refuse a procedure the day
+# one is minted, rather than the day someone remembers to add the guard.
+PROCEDURE_BELIEF_TYPE = "procedure"
 CORE_V1_EVENT_SCHEMA = "ocbrain.event.v1"
 HYBRID_RRF_K = 60
 # Qwen3's low positive tail is not evidence of topical relevance. Keep a
@@ -264,7 +270,10 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   server_connection_id TEXT,
   client_session_hint TEXT,
   client_runtime_key TEXT,
-  provenance_json TEXT
+  provenance_json TEXT,
+  -- The folded form of `task_ref` above, so a retrieval and the closeout that
+  -- links it agree on which task they belong to. NULL on historical rows.
+  task_ref_norm TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_outcome_served
   ON retrieval_uses(outcome, served_at);
@@ -345,10 +354,19 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   -- legacy model-supplied string. See ocbrain.provenance.
   server_connection_id TEXT,
   client_session_hint TEXT,
-  client_runtime_key TEXT
+  client_runtime_key TEXT,
+  -- Chain pointers. `parent_closeout_id` is the closeout this one continues,
+  -- written only when it resolved; `task_ref_norm` is the folded form of
+  -- `task_ref` above, which stays verbatim. Both are NULL on every row written
+  -- before they existed: the fold happens at write time and history is never
+  -- rewritten. See ocbrain.closeout.normalize_task_ref.
+  parent_closeout_id TEXT,
+  task_ref_norm TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint
   ON task_closeouts(client_session_hint, closed_at);
+CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain
+  ON task_closeouts(task_ref_norm, closed_at);
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
   closeout_id TEXT NOT NULL REFERENCES task_closeouts(id),
@@ -464,9 +482,12 @@ _ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("retrieval_uses", "client_session_hint", "TEXT"),
     ("retrieval_uses", "client_runtime_key", "TEXT"),
     ("retrieval_uses", "provenance_json", "TEXT"),
+    ("retrieval_uses", "task_ref_norm", "TEXT"),
     ("task_closeouts", "server_connection_id", "TEXT"),
     ("task_closeouts", "client_session_hint", "TEXT"),
     ("task_closeouts", "client_runtime_key", "TEXT"),
+    ("task_closeouts", "parent_closeout_id", "TEXT"),
+    ("task_closeouts", "task_ref_norm", "TEXT"),
 )
 
 _ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
@@ -474,6 +495,8 @@ _ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
     "ON retrieval_uses(client_session_hint, served_at)",
     "CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint "
     "ON task_closeouts(client_session_hint, closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain "
+    "ON task_closeouts(task_ref_norm, closed_at)",
 )
 
 
@@ -515,8 +538,11 @@ def init_core_v1(conn: sqlite3.Connection) -> None:
     """Initialize a fresh v1 core; refuse to layer it over legacy tables."""
     if is_core_v1(conn):
         assert_core_v1_inventory(conn)
-        conn.executescript(CORE_V1_SCHEMA)
+        # Migrate columns before replaying the current schema. The schema also
+        # declares indexes on additive columns; on an older core those indexes
+        # cannot be prepared until the columns exist.
         migrate_core_v1_columns(conn)
+        conn.executescript(CORE_V1_SCHEMA)
         return
     existing = [
         str(row[0])
@@ -1912,6 +1938,25 @@ def search_core_v1(
     # is set and every dense score is absent — holding lexical hits to a dense
     # floor then would return nothing at all, so the extra gate stands down.
     dense_arm_healthy = dense_fallback is None
+    degraded_excluded_procedures = 0
+    if not dense_arm_healthy:
+        # A wrong belief is a wrong sentence; a wrong procedure is a wrong
+        # afternoon. With the dense arm down the floors below stand down and a
+        # single shared token is enough to serve a row, which is a tolerable
+        # risk for a claim and not for a multi-step recipe an agent will follow.
+        # Gotchas are sentence-shaped and keep serving normally.
+        eligible = {
+            belief_id: row
+            for belief_id, row in eligible.items()
+            if str(row["belief_type"] or "") != PROCEDURE_BELIEF_TYPE
+        }
+        kept_lexical = [
+            row
+            for row in lexical_rows
+            if str(row["belief_type"] or "") != PROCEDURE_BELIEF_TYPE
+        ]
+        degraded_excluded_procedures = len(lexical_rows) - len(kept_lexical)
+        lexical_rows = kept_lexical
     if lexical_uncorroborated and dense_arm_healthy:
         # No lexical row cleared the multi-term bar and dense retrieval is
         # available to answer instead. Without a working dense arm these rows are
@@ -1940,6 +1985,7 @@ def search_core_v1(
                 "min_lexical_query_term_matches": min_lexical_matches,
                 "min_redundant_lexical_strength_ratio": min_redundant_ratio,
                 "require_dense_support": require_dense_support and dense_arm_healthy,
+                "degraded_excluded_procedures": degraded_excluded_procedures,
             },
         }
     feedback = _retrieval_feedback_scores(
@@ -2088,6 +2134,10 @@ def search_core_v1(
             "min_lexical_query_term_matches": min_lexical_matches,
             "min_redundant_lexical_strength_ratio": min_redundant_ratio,
             "require_dense_support": require_dense_support and dense_arm_healthy,
+            # Procedures dropped because the dense arm was unavailable. Zero in
+            # healthy mode; a non-zero value says the packet is deliberately
+            # thinner than the corpus could support.
+            "degraded_excluded_procedures": degraded_excluded_procedures,
         },
     }
 
@@ -2188,8 +2238,8 @@ def record_core_v1_retrieval(
           id, served_to_runtime, task_ref, outcome, query_text, served_ids_json,
           context_json, packet_schema, session_id, served_at,
           server_connection_id, client_session_hint, client_runtime_key,
-          provenance_json
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provenance_json, task_ref_norm
+        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
@@ -2207,6 +2257,10 @@ def record_core_v1_retrieval(
             prov.client_session_hint,
             prov.client_runtime_key,
             canonical_json(prov_payload) if prov_payload else None,
+            # Same fold the closeout writes, so a read and the receipt that
+            # links it agree on which task they belong to without matching on
+            # free text.
+            normalize_task_ref(task_ref) if task_ref else None,
         ),
     )
     for rank, item in enumerate(rows):
@@ -2508,6 +2562,7 @@ __all__ = [
     "CORE_V1_TABLES",
     "CORE_V1_USER_VERSION",
     "LEGACY_IMPORT_KINDS",
+    "PROCEDURE_BELIEF_TYPE",
     "append_core_event",
     "assert_core_v1_inventory",
     "canonical_json",

@@ -11,10 +11,17 @@ the atlas has to report which runtimes it can actually see into.
 
 from __future__ import annotations
 
-from .claude_code import iter_claude_traces
-from .codex import iter_codex_traces
+from .claude_code import claude_files, iter_claude_traces, parse_claude_traces
+from .codex import codex_files, iter_codex_traces, parse_codex_traces
 from .cursor import iter_cursor_traces
-from .hermes import iter_hermes_legacy_traces, iter_hermes_profile_traces
+from .hermes import (
+    hermes_legacy_files,
+    hermes_profile_files,
+    iter_hermes_legacy_traces,
+    iter_hermes_profile_traces,
+    parse_hermes_legacy_traces,
+    parse_hermes_profile_db,
+)
 
 ADAPTER_STATUS: dict[str, str] = {
     "claude-code": "full: tool_use blocks carry name+input, tool_result carries is_error",
@@ -26,9 +33,17 @@ ADAPTER_STATUS: dict[str, str] = {
 
 __all__ = [
     "ADAPTER_STATUS",
+    "claude_files",
+    "codex_files",
+    "hermes_legacy_files",
+    "hermes_profile_files",
     "iter_claude_traces",
     "iter_codex_traces",
     "iter_cursor_traces",
     "iter_hermes_legacy_traces",
     "iter_hermes_profile_traces",
+    "parse_claude_traces",
+    "parse_codex_traces",
+    "parse_hermes_legacy_traces",
+    "parse_hermes_profile_db",
 ]

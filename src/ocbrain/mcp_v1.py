@@ -1346,6 +1346,7 @@ def closeout_v1(
     outcomes: list[dict[str, Any]],
     awaiting: str | None,
     actor: str,
+    parent_closeout_id: str | None = None,
     provenance: Provenance | None = None,
 ) -> dict[str, Any]:
     # Report the writing standard back to whoever wrote the summary. Reporting
@@ -1379,6 +1380,7 @@ def closeout_v1(
         outcomes=outcomes,
         awaiting=awaiting,
         actor=actor,
+        parent_closeout_id=parent_closeout_id,
         provenance=provenance,
     )
     # Always record the summary as scoped evidence, under the shared continuity
@@ -1610,8 +1612,65 @@ def supersede_v1(
             "the replacement restates the stored belief; supersession must change the claim"
         )
 
-    scope = ScopeTag.from_dict(dict(old.get("scope") or {}))
     inherited = dict(old.get("attributes") or {})
+    return supersede_transaction(
+        conn,
+        old=old,
+        statement=statement,
+        rationale=rationale,
+        attributes={
+            key: inherited[key]
+            for key in ("key", "title", "category", "lifecycle")
+            if key in inherited
+        },
+        actor=actor,
+        provenance=provenance,
+        session_id=context.session,
+    )
+
+
+def supersede_transaction(
+    conn: sqlite3.Connection,
+    *,
+    old: dict[str, Any],
+    statement: str,
+    rationale: str,
+    attributes: dict[str, Any],
+    actor: str,
+    provenance: Provenance,
+    session_id: str | None = None,
+    evidence_ids: list[str] | None = None,
+    confidence_ceiling: float | None = None,
+    extra_pending_reason: str | None = None,
+) -> dict[str, Any]:
+    """Retire one serving belief and stand its replacement up, atomically.
+
+    Shared by the runtime primitive (:func:`supersede_v1`) and by the wiki
+    curator, whose key-collision cascade produces exactly this transaction out
+    of a compiled claim instead of out of an agent's correction. Both doors lead
+    to the same era stamp, the same confidence cap, the same tier routing, and
+    the same paired correction, because a supersession an operator can audit
+    must not depend on which one it came through.
+
+    ``attributes`` is the successor's own metadata: the runtime path inherits it
+    from the belief being replaced, the curator supplies the claim's. Either way
+    ``supersedes`` and ``valid_from`` are stamped here and cannot be passed in.
+
+    ``evidence_ids`` supports the successor. The runtime path leaves it unset
+    and the rationale evidence recorded here is the only support it has; the
+    curator passes the claim's own quote-validated evidence, and the rationale
+    stays reachable through ``attributes.correction_evidence_id``.
+
+    ``confidence_ceiling`` applies on top of ``min(old, 0.7)``, so a caller that
+    carries a confidence of its own cannot publish a successor more confident
+    than the claim behind it.
+
+    ``extra_pending_reason`` forces the pending route for a caller that has
+    decided this supersession is not safe to land unattended even where the tier
+    rules would let it.
+    """
+    old_id = str(old["canonical_id"])
+    scope = ScopeTag.from_dict(dict(old.get("scope") or {}))
     successor_id = stable_id("belief", "sup", statement, scope.scope_id)
     # Content-and-scope addressed, so two agents reaching the same conclusion
     # converge on one belief instead of minting two -- and, because "sup" is part
@@ -1627,17 +1686,17 @@ def supersede_v1(
     if blocked is not None:
         raise ValueError(f"blocked: this content was previously {blocked}")
 
-    confidence = min(float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP),
-                     SUPERSEDE_CONFIDENCE_CAP)
-    attributes: dict[str, Any] = {
-        key: inherited[key]
-        for key in ("key", "title", "category", "lifecycle")
-        if key in inherited
-    }
+    ceilings = [float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP), SUPERSEDE_CONFIDENCE_CAP]
+    if confidence_ceiling is not None:
+        ceilings.append(float(confidence_ceiling))
+    confidence = min(ceilings)
+    attributes = dict(attributes)
     attributes["supersedes"] = old_id
     attributes["valid_from"] = now_iso()
     slop = find_slop(statement, attributes, rules=ENFORCED_RULE_IDS)
-    pending_reason = _supersede_route(conn, old, actor=actor, provenance=provenance)
+    pending_reason = extra_pending_reason or _supersede_route(
+        conn, old, actor=actor, provenance=provenance
+    )
 
     with _one_transaction(conn):
         evidence_id, evidence_event_id = record_core_v1_evidence(
@@ -1646,7 +1705,7 @@ def supersede_v1(
             kind="correction",
             scope=scope,
             writer=actor,
-            session_id=provenance.client_session_hint or context.session,
+            session_id=provenance.client_session_hint or session_id,
             artifact_ref=f"supersede:{old_id}",
         )
         attributes["correction_evidence_id"] = evidence_id
@@ -1659,7 +1718,7 @@ def supersede_v1(
                 "belief_id": successor_id,
                 "belief_type": old.get("belief_type"),
                 "body": statement,
-                "evidence_ids": [evidence_id],
+                "evidence_ids": list(evidence_ids) if evidence_ids else [evidence_id],
                 "scope": scope.to_dict(),
                 "confidence": confidence,
                 "attributes": attributes,
@@ -1667,7 +1726,7 @@ def supersede_v1(
                 "supersede_requested_by": actor,
             },
             writer=actor,
-            session_id=provenance.client_session_hint or context.session,
+            session_id=provenance.client_session_hint or session_id,
         )
         payload: dict[str, Any] = {
             "schema_version": SUPERSEDE_SCHEMA_VERSION,
@@ -2373,5 +2432,6 @@ __all__ = [
     "proposals_v1",
     "record_context_v1",
     "search_v1",
+    "supersede_transaction",
     "supersede_v1",
 ]

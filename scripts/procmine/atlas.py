@@ -13,10 +13,28 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .dag import mine_families, mine_gotchas, mine_motifs, mine_repairs, step_reliability
+from .dag import (
+    collapse_runs,
+    mine_families,
+    mine_gotchas,
+    mine_motifs,
+    mine_repairs,
+    step_reliability,
+)
 from .episodes import GRADE_ORDER, Episode, join_episodes, load_episodes, mining_set
+from .normalize import (
+    PROVENANCE_MAX_CALLS,
+    PROVENANCE_MIN_TOKEN,
+    scrub_artifact_text,
+    step_class,
+)
 
 _BAD = {"error", "refused", "timeout"}
+
+# One codex heartbeat rollout runs to tens of thousands of calls. Persisting all
+# of it per episode makes the artifact unreadable and unloadable without saying
+# anything a prefix does not; truncation is flagged, never silent.
+MAX_EPISODE_SEQUENCE = 2_000
 
 
 def corpus_stats(traces: list[dict[str, Any]]) -> dict[str, Any]:
@@ -117,8 +135,6 @@ def corpus_runtime_comparison(traces: list[dict[str, Any]]) -> dict[str, Any]:
     one has the whole corpus behind it and answers "does codex work differently
     from claude-code" even where no closeout was ever filed.
     """
-    from .normalize import step_class
-
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for trace in traces:
         grouped[trace["runtime"].split(":")[0]].append(trace)
@@ -158,6 +174,87 @@ def corpus_runtime_comparison(traces: list[dict[str, Any]]) -> dict[str, Any]:
     return rows
 
 
+def edge_admission(traces: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hard versus suspected adjacent-pair edges, per runtime.
+
+    Adjacency mining — what ``dag.mine_family`` does today — calls every
+    consecutive pair an edge, which is why its induced DAGs are dense with
+    coincidence. Value provenance admits an edge only when the next call's
+    arguments contain a long, session-rare token the previous call's output
+    produced. Published comparisons put that at roughly 0.93 F1 against ~0.71
+    for adjacency.
+
+    This table is reported, not yet consumed: nothing in the miner uses the
+    admission class to constrain ordering, and a runtime that cannot supply raw
+    values shows up here as suspected-only rather than as a silent zero.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for trace in traces:
+        runtime = str(trace["runtime"]).split(":")[0]
+        bucket = rows.setdefault(
+            runtime, {"sessions": 0, "edges": 0, "hard": 0, "suspected": 0}
+        )
+        bucket["sessions"] += 1
+        for edge in trace.get("edges") or []:
+            bucket["edges"] += 1
+            bucket["hard" if edge.get("admission") == "hard" else "suspected"] += 1
+    for bucket in rows.values():
+        bucket["hard_rate"] = (
+            round(bucket["hard"] / bucket["edges"], 3) if bucket["edges"] else 0.0
+        )
+    shortfalls = sorted(
+        runtime
+        for runtime, bucket in rows.items()
+        if bucket["edges"] and bucket["hard"] == 0
+    )
+    return {
+        "by_runtime": dict(sorted(rows.items(), key=lambda kv: -kv[1]["edges"])),
+        "suspected_only_runtimes": shortfalls,
+        "min_token_chars": PROVENANCE_MIN_TOKEN,
+        "max_calls_per_token": PROVENANCE_MAX_CALLS,
+    }
+
+
+def episode_records(
+    episodes: list[Episode], mining_episodes: list[Episode]
+) -> list[dict[str, Any]]:
+    """Every episode with the step sequence that used to be thrown away.
+
+    ``dag._episode_sequence`` recomputes these on every run and discards them,
+    so nothing downstream — a labeled-sequence experiment, a diff between two
+    mining runs, a hand audit of one closeout — could ever be done without
+    re-extracting the whole ~8 GB corpus first. Persisting them is the cheap
+    half of making the miner incremental.
+
+    ``steps`` is run-length collapsed abstract classes (what the DAG miner
+    aligns on) and is kept for every episode that has events. The fine-grained
+    ``signatures`` and ``result_classes`` are kept only for the mining set:
+    outside it an episode is either unjoined (no events at all) or ambiguous,
+    and an ambiguous episode carries a whole shared rollout that several other
+    closeouts carry too — writing sixty copies of one codex heartbeat would
+    triple the artifact to say nothing new. ``in_mining_set`` records which,
+    so a reader is never left guessing which sequences counted.
+    """
+    kept = {episode.closeout_id for episode in mining_episodes}
+    records: list[dict[str, Any]] = []
+    for episode in episodes:
+        signatures = [str(event["arg_signature"]) for event in episode.events]
+        truncated = len(signatures) > MAX_EPISODE_SEQUENCE
+        signatures = signatures[:MAX_EPISODE_SEQUENCE]
+        record = episode.as_dict()
+        record["in_mining_set"] = episode.closeout_id in kept
+        record["sequence_truncated"] = truncated
+        record["steps"] = [sig for sig, _ in collapse_runs([step_class(s) for s in signatures])]
+        if record["in_mining_set"]:
+            record["signatures"] = signatures
+            record["result_classes"] = [
+                str(event["result_class"])
+                for event in episode.events[:MAX_EPISODE_SEQUENCE]
+            ]
+        records.append(record)
+    return records
+
+
 def build(
     trace_cache: Path,
     *,
@@ -195,10 +292,11 @@ def build(
         "gotchas": mine_gotchas(reliability, repairs),
         "step_reliability": reliability[:40],
         "motifs": motifs[:30],
+        "edge_admission": edge_admission(traces),
         "adapters": json.loads(
             (trace_cache.parent / "extract_summary.json").read_text()
         ) if (trace_cache.parent / "extract_summary.json").exists() else {},
-        "episodes": [episode.as_dict() for episode in episodes],
+        "episodes": episode_records(episodes, mining_episodes),
     }
 
 
@@ -658,6 +756,51 @@ def render_markdown(data: dict[str, Any]) -> str:
         )
     add("")
 
+    add("## 9b. Edge admission: adjacency versus value provenance")
+    add("")
+    admission = data.get("edge_admission") or {}
+    by_runtime = admission.get("by_runtime") or {}
+    total_edges = sum(row["edges"] for row in by_runtime.values())
+    total_hard = sum(row["hard"] for row in by_runtime.values())
+    add(
+        "Every consecutive pair of calls is an adjacency. Only some of them are a "
+        "*dependency*: the next call's arguments contain a token the previous "
+        f"call's output produced, at least {admission.get('min_token_chars')} "
+        f"characters long and appearing in at most "
+        f"{admission.get('max_calls_per_token')} calls of that session. "
+        f"**{total_hard:,} of {total_edges:,} adjacent pairs "
+        f"({(total_hard / total_edges if total_edges else 0):.1%}) clear that bar.** "
+        "The rest are recorded as `suspected` and impose no ordering constraint."
+    )
+    add("")
+    add(
+        _table(
+            ["runtime", "sessions", "adjacent pairs", "hard", "suspected", "hard rate"],
+            [
+                [
+                    name, row["sessions"], f"{row['edges']:,}", f"{row['hard']:,}",
+                    f"{row['suspected']:,}", row["hard_rate"],
+                ]
+                for name, row in by_runtime.items()
+            ],
+        )
+    )
+    add("")
+    for runtime in admission.get("suspected_only_runtimes") or []:
+        add(
+            f"- **{runtime} is suspected-only.** Its export stored neither arguments "
+            "nor raw results, so no edge from it can ever be admitted on value "
+            "provenance. The adjacency is real; the dependency claim is unavailable."
+        )
+    add("")
+    add(
+        "Nothing downstream consumes this yet. The DAG induction in section 4 still "
+        "runs on adjacency, and swapping it for provenance-admitted edges is a "
+        "separate change that needs its own validation against the existing "
+        "procedure output."
+    )
+    add("")
+
     add("## 10. What this corpus cannot tell us")
     add("")
     adapters = data.get("adapters", {})
@@ -718,11 +861,46 @@ def render_markdown(data: dict[str, Any]) -> str:
         )
     )
     add("")
-    return "\n".join(out)
+    # Last gate before the report leaves this function. The body is assembled
+    # from already-classed signatures, but the envelope is not: the adapter
+    # summary carries the cache and state paths the miner was given, and a
+    # captured error message can name a host or an account. A committed atlas in
+    # this repository leaked all three before this line existed.
+    return scrub_artifact_text("\n".join(out))
 
 
-def write_outputs(data: dict[str, Any], *, docs_dir: Path, json_path: Path) -> None:
+def write_outputs(
+    data: dict[str, Any],
+    *,
+    docs_dir: Path,
+    json_path: Path,
+    episodes_path: Path | None = None,
+) -> None:
     docs_dir.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     machine = {key: value for key, value in data.items() if key != "episodes"}
-    json_path.write_text(json.dumps(machine, indent=2, sort_keys=True) + "\n")
+    json_path.write_text(
+        scrub_artifact_text(json.dumps(machine, indent=2, sort_keys=True)) + "\n"
+    )
+    if episodes_path is not None:
+        write_episodes(data, episodes_path)
+
+
+def write_episodes(data: dict[str, Any], episodes_path: Path) -> Path:
+    """Refresh the standing episodes artifact. Written on every atlas run.
+
+    Kept out of ``procedures.json`` and out of the repository: it names
+    closeouts and per-session step sequences, which belong beside the brain in
+    ``~/.ocbrain/procmine`` rather than in a public checkout.
+    """
+    episodes_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "ocbrain.procmine.episodes.v1",
+        "generated_at": data.get("generated_at"),
+        "n_episodes": len(data.get("episodes") or []),
+        "episodes": data.get("episodes") or [],
+    }
+    tmp = episodes_path.with_suffix(episodes_path.suffix + ".tmp")
+    tmp.write_text(scrub_artifact_text(json.dumps(payload, indent=2, sort_keys=True)) + "\n")
+    tmp.replace(episodes_path)
+    return episodes_path

@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   server_connection_id TEXT,
   client_session_hint TEXT,
   client_runtime_key TEXT,
-  provenance_json TEXT
+  provenance_json TEXT,
+  task_ref_norm TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_knowledge_outcome_served
   ON retrieval_uses(knowledge_id, outcome, served_at);
@@ -447,8 +448,12 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   content_hash TEXT NOT NULL UNIQUE,
   server_connection_id TEXT,
   client_session_hint TEXT,
-  client_runtime_key TEXT
+  client_runtime_key TEXT,
+  parent_closeout_id TEXT,
+  task_ref_norm TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain
+  ON task_closeouts(task_ref_norm, closed_at);
 
 CREATE TABLE IF NOT EXISTS task_closeout_retrievals (
   closeout_id TEXT NOT NULL REFERENCES task_closeouts(id),
@@ -659,6 +664,14 @@ _V5_TASK_CLOSEOUT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("client_session_hint", "TEXT"),
     ("client_runtime_key", "TEXT"),
 )
+# Closeout chain pointers. Nullable and never backfilled: the fold happens at
+# write time, so every pre-existing row keeps a NULL `task_ref_norm` and joins
+# no chain. See ocbrain.closeout.normalize_task_ref.
+_V6_RETRIEVAL_USE_COLUMNS: tuple[tuple[str, str], ...] = (("task_ref_norm", "TEXT"),)
+_V6_TASK_CLOSEOUT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("parent_closeout_id", "TEXT"),
+    ("task_ref_norm", "TEXT"),
+)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -722,6 +735,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         _ensure_column(conn, "retrieval_uses", column, decl)
     for column, decl in _V5_TASK_CLOSEOUT_COLUMNS:
         _ensure_column(conn, "task_closeouts", column, decl)
+    for column, decl in _V6_RETRIEVAL_USE_COLUMNS:
+        _ensure_column(conn, "retrieval_uses", column, decl)
+    for column, decl in _V6_TASK_CLOSEOUT_COLUMNS:
+        _ensure_column(conn, "task_closeouts", column, decl)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain "
+        "ON task_closeouts(task_ref_norm, closed_at)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dsx_grade ON dataset_examples(dataset, grade_score)"
     )
