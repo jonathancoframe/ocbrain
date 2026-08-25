@@ -1297,6 +1297,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="keep promotion human-gated (the default)",
     )
     automatic_activation_parser.set_defaults(func=cmd_automatic_activation)
+
+    # Public-safety enforcement lives in core, not an optional companion: it is
+    # the gate that keeps private paths and secrets out of this public repo, and
+    # CI runs it on every push. A guard nobody has installed is not a guard.
+    public_safety_parser = commands.add_parser(
+        "public-safety-check",
+        help="Scan the tracked tree for private data before it reaches the public repo",
+    )
+    public_safety_parser.add_argument(
+        "--diff-range",
+        help="git range (e.g. origin/main..HEAD) to scan added lines for new secrets",
+    )
+    public_safety_parser.add_argument(
+        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
+    )
+    public_safety_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    public_safety_parser.set_defaults(func=cmd_public_safety_check)
+
+    install_hooks_parser = commands.add_parser(
+        "install-hooks", help="Symlink tracked git hooks (ops/hooks) into .git/hooks"
+    )
+    install_hooks_parser.add_argument(
+        "--root", type=Path, help="repo root (default: git toplevel of the cwd)"
+    )
+    install_hooks_parser.set_defaults(func=cmd_install_hooks)
+
     parser.add_argument("--input", type=Path, help=argparse.SUPPRESS)
     return parser
 
@@ -1328,8 +1354,6 @@ COMPANION_COMMANDS: dict[str, str] = {
     "event-dream": "ocbrain-ops",
     "event-teacher-request": "ocbrain-ops",
     "retrieval-feedback-stats": "ocbrain-ops",
-    "public-safety-check": "ocbrain-ops",
-    "install-hooks": "ocbrain-ops",
     "dataset-mine": "ocbrain-training",
     "dataset-persona-curate": "ocbrain-training",
     "dataset-calibration-import": "ocbrain-training",
@@ -4228,7 +4252,7 @@ def _resolve_repo_root(explicit: Path | None) -> Path:
 
 
 def cmd_public_safety_check(args: argparse.Namespace) -> int:
-    from ocbrain_ops.publicsafety import scan
+    from ocbrain.publicsafety import scan
 
     root = _resolve_repo_root(getattr(args, "root", None))
     result = scan(root, diff_range=getattr(args, "diff_range", None))

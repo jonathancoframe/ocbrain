@@ -31,8 +31,6 @@ liveness-check = "ocbrain_ops.cli:legacy_dispatch"
 event-dream = "ocbrain_ops.cli:legacy_dispatch"
 event-teacher-request = "ocbrain_ops.cli:legacy_dispatch"
 retrieval-feedback-stats = "ocbrain_ops.cli:legacy_dispatch"
-public-safety-check = "ocbrain_ops.cli:legacy_dispatch"
-install-hooks = "ocbrain_ops.cli:legacy_dispatch"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ocbrain_ops"]

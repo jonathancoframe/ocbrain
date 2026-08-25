@@ -26,7 +26,6 @@ RETIRED_CORE_MODULES = {
     "loops.py",
     "maintenance.py",
     "promote.py",
-    "publicsafety.py",
     "retrieval_eval.py",
     "review.py",
     "safeguards.py",
@@ -108,8 +107,8 @@ def test_companion_stores_are_distinct_from_the_core_default() -> None:
     assert DEFAULT_OPS_DB != cli.DEFAULT_DB_PATH
 
 
-def test_public_safety_hook_calls_the_checked_out_ops_companion() -> None:
+def test_public_safety_hook_calls_the_checked_out_core_cli() -> None:
     hook = (ROOT / "ops/hooks/pre-push").read_text()
-    assert "${ROOT}/packages/ops/src" in hook
-    assert "-m ocbrain_ops.cli public-safety-check" in hook
-    assert "-m ocbrain.cli public-safety-check" not in hook
+    assert "${ROOT}/src" in hook
+    assert "-m ocbrain.cli public-safety-check" in hook
+    assert "ocbrain_ops" not in hook

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ocbrain_ops import publicsafety as ps
+from ocbrain import publicsafety as ps
 
 # A synthetic denylist entry (NOT a real Jonathan identifier).
 FAKE_DENY = "acme-private-marker-xyz"
@@ -77,7 +77,7 @@ def test_source_distribution_explicitly_excludes_runtime_private_roots() -> None
     assert {"/data/**", "/logs/**", "/uv.lock"} <= excluded
     ignored = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "data/" in ignored and "logs/" in ignored
-    assert ps.content_scan_excluded("packages/ops/src/ocbrain_ops/publicsafety.py")
+    assert ps.content_scan_excluded("src/ocbrain/publicsafety.py")
 
 
 # --- clean tree passes ---------------------------------------------------- #

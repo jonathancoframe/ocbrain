@@ -13,6 +13,7 @@ from typing import Any
 from ocbrain.config import load_config
 from ocbrain.db import connect, counts, get_knowledge, now_iso
 from ocbrain.events import rebuild_projection
+from ocbrain.publicsafety import scan as public_safety_scan
 from ocbrain.scope import ScopeContext
 
 from ocbrain_ops.autolabel import Signal, record_signal
@@ -21,7 +22,6 @@ from ocbrain_ops.dream import dream
 from ocbrain_ops.feedback import feedback_coverage
 from ocbrain_ops.loops import LoopIngestOptions, dry_run_loop_ingest, write_loop_ingest
 from ocbrain_ops.maintenance import check_loop_liveness, heal_conflicts, prune_knowledge
-from ocbrain_ops.publicsafety import scan as public_safety_scan
 from ocbrain_ops.safeguards import release_quarantine
 from ocbrain_ops.store import DEFAULT_OPS_DB
 from ocbrain_ops.teacher import hosted_teacher_request

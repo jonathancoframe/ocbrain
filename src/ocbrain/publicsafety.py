@@ -59,7 +59,6 @@ _FORBIDDEN_SUFFIXES = (".jsonl",)
 _CONTENT_SKIP_EXACT = {
     "uv.lock",
     "src/ocbrain/publicsafety.py",
-    "packages/ops/src/ocbrain_ops/publicsafety.py",
     DENYLIST_REL,
 }
 
