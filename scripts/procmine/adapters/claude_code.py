@@ -17,7 +17,15 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..normalize import Trace, TraceEvent, arg_signature, error_fingerprint, result_class
+from ..normalize import (
+    Trace,
+    TraceEvent,
+    admit_token_edges,
+    arg_signature,
+    error_fingerprint,
+    provenance_tokens,
+    result_class,
+)
 
 CLAUDE_ROOT = Path(os.path.expanduser("~/.claude/projects"))
 _BAD = {"error", "refused", "timeout"}
@@ -44,6 +52,10 @@ def parse_claude_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | No
     calls: dict[str, tuple[str, str, str | None]] = {}
     order: list[str] = []
     results: dict[str, tuple[str, str | None]] = {}
+    # Raw values, tokenized on sight and never stored: value-provenance edge
+    # admission has to see the payload, and only a digest may survive it.
+    arg_tokens: dict[str, set[str]] = {}
+    output_tokens: dict[str, set[str]] = {}
     session_id = path.stem
     started: str | None = None
     ended: str | None = None
@@ -95,7 +107,11 @@ def parse_claude_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | No
                     if not isinstance(use_id, str):
                         continue
                     name = block.get("name") or "unknown"
-                    calls[use_id] = (name, arg_signature(name, block.get("input")), timestamp)
+                    raw_input = block.get("input")
+                    calls[use_id] = (name, arg_signature(name, raw_input), timestamp)
+                    arg_tokens[use_id] = provenance_tokens(
+                        raw_input if isinstance(raw_input, str) else json.dumps(raw_input)
+                    )
                     order.append(use_id)
                 elif kind == "tool_result":
                     use_id = block.get("tool_use_id")
@@ -110,6 +126,7 @@ def parse_claude_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | No
                         outcome,
                         error_fingerprint(body) if outcome in _BAD else None,
                     )
+                    output_tokens[use_id] = provenance_tokens(body)
 
     if not order:
         return None
@@ -125,6 +142,12 @@ def parse_claude_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | No
         )
         for index, use_id in enumerate(order)
     ]
+    edges = admit_token_edges(
+        [
+            (arg_tokens.get(use_id, set()), output_tokens.get(use_id, set()))
+            for use_id in order
+        ]
+    )
     is_subagent = path.parent.name == "subagents"
     return Trace(
         trace_id=session_id,
@@ -135,14 +158,27 @@ def parse_claude_file(path: Path, *, max_bytes: int = 400_000_000) -> Trace | No
         cwd=cwd,
         events=events,
         truncated=truncated,
+        edges=edges,
     )
 
 
-def iter_claude_traces(root: Path | None = None) -> Iterator[Trace]:
+def claude_files(root: Path | None = None) -> list[Path]:
+    """Every transcript this adapter would read, in a stable order.
+
+    Enumerated separately from parsing so the incremental cache can fingerprint
+    each file and skip the ones that have not moved.
+    """
     base = root or CLAUDE_ROOT
-    if not base.exists():
-        return
-    for path in sorted(base.rglob("*.jsonl")):
-        trace = parse_claude_file(path)
-        if trace is not None:
-            yield trace
+    return sorted(base.rglob("*.jsonl")) if base.exists() else []
+
+
+def parse_claude_traces(path: Path) -> Iterator[Trace]:
+    """Traces from one transcript: exactly zero or one."""
+    trace = parse_claude_file(path)
+    if trace is not None:
+        yield trace
+
+
+def iter_claude_traces(root: Path | None = None) -> Iterator[Trace]:
+    for path in claude_files(root):
+        yield from parse_claude_traces(path)
