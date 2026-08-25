@@ -1177,6 +1177,7 @@ def call_tool_v1(
             include_private=bool_arg(arguments, "include_private"),
             cross_scope=bool_arg(arguments, "cross_scope"),
             delivery_target=delivery_target,
+            mode=optional_string(arguments, "mode") or "resolve",
         )
         retrieval_id = record_core_v1_retrieval(
             conn,
@@ -1616,6 +1617,17 @@ def tool_list(
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["resolve", "as_stored"],
+                        "description": (
+                            "resolve (default) follows a superseded belief forward to the "
+                            "one now serving and reports the ids it came through. "
+                            "as_stored returns the retired belief itself, labelled "
+                            "invalidated with its valid_from/valid_until era, for measuring "
+                            "drift. A retracted belief with no successor is refused by both."
+                        ),
+                    },
                     "include_candidate": {"type": "boolean"},
                     "include_private": {"type": "boolean"},
                     "cross_scope": {

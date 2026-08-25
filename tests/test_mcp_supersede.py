@@ -492,6 +492,98 @@ def test_the_rate_cap_counts_one_session_not_the_whole_brain(
     )
 
 
+# --------------------------------------------------------------------------- #
+# brain.get modes
+# --------------------------------------------------------------------------- #
+def test_get_resolves_a_superseded_id_forward(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    old = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
+    first = _supersede(conn, old, "The research VM is reached with ssh asa2.")
+    second = _supersede(
+        conn, first["successor_id"], "The research VM is reached with ssh asa3 since the move."
+    )
+
+    payload = _payload(_call(conn, "brain.get", {"id": old, "context": CONTEXT}))
+
+    assert payload["mode"] == "resolve"
+    assert payload["belief_id"] == second["successor_id"]
+    assert payload["requested_id"] == old
+    assert payload["resolved_from"] == [old, first["successor_id"]]
+    assert payload["resolution_hops"] == 2
+    assert "asa3" in payload["body"]
+
+
+def test_get_as_stored_returns_the_retired_belief_labelled(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    old = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
+    result = _supersede(conn, old, "The research VM is reached with ssh asa2.")
+
+    payload = _payload(
+        _call(conn, "brain.get", {"id": old, "context": CONTEXT, "mode": "as_stored"})
+    )
+
+    assert payload["invalidated"] is True
+    assert payload["belief_id"] == old
+    assert "asa1" in payload["body"]
+    assert payload["superseded_by"] == result["successor_id"]
+    assert payload["valid_until"]
+
+
+def test_get_still_refuses_a_retracted_belief_with_no_successor(tmp_path: Path) -> None:
+    """Filtering invalidated facts by default is the point, not an oversight."""
+    conn = _core(tmp_path)
+    old = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
+    _payload(
+        _call(
+            conn,
+            "brain.correct",
+            {"layer": "belief", "target": old, "op": "retract", "body": "withdrawn"},
+            profile="admin",
+        )
+    )
+
+    for mode in ("resolve", "as_stored"):
+        response = _call(conn, "brain.get", {"id": old, "context": CONTEXT, "mode": mode})
+        assert response["error"]["message"] == "non-current beliefs are not served by brain.get"
+
+
+def test_get_refuses_a_supersession_cycle_instead_of_looping(tmp_path: Path) -> None:
+    """A corrupted chain is a bounded refusal, never an unbounded walk."""
+    conn = _core(tmp_path)
+    left = _seed(conn, belief_id="belief:left", body="Assignments are sticky per session.")
+    right = _seed(conn, belief_id="belief:right", body="Assignments are sticky per visitor.")
+    # Point the two retracted beliefs at each other by hand: no legitimate path
+    # produces this, which is exactly why the reader must survive it.
+    for target, successor in ((left, right), (right, left)):
+        append_core_event(
+            conn,
+            "correction_recorded",
+            {
+                "schema_version": "ocbrain.correction.v1",
+                "target_layer": "belief",
+                "target_id": target,
+                "op": "supersede",
+                "successor_id": successor,
+                "author": "test",
+                "hard": False,
+            },
+            writer="test",
+            project=True,
+        )
+    conn.commit()
+
+    response = _call(conn, "brain.get", {"id": left, "context": CONTEXT})
+    assert "cycles back to" in response["error"]["message"]
+    assert "mode=as_stored" in response["error"]["message"]
+
+
+def test_get_rejects_an_unknown_mode(tmp_path: Path) -> None:
+    conn = _core(tmp_path)
+    old = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa1.")
+    response = _call(conn, "brain.get", {"id": old, "context": CONTEXT, "mode": "whatever"})
+    assert "mode must be one of" in response["error"]["message"]
+
+
 @pytest.mark.parametrize("missing", ["target", "body", "reason"])
 def test_supersede_requires_its_three_arguments(tmp_path: Path, missing: str) -> None:
     conn = _core(tmp_path)

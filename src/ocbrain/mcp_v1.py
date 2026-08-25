@@ -65,6 +65,11 @@ SUPERSEDE_SCHEMA_VERSION = "ocbrain.supersede.v1"
 # original did.
 SUPERSEDE_CONFIDENCE_CAP = 0.7
 SUPERSEDE_TIERS = ("project", "pending_all")
+# Follow ``superseded_by`` this far and no further. A chain longer than this is
+# a corpus problem, not a read to satisfy, and the bound is what stops a cycle
+# from becoming an unbounded walk even before the seen-set catches it.
+MAX_RESOLUTION_HOPS = 10
+GET_MODES = ("resolve", "as_stored")
 
 def shared_continuity_scope(context: ScopeContext) -> ScopeTag:
     """Scope for a closeout summary: broadest shared context, never hosted.
@@ -812,6 +817,37 @@ def search_v1(
     return payload
 
 
+def _resolve_supersession_chain(
+    conn: sqlite3.Connection, belief: dict[str, Any]
+) -> tuple[dict[str, Any] | None, list[str], str | None]:
+    """Walk ``superseded_by`` forward to the belief that is actually serving.
+
+    Returns the head, the ids walked through to reach it, and -- when there is
+    no head -- why. Both a seen-set and a hop bound guard the walk: the seen-set
+    catches a genuine cycle, and the bound stops a long or corrupted chain from
+    turning one read into an unbounded scan.
+    """
+    walked: list[str] = []
+    seen = {str(belief["canonical_id"])}
+    current = belief
+    for _hop in range(MAX_RESOLUTION_HOPS):
+        successor_id = str((current.get("attributes") or {}).get("superseded_by") or "").strip()
+        if not successor_id:
+            return None, walked, "the chain ends without a successor"
+        successor = get_core_v1_belief(conn, successor_id)
+        if successor is None:
+            return None, walked, f"successor {successor_id} is not in the corpus"
+        canonical = str(successor["canonical_id"])
+        if canonical in seen:
+            return None, walked, f"the chain cycles back to {canonical}"
+        seen.add(canonical)
+        walked.append(str(current["canonical_id"]))
+        if successor.get("status") == "current" and successor.get("serve"):
+            return successor, walked, None
+        current = successor
+    return None, walked, f"the chain is longer than {MAX_RESOLUTION_HOPS} hops"
+
+
 def get_v1(
     conn: sqlite3.Connection,
     object_id: str,
@@ -821,7 +857,21 @@ def get_v1(
     include_private: bool = False,
     cross_scope: bool = False,
     delivery_target: str = LOCAL_MODEL_TARGET,
+    mode: str = "resolve",
 ) -> dict[str, Any]:
+    """Return one object by id.
+
+    ``mode="resolve"`` (the default) answers the question a caller holding a
+    stale id is actually asking -- *what is true now* -- by following
+    ``superseded_by`` to the serving head and saying which ids it came through.
+    ``mode="as_stored"`` answers the other one -- *what did we believe then* --
+    and is how drift is measured. A retracted belief with no successor stays
+    refused in both modes: filtering by default is the point, and a store that
+    hands back invalidated facts unless you remember to exclude them is a
+    footgun, not a feature.
+    """
+    if mode not in GET_MODES:
+        raise ValueError(f"mode must be one of {', '.join(GET_MODES)}")
     delivery_target = normalize_delivery_target(delivery_target)
     belief = get_core_v1_belief(conn, object_id)
     if belief is not None:
@@ -835,23 +885,57 @@ def get_v1(
         attributes = belief.get("attributes") or {}
         if attributes.get("quarantine_reason"):
             raise PermissionError("quarantined beliefs are not served by brain.get")
+        served = belief
+        resolved_from: list[str] = []
+        invalidated = False
         if belief.get("status") != "current" or not belief.get("serve"):
-            if not (include_candidate and belief.get("status") == "candidate"):
+            successor_id = str(attributes.get("superseded_by") or "").strip()
+            has_successor = belief.get("status") == "retracted" and bool(successor_id)
+            if include_candidate and belief.get("status") == "candidate":
+                pass
+            elif has_successor and mode == "as_stored":
+                invalidated = True
+            elif has_successor:
+                served, resolved_from, failure = _resolve_supersession_chain(conn, belief)
+                if served is None:
+                    raise PermissionError(
+                        "non-current beliefs are not served by brain.get: "
+                        f"{failure}; read it with mode=as_stored to see what was stored"
+                    )
+                _authorize_get_scope(
+                    served["scope"],
+                    context=context,
+                    include_private=include_private,
+                    cross_scope=cross_scope,
+                    delivery_target=delivery_target,
+                )
+            else:
                 raise PermissionError("non-current beliefs are not served by brain.get")
-        public_belief = _belief_for_delivery(belief, delivery_target=delivery_target)
+        public_belief = _belief_for_delivery(served, delivery_target=delivery_target)
         public_belief["evidence_ids"] = _evidence_ids_for_delivery(
             conn,
-            belief.get("evidence_ids") or [],
+            served.get("evidence_ids") or [],
             context=context,
             delivery_target=delivery_target,
             cross_scope=cross_scope,
         )
-        return {
+        payload = {
             "schema_version": "ocbrain.object.v1",
             "delivery_target": delivery_target,
             "object_kind": "belief",
+            "mode": mode,
             **public_belief,
         }
+        if resolved_from:
+            payload["requested_id"] = object_id
+            payload["resolved_from"] = resolved_from
+            payload["resolution_hops"] = len(resolved_from)
+        if invalidated:
+            payload["invalidated"] = True
+            payload["superseded_by"] = successor_id
+            payload["valid_from"] = attributes.get("valid_from")
+            payload["valid_until"] = attributes.get("valid_until")
+        return payload
     evidence = get_core_v1_evidence(conn, object_id)
     if evidence is not None:
         _authorize_get_scope(
