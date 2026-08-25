@@ -44,9 +44,11 @@ conversation you are already in.
 
 ### 2. Pass a canonical scope
 
-Scope is how the brain decides what is yours to see. Pass the **project** you are
-actually working in, plus whatever else you genuinely know (`repo`, `task`, `client`,
-`runtime`, `session`).
+Scope tells local retrieval what to rank first and remains a hard boundary for hosted
+delivery. Pass the **project** you are actually working in, plus whatever else you
+genuinely know (`repo`, `task`, `client`, `runtime`, `session`). Local retrieval may
+include relevant non-confidential facts from another scope in the tail; confidential
+material outside its own scope and material not approved for hosted egress stay out.
 
 The server folds case and spacing and resolves an operator-configured alias table, so
 near-miss spellings still land. What it cannot do is guess at a project name nobody has
@@ -58,10 +60,10 @@ Ask your operator for the canonical list. On Jonathan's machine it is `coframe`,
 
 ### 3. An empty result is a real answer
 
-Zero items means the brain has no coverage, not that you phrased it wrong. The ranker
-abstains rather than serving filler, and a scoped miss automatically retries across
-scopes before giving up. **Do not re-poll the same query**, and never block on the brain
-— if it is slow, empty, or erroring, note it and carry on.
+Zero items means the brain has no coverage, not that you phrased it wrong. The local
+ranker already considers the serving corpus and abstains rather than serving filler.
+**Do not re-poll the same query**, and never block on the brain — if it is slow, empty,
+or erroring, note it and carry on.
 
 ### 4. Record what actually happened
 
