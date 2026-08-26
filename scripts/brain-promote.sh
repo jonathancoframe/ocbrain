@@ -52,6 +52,9 @@ else
 fi
 PROMOTE_PROVIDER="${OCBRAIN_PROMOTE_PROVIDER:-anthropic}"
 PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
+# Adaptive thinking shares the completion budget. Large eligible evidence sets
+# can otherwise exhaust the default before the curator closes its claim list.
+PROMOTE_MAX_TOKENS="${OCBRAIN_PROMOTE_MAX_TOKENS:-16000}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
 BUDGET_SECONDS="${OCBRAIN_PROMOTE_BUDGET_SECONDS:-1800}"
 
@@ -155,6 +158,7 @@ run_with_budget "$BUDGET_SECONDS" \
   "${CURATE_SCOPE_ARGS[@]}" \
   --wiki-dir "$WIKI_DIR" \
   --max-beliefs "$PROMOTE_MAX_BELIEFS" \
+  --max-tokens "$PROMOTE_MAX_TOKENS" \
   --apply \
   || echo "curate step failed or was capped; continuing with retirement"
 
