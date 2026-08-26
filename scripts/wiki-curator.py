@@ -244,6 +244,7 @@ def main() -> int:
             "beliefs_superseded": 0,
             "beliefs_coexist_marked": 0,
             "beliefs_deferred": 0,
+            "beliefs_pending_deduped": 0,
         }
         by_status: dict[str, list[str]] = {}
         for project in projects:
@@ -367,6 +368,7 @@ def main() -> int:
             totals["beliefs_superseded"] += len(applied["superseded"])
             totals["beliefs_coexist_marked"] += len(applied["coexist_marked"])
             totals["beliefs_deferred"] += len(applied["deferred"])
+            totals["beliefs_pending_deduped"] += len(applied["pending_deduped"])
             next_digests[project] = digest
             close_project(
                 by_status,
@@ -382,6 +384,7 @@ def main() -> int:
                     "superseded": len(applied["superseded"]),
                     "coexist_marked": len(applied["coexist_marked"]),
                     "deferred": len(applied["deferred"]),
+                    "pending_deduped": len(applied["pending_deduped"]),
                     "rejection_sample": rejected[:8],
                 },
             )
@@ -426,6 +429,7 @@ def main() -> int:
                 "superseded_count": totals["beliefs_superseded"],
                 "coexist_marked_count": totals["beliefs_coexist_marked"],
                 "deferred_count": totals["beliefs_deferred"],
+                "pending_deduped_count": totals["beliefs_pending_deduped"],
             },
         )
         emit(
