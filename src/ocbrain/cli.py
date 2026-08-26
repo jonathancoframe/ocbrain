@@ -547,6 +547,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_context_args(briefing)
     briefing.add_argument("--budget-chars", type=int, default=DEFAULT_BRIEFING_BUDGET_CHARS)
     briefing.add_argument(
+        "--repo-root",
+        help=(
+            "Local directory to resolve goal spec pointers against. This is not "
+            "--repo: --repo is part of the retrieval scope and narrows what the "
+            "briefing reports, while this only tells the pointer check where to "
+            "look on disk."
+        ),
+    )
+    briefing.add_argument(
         "--text",
         action="store_true",
         help="Print the rendered briefing only. This is what a SessionStart hook wants.",
@@ -2663,10 +2672,12 @@ def cmd_briefing(args: argparse.Namespace) -> int:
     is what lands in the window. JSON there would spend the budget on braces.
     """
     conn = open_db(args)
+    repo_root = getattr(args, "repo_root", None)
     payload = build_briefing(
         conn,
         context=context_from_args(args),
         budget_chars=args.budget_chars,
+        repo_root=Path(repo_root) if repo_root else None,
     )
     if args.text:
         print(payload["text"])

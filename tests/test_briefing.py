@@ -74,6 +74,19 @@ def _git(root: Path, *args: str) -> str:
     ).stdout
 
 
+def _git_repo_with_tag(root: Path, tag: str) -> Path:
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    spec = root / "SPEC.md"
+    spec.write_text(f"# {tag}\n", encoding="utf-8")
+    _git(root, "add", "--", "SPEC.md")
+    _git(root, "commit", "-q", "-m", tag)
+    _git(root, "tag", tag)
+    return spec
+
+
 def _closeout(conn, ctx, task_ref, status, *, verifier=None, summary="did a thing", **kwargs):
     return record_closeout(
         conn,
@@ -1103,3 +1116,117 @@ def test_cli_briefing_and_ledger_routes(tmp_path, ctx, capsys):
     assert main(["--db", str(db), "ledger", "--task-ref", "TASK-1"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["entries"][0]["state"] == "attempted_failed"
+
+
+def test_cli_repo_root_resolves_a_pointer_without_narrowing_the_ledger(tmp_path, capsys):
+    """``--repo-root`` is a filesystem hint; ``--repo`` is part of the scope.
+
+    The SessionStart hook reached for ``--repo`` first, because it was the only
+    flag that looked like "where the code is". That silently re-scoped the
+    briefing: closeouts recorded without that repo dropped out of the ledger and
+    the chain section emptied, trading a cosmetic warning for missing history.
+    These two must stay distinguishable from the command line.
+    """
+    from ocbrain.cli import main
+
+    db = tmp_path / "cli-repo-root.sqlite"
+    conn = connect(db)
+    init_core_v1(conn)
+    context = ScopeContext(project="pointer-scope")
+    spec = tmp_path / "docs" / "HARNESS.md"
+    spec.parent.mkdir()
+    spec.write_text("# harness\n", encoding="utf-8")
+    open_goal(
+        conn,
+        objective="Resolve the pointer from the hook",
+        finish_line="pytest -q",
+        source_path="docs/HARNESS.md",
+        context=context,
+    )
+    _closeout(conn, context, "TASK-LEDGER", "completed", verifier="repo://ocbrain/pytest")
+    conn.commit()
+    conn.close()
+
+    base = ["--db", str(db), "briefing", "--project", "pointer-scope", "--text"]
+
+    assert main(base) == 0
+    without = capsys.readouterr().out
+    assert "source_pointer_unresolved" in without
+    assert "TASK-LEDGER" in without
+
+    assert main([*base, "--repo-root", str(tmp_path)]) == 0
+    with_root = capsys.readouterr().out
+    # The warning is gone because the spec was found, and nothing else moved:
+    # the ledger still reports the same task.
+    assert "source_pointer_unresolved" not in with_root
+    assert "TASK-LEDGER" in with_root
+    assert with_root == without.replace(" [source_pointer_unresolved]", "")
+
+    # --repo is the contrast: it joins the retrieval scope, so the closeout
+    # recorded without it is no longer this scope's history.
+    assert main([*base, "--repo", str(tmp_path)]) == 0
+    with_repo = capsys.readouterr().out
+    assert "TASK-LEDGER" not in with_repo
+
+
+@pytest.mark.parametrize(
+    ("git_ref", "expect_warning"),
+    [
+        pytest.param("repo-root-only", True, id="reject-ref-only-in-repo-root"),
+        pytest.param("pointer-only", False, id="accept-ref-only-in-pointer-repo"),
+    ],
+)
+def test_cli_absolute_pointer_checks_its_own_repo(
+    tmp_path, capsys, git_ref, expect_warning
+):
+    from ocbrain.cli import main
+
+    repo_root = tmp_path / "repo-root"
+    pointer_repo = tmp_path / "pointer-repo"
+    _git_repo_with_tag(repo_root, "repo-root-only")
+    spec = _git_repo_with_tag(pointer_repo, "pointer-only")
+
+    db = tmp_path / "absolute-pointer.sqlite"
+    conn = connect(db)
+    init_core_v1(conn)
+    context = ScopeContext(project="absolute-pointer-scope")
+    opened = open_goal(
+        conn,
+        objective=f"Validate {git_ref} in the pointer repository",
+        finish_line="pytest -q",
+        source_path=str(spec),
+        source_git_ref=git_ref,
+        context=context,
+    )
+    conn.commit()
+    conn.close()
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "briefing",
+                "--project",
+                "absolute-pointer-scope",
+                "--repo-root",
+                str(repo_root),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    expected = (
+        [
+            {
+                "goal_id": opened["goal_id"],
+                "type": "source_git_ref_unresolved",
+                "path": str(spec),
+                "git_ref": git_ref,
+            }
+        ]
+        if expect_warning
+        else []
+    )
+    assert payload["warnings"] == expected
