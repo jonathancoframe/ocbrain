@@ -6,10 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
-from ocbrain.db import connect
-from ocbrain.seal_truth import compile_sealed_release, preview_sealed_release
+# Keep the standalone script usable from a plain source checkout. Pytest adds
+# src/ for its own process, but a subprocess launched by path starts with only
+# scripts/ on sys.path.
+_SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if _SRC_DIR.is_dir():
+    sys.path.insert(0, str(_SRC_DIR))
+
+from ocbrain.db import connect  # noqa: E402
+from ocbrain.seal_truth import compile_sealed_release, preview_sealed_release  # noqa: E402
 
 
 def main() -> int:
