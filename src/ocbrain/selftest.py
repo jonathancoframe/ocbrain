@@ -1848,34 +1848,115 @@ def _integrity(conn: sqlite3.Connection) -> Metric:
 # --------------------------------------------------------------------------- #
 
 
-def _briefing_scopes(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
-    """Which project scopes to exercise the briefing against, deterministically.
+_BRIEFING_SCOPE_TYPES = ("project", "repo", "client", "task")
 
-    Every scope that has an open goal, plus the busiest scopes by closeout
-    count, capped. Sorted, so two runs against an unchanged core pick the same
-    scopes -- a determinism metric measured over a shifting sample would be
-    measuring the sample.
+
+def _briefing_scope_key(scope_type: str, value: Any) -> tuple[str, str] | None:
+    """Normalize one scope the same way a real briefing caller does."""
+    if scope_type not in _BRIEFING_SCOPE_TYPES:
+        return None
+    from ocbrain.scope import ScopeContext
+
+    context = ScopeContext.from_dict({scope_type: value})
+    normalized = getattr(context, scope_type)
+    if not normalized:
+        return None
+    return scope_type, normalized
+
+
+def _briefing_scope_label(scope: tuple[str, str]) -> str:
+    """Keep the historical bare-project return while identifying other kinds."""
+    scope_type, value = scope
+    if scope_type == "project" and value.partition(":")[0] not in _BRIEFING_SCOPE_TYPES:
+        return value
+    return f"{scope_type}:{value}"
+
+
+def _briefing_scope_context(scope: str):
+    """Turn one sampled label into the context accepted by ``build_briefing``."""
+    from ocbrain.scope import ScopeContext
+
+    scope_type, separator, value = scope.partition(":")
+    if separator and scope_type in _BRIEFING_SCOPE_TYPES:
+        return ScopeContext.from_dict({scope_type: value})
+    return ScopeContext(project=scope)
+
+
+def _briefing_scopes(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
+    """Choose deterministic briefing scopes, with currently open work first.
+
+    Goal state comes from the serving/current fold in ``current_beliefs`` and
+    specifically from the folded goal attribute ``status``. The belief row's
+    own ``status='current'`` only says that the belief is current; it does not
+    mean the goal is still open.
+
+    Open-goal scopes are sorted first. Spare slots are filled by other goal or
+    closeout scopes, with busier closeout scopes first and the normalized scope
+    as a total tie-breaker. A scope present in more than one source is sampled
+    once. Ordinary project labels remain bare for compatibility; other
+    supported scope kinds carry their ``type:`` prefix so the caller can
+    reconstruct context.
     """
-    scopes: set[str] = set()
+    if limit <= 0:
+        return []
+
+    active: set[tuple[str, str]] = set()
+    goal_scopes: set[tuple[str, str]] = set()
     if _table_exists(conn, "current_beliefs"):
-        for row in conn.execute(
-            "SELECT DISTINCT scope_id FROM current_beliefs "
-            "WHERE serve=1 AND status='current' AND belief_type='goal'"
-        ):
-            scope_id = str(row[0] or "")
-            if scope_id.startswith("project:"):
-                scopes.add(scope_id.split(":", 1)[1])
+        rows = conn.execute(
+            "SELECT belief_id, scope_type, scope_id, attributes_json "
+            "FROM current_beliefs "
+            "WHERE serve=1 AND status='current' AND belief_type='goal' "
+            "ORDER BY scope_type, scope_id, belief_id"
+        )
+        for row in rows:
+            scope_type = str(row["scope_type"] or "")
+            scope_id = str(row["scope_id"] or "")
+            prefix = f"{scope_type}:"
+            value = scope_id[len(prefix) :] if scope_id.startswith(prefix) else scope_id
+            scope = _briefing_scope_key(scope_type, value)
+            if scope is None:
+                continue
+            goal_scopes.add(scope)
+            attributes = json.loads(row["attributes_json"] or "{}")
+            if str(attributes.get("status") or "open") == "open":
+                active.add(scope)
+
+    closeout_counts: dict[tuple[str, str], int] = {}
     if _table_exists(conn, "task_closeouts"):
+        from ocbrain.scope import ScopeContext
+
         for row in conn.execute(
-            "SELECT json_extract(context_json, '$.project') AS project, COUNT(*) AS n "
-            "FROM task_closeouts WHERE json_extract(context_json, '$.project') IS NOT NULL "
-            "GROUP BY project ORDER BY n DESC, project LIMIT ?",
-            (limit,),
+            "SELECT context_json, COUNT(*) AS n FROM task_closeouts "
+            "GROUP BY context_json ORDER BY context_json"
         ):
-            project = str(row["project"] or "").strip()
-            if project:
-                scopes.add(project)
-    return sorted(scopes)[:limit]
+            raw_context = json.loads(row[0] or "{}")
+            if not isinstance(raw_context, dict):
+                continue
+            context = ScopeContext.from_dict(raw_context)
+            scope = next(
+                (
+                    (scope_type, value)
+                    for scope_type in _BRIEFING_SCOPE_TYPES
+                    if (value := getattr(context, scope_type))
+                ),
+                None,
+            )
+            if scope is not None:
+                closeout_counts[scope] = closeout_counts.get(scope, 0) + int(row["n"])
+
+    scope_order = {scope_type: index for index, scope_type in enumerate(_BRIEFING_SCOPE_TYPES)}
+
+    def stable_key(scope: tuple[str, str]) -> tuple[int, str]:
+        return scope_order[scope[0]], scope[1]
+
+    ordered_active = sorted(active, key=stable_key)
+    remaining = (goal_scopes | closeout_counts.keys()) - active
+    ordered_remaining = sorted(
+        remaining,
+        key=lambda scope: (-closeout_counts.get(scope, 0), *stable_key(scope)),
+    )
+    return [_briefing_scope_label(scope) for scope in (*ordered_active, *ordered_remaining)[:limit]]
 
 
 def _harness_surface(conn: sqlite3.Connection, now: datetime) -> list[Metric]:
@@ -1895,11 +1976,10 @@ def _harness_surface(conn: sqlite3.Connection, now: datetime) -> list[Metric]:
     calibration. Nothing is faked in to fill a row.
     """
     from ocbrain.briefing import DEFAULT_BRIEFING_BUDGET_CHARS, build_briefing, list_goals
-    from ocbrain.scope import ScopeContext
 
-    projects = _briefing_scopes(conn)
-    if not projects:
-        reason = "no project scope has a goal or a closeout to brief on"
+    scopes = _briefing_scopes(conn)
+    if not scopes:
+        reason = "no scope has a goal or a closeout to brief on"
         return [
             _unmeasured("briefing_determinism", "E", "Briefing determinism", reason, scopes=0),
             _unmeasured(
@@ -1913,46 +1993,46 @@ def _harness_surface(conn: sqlite3.Connection, now: datetime) -> list[Metric]:
     within_budget = 0
     divergent: list[str] = []
     oversized: list[str] = []
-    for project in projects:
-        context = ScopeContext(project=project)
+    for scope in scopes:
+        context = _briefing_scope_context(scope)
         first = build_briefing(conn, context=context)
         second = build_briefing(conn, context=context)
         if first["text"] == second["text"]:
             identical += 1
         else:
-            divergent.append(project)
+            divergent.append(scope)
         if first["used_chars"] <= first["budget_chars"]:
             within_budget += 1
         else:
-            oversized.append(project)
+            oversized.append(scope)
 
     metrics = [
         _measured(
             "briefing_determinism",
             "E",
             "Briefing determinism",
-            identical / len(projects),
-            display=f"{identical}/{len(projects)} scopes byte-identical",
+            identical / len(scopes),
+            display=f"{identical}/{len(scopes)} scopes byte-identical",
             basis="brain.briefing called twice per scope, bytes compared",
-            scopes=len(projects),
+            scopes=len(scopes),
             divergent_scopes=divergent or None,
         ),
         _measured(
             "briefing_budget_compliance",
             "E",
             "Briefing within budget",
-            within_budget / len(projects),
-            display=f"{within_budget}/{len(projects)} within {DEFAULT_BRIEFING_BUDGET_CHARS} chars",
+            within_budget / len(scopes),
+            display=f"{within_budget}/{len(scopes)} within {DEFAULT_BRIEFING_BUDGET_CHARS} chars",
             basis="rendered characters against the declared budget",
-            scopes=len(projects),
+            scopes=len(scopes),
             oversized_scopes=oversized or None,
         ),
     ]
 
     goals: list[dict[str, Any]] = []
-    for project in projects:
+    for scope in scopes:
         goals.extend(
-            list_goals(conn, context=ScopeContext(project=project), status="open", limit=0)
+            list_goals(conn, context=_briefing_scope_context(scope), status="open", limit=0)
         )
     unique = {goal["goal_id"]: goal for goal in goals}
     if not unique:

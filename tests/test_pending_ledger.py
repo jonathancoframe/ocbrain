@@ -23,8 +23,11 @@ authority must not be purchasable by typing the curator's name.
 from __future__ import annotations
 
 import json
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
+import ocbrain.mcp_v1 as mcp_v1
 from ocbrain.core_v1 import (
     append_core_event,
     get_core_v1_belief,
@@ -176,6 +179,88 @@ def test_re_proposing_an_identical_supersede_writes_nothing(tmp_path: Path, monk
     assert _events(conn) == after_first
     assert pending_supersede_count(conn) == 1
     conn.close()
+
+
+def test_concurrent_identical_supersedes_create_one_pending_proposal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pending lookup and append serialize under the same write lock."""
+    monkeypatch.setenv("OCBRAIN_SUPERSEDE_TIER", "pending_all")
+    setup = _core(tmp_path)
+    belief_id = "belief:vm"
+    _seed(setup, belief_id=belief_id, body="The research VM is asa1.")
+    setup.close()
+
+    # Meet both callers at the real transaction boundary. This adds only
+    # synchronization: the original context manager still owns BEGIN IMMEDIATE,
+    # commit/rollback semantics, and the body of the transaction.
+    barrier = threading.Barrier(2)
+    original_transaction = mcp_v1._one_transaction
+
+    @contextmanager
+    def synchronized_transaction(conn):
+        barrier.wait(timeout=5)
+        with original_transaction(conn):
+            yield
+
+    monkeypatch.setattr(mcp_v1, "_one_transaction", synchronized_transaction)
+
+    outcomes: list[dict] = []
+    errors: list[BaseException] = []
+    outcome_lock = threading.Lock()
+    db_path = tmp_path / "core.sqlite"
+
+    def propose() -> None:
+        conn = connect(db_path)
+        try:
+            old = get_core_v1_belief(conn, belief_id)
+            assert old is not None
+            outcome = supersede_transaction(
+                conn,
+                old=old,
+                statement="The research VM is asa2.",
+                rationale="the stored statement is out of date",
+                attributes=dict(old.get("attributes") or {}),
+                actor="agent:race",
+                provenance=EMPTY_PROVENANCE,
+            )
+            conn.commit()
+            with outcome_lock:
+                outcomes.append(outcome)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            conn.rollback()
+            with outcome_lock:
+                errors.append(exc)
+        finally:
+            conn.close()
+
+    workers = [threading.Thread(target=propose) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert errors == []
+    assert len(outcomes) == 2
+    assert sorted(bool(outcome.get("deduped")) for outcome in outcomes) == [False, True]
+    assert len({outcome["proposal_event_id"] for outcome in outcomes}) == 1
+
+    check = connect(db_path)
+    try:
+        assert pending_supersede_count(check) == 1
+        assert (
+            check.execute(
+                "SELECT COUNT(*) FROM brain_events AS proposal "
+                "WHERE proposal.kind='compilation_proposed' "
+                "AND json_extract(proposal.body_json, '$.attributes.supersedes') = ? "
+                "AND json_extract(proposal.body_json, '$.belief_id') = ?",
+                (belief_id, outcomes[0]["successor_id"]),
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        check.close()
 
 
 def test_a_different_replacement_body_for_the_same_target_still_mints(

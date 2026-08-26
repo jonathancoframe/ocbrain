@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from ocbrain.briefing import (
     DEFAULT_BRIEFING_BUDGET_CHARS,
+    MAX_BRIEFING_BUDGET_CHARS,
     MAX_LINE_CHARS,
+    MIN_BRIEFING_BUDGET_CHARS,
     SECTION_ORDER,
     GoalError,
     build_briefing,
@@ -59,6 +63,15 @@ def _spec(tmp_path, name="SPEC.md"):
     path = tmp_path / name
     path.write_text("# spec\n", encoding="utf-8")
     return str(path)
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
 
 
 def _closeout(conn, ctx, task_ref, status, *, verifier=None, summary="did a thing", **kwargs):
@@ -208,6 +221,93 @@ def test_briefing_stays_within_budget_and_counts_what_it_dropped(tmp_path, ctx):
     assert str(payload["truncation"]["items_omitted"]) in payload["text"]
 
 
+def test_briefing_compacts_a_1000_character_scope_at_the_minimum_budget(tmp_path):
+    conn = _core(tmp_path)
+    context = ScopeContext(project="x" * 1000)
+
+    first = build_briefing(
+        conn,
+        context=context,
+        budget_chars=MIN_BRIEFING_BUDGET_CHARS,
+    )
+    second = build_briefing(
+        conn,
+        context=context,
+        budget_chars=MIN_BRIEFING_BUDGET_CHARS,
+    )
+
+    assert first == second
+    assert first["used_chars"] == len(first["text"]) <= MIN_BRIEFING_BUDGET_CHARS
+    assert first["truncation"]["scope_id_truncated"] is True
+    assert first["truncation"]["items_omitted"] == 0
+    assert first["text"].splitlines()[0].startswith("OCBRAIN BRIEFING · project:")
+    assert first["text"].splitlines()[0].endswith("…")
+    section_headers = [
+        line for line in first["text"].splitlines() if line[:2] in {"A.", "B.", "C.", "D."}
+    ]
+    assert section_headers == [header for _, header in SECTION_ORDER]
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        MIN_BRIEFING_BUDGET_CHARS,
+        MIN_BRIEFING_BUDGET_CHARS + 1,
+        DEFAULT_BRIEFING_BUDGET_CHARS,
+        MAX_BRIEFING_BUDGET_CHARS,
+    ],
+)
+@pytest.mark.parametrize("identifier", ["界" * 1000, "🙂\n" * 600])
+def test_briefing_budget_holds_for_unicode_identifier_boundaries(tmp_path, budget, identifier):
+    conn = _core(tmp_path)
+    payload = build_briefing(
+        conn,
+        context=ScopeContext(task=identifier),
+        budget_chars=budget,
+    )
+
+    assert payload["used_chars"] == len(payload["text"])
+    assert payload["used_chars"] <= payload["budget_chars"] == budget
+    assert all(len(line) <= MAX_LINE_CHARS for line in payload["text"].splitlines())
+    assert payload["text"].encode("utf-8").decode("utf-8") == payload["text"]
+
+
+def test_briefing_budget_holds_for_long_scope_and_item_text(tmp_path):
+    conn = _core(tmp_path)
+    context = ScopeContext(project="scope" * 200)
+    _closeout(
+        conn,
+        context,
+        "任务🙂" * 400,
+        "failed",
+        summary="failure detail " * 400,
+    )
+    conn.commit()
+
+    for budget in (
+        MIN_BRIEFING_BUDGET_CHARS,
+        MIN_BRIEFING_BUDGET_CHARS + 1,
+        DEFAULT_BRIEFING_BUDGET_CHARS,
+        MAX_BRIEFING_BUDGET_CHARS,
+    ):
+        payload = build_briefing(conn, context=context, budget_chars=budget)
+        assert payload["used_chars"] == len(payload["text"]) <= budget
+        assert payload["truncation"]["items_omitted"] == sum(
+            section["omitted_count"] for section in payload["sections"]
+        )
+        assert all(len(line) <= MAX_LINE_CHARS for line in payload["text"].splitlines())
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [MIN_BRIEFING_BUDGET_CHARS - 1, MAX_BRIEFING_BUDGET_CHARS + 1],
+)
+def test_briefing_rejects_budgets_just_outside_the_public_boundaries(tmp_path, ctx, budget):
+    conn = _core(tmp_path)
+    with pytest.raises(ValueError, match="budget_chars"):
+        build_briefing(conn, context=ctx, budget_chars=budget)
+
+
 def test_briefing_line_length_is_bounded_so_one_summary_cannot_eat_the_budget(tmp_path, ctx):
     conn = _core(tmp_path)
     _closeout(conn, ctx, "TASK-HUGE", "failed", summary="x" * 5000)
@@ -279,6 +379,7 @@ def test_goal_open_close_is_an_event_not_an_edit(tmp_path, ctx):
         goal_id=opened["goal_id"],
         status="done",
         verifier_uri="repo://ocbrain/pytest",
+        verifier_status="passed",
     )
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0]
@@ -306,6 +407,90 @@ def test_goal_close_requires_naming_the_verifier(tmp_path, ctx):
     conn.commit()
     with pytest.raises(GoalError, match="verifier_uri is required"):
         close_goal(conn, goal_id=opened["goal_id"], status="done", verifier_uri="  ")
+
+
+def test_goal_done_requires_an_explicit_passing_verifier_without_appending(tmp_path, ctx):
+    conn = _core(tmp_path)
+    opened = open_goal(
+        conn,
+        objective="Ship only after the finish line passes",
+        finish_line="pytest -q",
+        source_path=_spec(tmp_path),
+        context=ctx,
+    )
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0]
+
+    with pytest.raises(GoalError, match="verifier_status is required"):
+        close_goal(
+            conn,
+            goal_id=opened["goal_id"],
+            status="done",
+            verifier_uri="repo://ocbrain/pytest",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0] == before
+    assert [goal["goal_id"] for goal in list_goals(conn, context=ctx, status="open")] == [
+        opened["goal_id"]
+    ]
+
+
+@pytest.mark.parametrize("verifier_status", ["failed", "unknown", "not_required"])
+def test_goal_done_rejects_nonpassing_verifier_without_appending(
+    tmp_path, ctx, verifier_status
+):
+    conn = _core(tmp_path)
+    opened = open_goal(
+        conn,
+        objective="Keep a failed verification open",
+        finish_line="pytest -q",
+        source_path=_spec(tmp_path),
+        context=ctx,
+    )
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0]
+
+    with pytest.raises(GoalError, match="status='done' requires verifier_status='passed'"):
+        close_goal(
+            conn,
+            goal_id=opened["goal_id"],
+            status="done",
+            verifier_uri="repo://ocbrain/pytest",
+            verifier_status=verifier_status,
+        )
+    assert conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0] == before
+    assert [goal["goal_id"] for goal in list_goals(conn, context=ctx, status="open")] == [
+        opened["goal_id"]
+    ]
+    assert list_goals(conn, context=ctx, status="done") == []
+
+
+@pytest.mark.parametrize("verifier_status", ["failed", "unknown", "not_required"])
+def test_goal_abandoned_preserves_nonpassing_verifier_state(tmp_path, ctx, verifier_status):
+    conn = _core(tmp_path)
+    opened = open_goal(
+        conn,
+        objective="Record an attempt that did not land",
+        finish_line="pytest -q",
+        source_path=_spec(tmp_path),
+        context=ctx,
+    )
+    conn.commit()
+
+    closed = close_goal(
+        conn,
+        goal_id=opened["goal_id"],
+        status="abandoned",
+        verifier_uri="repo://ocbrain/pytest",
+        verifier_status=verifier_status,
+    )
+    conn.commit()
+
+    assert closed["verifier"] == {
+        "uri": "repo://ocbrain/pytest",
+        "status": verifier_status,
+    }
+    abandoned = list_goals(conn, context=ctx, status="abandoned")
+    assert abandoned[0]["verifier"] == closed["verifier"]
 
 
 def test_goal_requires_a_finish_line_and_a_spec_pointer(tmp_path, ctx):
@@ -352,6 +537,121 @@ def test_missing_source_pointer_surfaces_typed_and_the_goal_does_not_vanish(tmp_
     payload = build_briefing(conn, context=ctx)
     assert payload["warnings"][0]["type"] == "source_pointer_unresolved"
     assert "source_pointer_unresolved" in payload["text"]
+
+
+def test_repo_relative_source_pointer_resolves_from_local_repo_context(tmp_path):
+    conn = _core(tmp_path)
+    repo = tmp_path / "target-repo"
+    spec = repo / "docs" / "TARGET-SPEC.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("# target spec\n", encoding="utf-8")
+    context = ScopeContext(repo=str(repo))
+    opened = open_goal(
+        conn,
+        objective="Resolve the repository spec",
+        finish_line="pytest -q",
+        source_path="docs/TARGET-SPEC.md",
+        context=context,
+    )
+    conn.commit()
+
+    goal = list_goals(conn, context=context)[0]
+    assert goal["goal_id"] == opened["goal_id"]
+    assert "warning" not in goal
+    assert build_briefing(conn, context=context)["warnings"] == []
+
+
+@pytest.mark.parametrize("repo_value", [None, "named-repository", "https://example.test/repo"])
+def test_relative_source_pointer_without_a_local_repo_root_stays_unresolved(
+    tmp_path, monkeypatch, repo_value
+):
+    conn = _core(tmp_path)
+    spec = tmp_path / "docs" / "TARGET-SPEC.md"
+    spec.parent.mkdir()
+    spec.write_text("# target spec\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    context = (
+        ScopeContext(repo=repo_value)
+        if repo_value is not None
+        else ScopeContext(project="no-repo-context")
+    )
+    open_goal(
+        conn,
+        objective="Do not guess a repository root",
+        finish_line="pytest -q",
+        source_path="docs/TARGET-SPEC.md",
+        context=context,
+    )
+    conn.commit()
+
+    warning = list_goals(conn, context=context)[0]["warning"]
+    assert warning == {"type": "source_pointer_unresolved", "path": "docs/TARGET-SPEC.md"}
+
+
+def test_git_ref_warning_is_checked_in_the_local_repository(tmp_path, ctx):
+    conn = _core(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    spec = repo / "SPEC.md"
+    spec.write_text("# spec\n", encoding="utf-8")
+    _git(repo, "add", "SPEC.md")
+    _git(repo, "commit", "-q", "-m", "base")
+
+    invalid = open_goal(
+        conn,
+        objective="Reject an unresolvable source revision",
+        finish_line="pytest -q",
+        source_path=str(spec),
+        source_git_ref="definitely-not-a-real-git-ref",
+        context=ctx,
+    )
+    valid = open_goal(
+        conn,
+        objective="Accept a resolvable source revision",
+        finish_line="pytest -q",
+        source_path=str(spec),
+        source_git_ref="HEAD",
+        context=ctx,
+    )
+    conn.commit()
+
+    goals = {goal["goal_id"]: goal for goal in list_goals(conn, context=ctx)}
+    assert goals[invalid["goal_id"]]["warning"] == {
+        "type": "source_git_ref_unresolved",
+        "path": str(spec),
+        "git_ref": "definitely-not-a-real-git-ref",
+    }
+    assert "warning" not in goals[valid["goal_id"]]
+    assert build_briefing(conn, context=ctx)["warnings"] == [
+        {"goal_id": invalid["goal_id"], **goals[invalid["goal_id"]]["warning"]}
+    ]
+
+
+def test_git_ref_without_a_local_repository_is_explicitly_unresolved(tmp_path, ctx):
+    conn = _core(tmp_path)
+    spec = Path(_spec(tmp_path))
+    opened = open_goal(
+        conn,
+        objective="Report a source revision that cannot be checked",
+        finish_line="pytest -q",
+        source_path=str(spec),
+        source_git_ref="definitely-not-a-real-git-ref",
+        context=ctx,
+    )
+    conn.commit()
+
+    warning = list_goals(conn, context=ctx)[0]["warning"]
+    assert warning == {
+        "type": "source_git_ref_unresolved",
+        "path": str(spec),
+        "git_ref": "definitely-not-a-real-git-ref",
+    }
+    assert build_briefing(conn, context=ctx)["warnings"] == [
+        {"goal_id": opened["goal_id"], **warning}
+    ]
 
 
 def test_goals_are_selected_by_scope_and_status_never_by_similarity(tmp_path, ctx):
@@ -630,12 +930,62 @@ def test_harness_tools_are_reachable_over_mcp(tmp_path):
             "goal_id": opened["goal_id"],
             "status": "done",
             "verifier_uri": "repo://ocbrain/pytest",
+            "verifier_status": "passed",
             "context": {"project": "ocbrain"},
         },
     )
     assert closed["status"] == "done"
     after = call("brain.briefing", {"context": {"project": "ocbrain"}})
     assert opened["goal_id"] not in after["text"]
+
+
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected_message"),
+    [
+        ({}, "missing argument: verifier_status"),
+        (
+            {"verifier_status": "failed"},
+            "status='done' requires verifier_status='passed'",
+        ),
+    ],
+)
+def test_mcp_goal_done_rejects_missing_or_failed_verifier_without_appending(
+    tmp_path, extra_arguments, expected_message
+):
+    conn = _core(tmp_path)
+    context = ScopeContext(project="ocbrain")
+    opened = open_goal(
+        conn,
+        objective="Keep MCP goal closure truthful",
+        finish_line="pytest -q",
+        source_path=_spec(tmp_path),
+        context=context,
+    )
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0]
+    arguments = {
+        "goal_id": opened["goal_id"],
+        "status": "done",
+        "verifier_uri": "repo://ocbrain/pytest",
+        "context": {"project": "ocbrain"},
+        **extra_arguments,
+    }
+
+    response = handle_request(
+        conn,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "brain.goal_close", "arguments": arguments},
+        },
+    )
+
+    assert response["error"] == {"code": -32602, "message": expected_message}
+    assert conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0] == before
+    assert [goal["goal_id"] for goal in list_goals(conn, context=context, status="open")] == [
+        opened["goal_id"]
+    ]
 
 
 def test_briefing_refuses_hosted_delivery(tmp_path):

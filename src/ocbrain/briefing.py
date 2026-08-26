@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,8 @@ EMPTY_MARKERS: dict[str, str] = {
 
 NOTHING_KNOWN_LINE = "E. NOTHING KNOWN FOR THIS SCOPE"
 TRUNCATION_PREFIX = "-- truncated:"
+BRIEFING_TITLE_PREFIX = "OCBRAIN BRIEFING · "
+MIN_RENDERED_SCOPE_CHARS = 32
 
 
 class GoalError(ValueError):
@@ -331,7 +334,7 @@ def close_goal(
     goal_id: str,
     status: str,
     verifier_uri: str,
-    verifier_status: str = "passed",
+    verifier_status: str | None = None,
     note: str | None = None,
     actor: str = "agent",
     provenance: Provenance | None = None,
@@ -347,9 +350,10 @@ def close_goal(
     full rebuild reaches the same place -- which is what makes "when did this
     close, and who said so" answerable at all.
 
-    Closing requires naming the verifier evidence. A goal whose finish line was
-    an executable command and whose closure cites nothing is indistinguishable
-    from a goal someone got bored of.
+    Closing requires naming the verifier evidence and its status explicitly. A
+    goal whose finish line was an executable command and whose closure cites
+    nothing is indistinguishable from a goal someone got bored of. ``done``
+    requires ``passed``; ``abandoned`` preserves the other truthful states.
     """
     from ocbrain.mcp_v1 import correct_v1
 
@@ -362,8 +366,15 @@ def close_goal(
             "or a stable locator like repo://<name>/pytest). A verifier nobody "
             "can go and check is not evidence."
         )
+    if not isinstance(verifier_status, str) or not verifier_status.strip():
+        raise GoalError(
+            "verifier_status is required: pass the verifier result explicitly; "
+            "it is never inferred"
+        )
     if verifier_status not in {"passed", "failed", "unknown", "not_required"}:
         raise GoalError("verifier_status must be passed, failed, unknown, or not_required")
+    if status == "done" and verifier_status != "passed":
+        raise GoalError("status='done' requires verifier_status='passed'")
 
     resolved_id = resolve_object_id(conn, (goal_id or "").strip())
     row = conn.execute(
@@ -443,6 +454,9 @@ def list_goals(
     )
     if not scope_ids:
         return []
+    pointer_repo_root = _usable_local_directory(repo_root) or _usable_local_directory(
+        context.repo
+    )
     placeholders = ",".join("?" for _ in scope_ids)
     rows = conn.execute(
         f"""
@@ -475,7 +489,7 @@ def list_goals(
         if isinstance(attributes.get("verifier"), dict):
             entry["verifier"] = attributes["verifier"]
         if check_source_pointers:
-            warning = _source_pointer_warning(pointer, repo_root=repo_root)
+            warning = _source_pointer_warning(pointer, repo_root=pointer_repo_root)
             if warning is not None:
                 entry["warning"] = warning
         goals.append(entry)
@@ -497,16 +511,94 @@ def _source_pointer_warning(
     raw = str(pointer.get("path") or "").strip()
     if not raw:
         return {"type": "source_pointer_absent", "path": None}
-    candidate = Path(raw).expanduser()
-    if not candidate.is_absolute() and repo_root is not None:
-        candidate = Path(repo_root) / candidate
+    try:
+        candidate = Path(raw).expanduser()
+    except (OSError, RuntimeError):
+        return {"type": "source_pointer_unresolved", "path": raw}
+    if not candidate.is_absolute():
+        if repo_root is None:
+            return {"type": "source_pointer_unresolved", "path": raw}
+        candidate = repo_root / candidate
     try:
         exists = candidate.exists()
     except OSError:
         exists = False
-    if exists:
+    if not exists:
+        return {"type": "source_pointer_unresolved", "path": raw}
+
+    git_ref = str(pointer.get("git_ref") or "").strip()
+    if not git_ref:
         return None
-    return {"type": "source_pointer_unresolved", "path": raw}
+    git_root = _git_repository_root(repo_root)
+    if git_root is None:
+        git_root = _git_repository_root(candidate if candidate.is_dir() else candidate.parent)
+    if git_root is None or not _git_ref_resolves(git_root, git_ref):
+        return {
+            "type": "source_git_ref_unresolved",
+            "path": raw,
+            "git_ref": git_ref,
+        }
+    return None
+
+
+def _usable_local_directory(value: str | Path | None) -> Path | None:
+    """Return an existing local directory, never a guessed repository identifier."""
+    if value is None:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_dir():
+            return None
+        return candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _git_repository_root(start: Path | None) -> Path | None:
+    """Discover a local Git root without invoking a shell or repository hooks."""
+    local_start = _usable_local_directory(start)
+    if local_start is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(local_start), "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return _usable_local_directory(completed.stdout.strip())
+
+
+def _git_ref_resolves(repo_root: Path, git_ref: str) -> bool:
+    """Resolve one commit-ish literally after Git's end-of-options marker."""
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                f"{git_ref}^{{commit}}",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -920,12 +1012,25 @@ def _render(
     """Render within budget, reserving the skeleton before spending on items.
 
     The skeleton -- title, every section header, one marker line per section,
-    and the truncation notice -- is costed first and never truncated. Only items
-    compete for what is left. That is what keeps the *shape* fixed: a briefing
-    that ran out of room still shows all four headers in order and says how many
-    items it dropped, instead of silently ending after section B.
+    and the truncation notice -- is costed first. Only user-supplied identifier
+    text and items can be compacted. That is what keeps the *shape* fixed: a
+    briefing that ran out of room still shows all four headers in order and
+    says how many items it dropped, instead of silently ending after section B.
+
+    The original reservation algorithm remains the fast path so an ordinary
+    briefing that already fits stays byte-identical. A long scope identifier or
+    any other over-budget result takes the exact-render path below, where every
+    candidate is measured after its omission markers and notice are present.
     """
-    title = f"OCBRAIN BRIEFING · {scope_id}"
+    safe_scope_id = _safe_render_line(scope_id)
+    max_scope_chars = MAX_LINE_CHARS - len(BRIEFING_TITLE_PREFIX)
+    title_scope_id = _clip(safe_scope_id, max_scope_chars)
+    scope_id_compacted = title_scope_id != scope_id
+    title = f"{BRIEFING_TITLE_PREFIX}{title_scope_id}"
+    safe_items = {
+        key: [_bounded_render_line(line) for line in items[key]] for key, _ in SECTION_ORDER
+    }
+
     notice_reserve = len(TRUNCATION_PREFIX) + 64
     skeleton = len(title) + 1
     for key, header in SECTION_ORDER:
@@ -940,7 +1045,7 @@ def _render(
     for key, _header in SECTION_ORDER:
         kept[key] = []
         dropped[key] = 0
-        for line in items[key]:
+        for line in safe_items[key]:
             cost = len(line) + 1
             if cost <= remaining:
                 kept[key].append(line)
@@ -948,6 +1053,70 @@ def _render(
             else:
                 dropped[key] += 1
 
+    rendered = _assemble_briefing(title, kept, dropped, empty=empty)
+    if len(rendered[0]) <= budget and not scope_id_compacted:
+        return rendered
+
+    return _render_exactly_bounded(safe_scope_id, safe_items, budget=budget, empty=empty)
+
+
+def _render_exactly_bounded(
+    scope_id: str,
+    items: dict[str, list[str]],
+    *,
+    budget: int,
+    empty: bool,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    """Render a compact title and admit items only after exact measurement."""
+    max_scope_chars = MAX_LINE_CHARS - len(BRIEFING_TITLE_PREFIX)
+    bounded_scope_id = _clip(scope_id, max_scope_chars)
+    initial_scope_chars = min(len(bounded_scope_id), MIN_RENDERED_SCOPE_CHARS)
+    rendered_scope_id = _clip(bounded_scope_id, initial_scope_chars)
+    title = f"{BRIEFING_TITLE_PREFIX}{rendered_scope_id}"
+
+    kept = {key: [] for key, _ in SECTION_ORDER}
+    dropped = {key: len(items[key]) for key, _ in SECTION_ORDER}
+    rendered = _assemble_briefing(title, kept, dropped, empty=empty)
+
+    # MIN_BRIEFING_BUDGET_CHARS is deliberately large enough for this complete
+    # skeleton, including all four headers and omission accounting. Items are
+    # then admitted in the same deterministic section/item order as the legacy
+    # path, but against their fully rendered cost rather than an estimate.
+    for key, _header in SECTION_ORDER:
+        for line in items[key]:
+            kept[key].append(line)
+            dropped[key] -= 1
+            candidate = _assemble_briefing(title, kept, dropped, empty=empty)
+            if len(candidate[0]) <= budget:
+                rendered = candidate
+            else:
+                kept[key].pop()
+                dropped[key] += 1
+
+    # Item content has priority over a verbose identifier. Spend any exact
+    # remainder on the scope after the useful section content has been chosen.
+    spare = budget - len(rendered[0])
+    if spare and len(rendered_scope_id) < len(bounded_scope_id):
+        expanded_chars = min(len(bounded_scope_id), len(rendered_scope_id) + spare)
+        rendered_scope_id = _clip(bounded_scope_id, expanded_chars)
+        title = f"{BRIEFING_TITLE_PREFIX}{rendered_scope_id}"
+        rendered = _assemble_briefing(title, kept, dropped, empty=empty)
+
+    text, accounting, sections = rendered
+    if rendered_scope_id != scope_id:
+        accounting["truncated"] = True
+        accounting["scope_id_truncated"] = True
+    return text, accounting, sections
+
+
+def _assemble_briefing(
+    title: str,
+    kept: dict[str, list[str]],
+    dropped: dict[str, int],
+    *,
+    empty: bool,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    """Assemble one measured rendering from already-selected item lines."""
     lines = [title]
     sections: list[dict[str, Any]] = []
     for key, header in SECTION_ORDER:
@@ -989,6 +1158,24 @@ def _render(
     text = "\n".join(lines)
     accounting["chars_rendered"] = len(text)
     return text, accounting, sections
+
+
+def _safe_render_line(value: Any) -> str:
+    """Return one valid UTF-8 line without changing ordinary text."""
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = text.encode("utf-8", errors="replace").decode("utf-8")
+    return " ".join(text.splitlines())
+
+
+def _bounded_render_line(value: Any) -> str:
+    """Bound an arbitrary item line while preserving intentional indentation."""
+    line = _safe_render_line(value)
+    if len(line) <= MAX_LINE_CHARS:
+        return line
+    return line[: MAX_LINE_CHARS - 1].rstrip() + "…"
 
 
 __all__ = [

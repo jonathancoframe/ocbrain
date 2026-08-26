@@ -14,10 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from ocbrain.briefing import close_goal, open_goal
 from ocbrain.cli import main
 from ocbrain.core_v1 import append_core_event, init_core_v1
 from ocbrain.db import connect
-from ocbrain.scope import ScopeTag
+from ocbrain.scope import ScopeContext, ScopeTag
 from ocbrain.selftest import (
     ALARM,
     NOT_MEASURED,
@@ -26,6 +27,7 @@ from ocbrain.selftest import (
     WATCH,
     SelftestError,
     Threshold,
+    _briefing_scopes,
     diff_scorecards,
     exit_code,
     open_readonly,
@@ -161,15 +163,21 @@ def _retrieval(
 
 
 def _closeout(
-    conn, *, cid: str, days_ago: float, session_id: str | None, connection_id: str | None = None
+    conn,
+    *,
+    cid: str,
+    days_ago: float,
+    session_id: str | None,
+    connection_id: str | None = None,
+    context: dict | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO task_closeouts(id, schema_version, closed_at, task_ref, status, summary, "
         "decision_impact, context_json, artifact_refs_json, verifier_refs_json, "
         "provenance_json, receipt_json, content_hash, session_id, server_connection_id) "
         "VALUES (?, 'ocbrain.closeout.v1', ?, 'task', 'completed', 's', 'informed', "
-        "'{}', '[]', '[]', '{}', '{}', ?, ?, ?)",
-        (cid, _ts(days_ago), cid, session_id, connection_id),
+        "?, '[]', '[]', '{}', '{}', ?, ?, ?)",
+        (cid, _ts(days_ago), json.dumps(context or {}), cid, session_id, connection_id),
     )
 
 
@@ -594,6 +602,131 @@ def test_closeout_join_is_not_measured_without_a_transcript_root(
     metric = _metric(_score(core, transcript_root=tmp_path / "absent"), "closeout_trace_join_rate")
     assert metric["status"] == NOT_MEASURED
     assert "no transcripts found" in metric["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Section E
+# --------------------------------------------------------------------------- #
+
+
+def test_briefing_scopes_do_not_let_closed_goals_crowd_out_active_work(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    spec = tmp_path / "SPEC.md"
+    spec.write_text("# acceptance\n", encoding="utf-8")
+
+    for index in range(5):
+        opened = open_goal(
+            conn,
+            objective=f"Historical goal {index}",
+            finish_line="pytest -q tests/test_selftest.py",
+            source_path=str(spec),
+            context=ScopeContext(project=f"a-closed-{index}"),
+        )
+        close_goal(
+            conn,
+            goal_id=opened["goal_id"],
+            status="done",
+            verifier_uri="repo://selftest/passed",
+            verifier_status="passed",
+        )
+    open_goal(
+        conn,
+        objective="The sole active sampled goal",
+        finish_line="pytest -q tests/test_selftest.py",
+        source_path=str(spec),
+        context=ScopeContext(project="zz-active"),
+    )
+    conn.commit()
+
+    assert _briefing_scopes(conn, limit=5) == [
+        "zz-active",
+        "a-closed-0",
+        "a-closed-1",
+        "a-closed-2",
+        "a-closed-3",
+    ]
+    conn.close()
+
+
+def test_briefing_scopes_order_and_deduplicate_project_repo_and_task_contexts(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "core.sqlite")
+    init_core_v1(conn)
+    spec = tmp_path / "SPEC.md"
+    spec.write_text("# acceptance\n", encoding="utf-8")
+    repo = tmp_path / "active-repo"
+    repo.mkdir()
+
+    for name, context in (
+        ("Beta active", ScopeContext(project="beta-active")),
+        ("Alpha active", ScopeContext(project="alpha-active")),
+        ("Repo active", ScopeContext(repo=str(repo))),
+    ):
+        open_goal(
+            conn,
+            objective=name,
+            finish_line="pytest -q tests/test_selftest.py",
+            source_path=str(spec),
+            context=context,
+        )
+    closed = open_goal(
+        conn,
+        objective="Closed-only fallback",
+        finish_line="pytest -q tests/test_selftest.py",
+        source_path=str(spec),
+        context=ScopeContext(project="closed-only"),
+    )
+    close_goal(
+        conn,
+        goal_id=closed["goal_id"],
+        status="done",
+        verifier_uri="repo://selftest/passed",
+        verifier_status="passed",
+    )
+
+    for index in range(4):
+        _closeout(
+            conn,
+            cid=f"close_active_{index}",
+            days_ago=1,
+            session_id=None,
+            context={"project": "alpha-active", "task": "must-not-split-the-scope"},
+        )
+    for index in range(3):
+        _closeout(
+            conn,
+            cid=f"close_task_{index}",
+            days_ago=1,
+            session_id=None,
+            context={"task": "task-only"},
+        )
+    for index in range(2):
+        _closeout(
+            conn,
+            cid=f"close_history_{index}",
+            days_ago=1,
+            session_id=None,
+            context={"project": "historical-project"},
+        )
+    conn.commit()
+
+    expected = [
+        "alpha-active",
+        "beta-active",
+        f"repo:{repo}",
+        "task:task-only",
+        "historical-project",
+        "closed-only",
+    ]
+    assert _briefing_scopes(conn, limit=6) == expected
+    assert _briefing_scopes(conn, limit=6) == expected
+    assert len(expected) == len(set(expected))
+    scorecard = run_selftest(conn, now=NOW)
+    assert _metric(scorecard, "briefing_determinism")["detail"]["scopes"] == 5
+    assert _metric(scorecard, "goal_pointer_resolution")["detail"]["open_goals"] == 3
+    conn.close()
 
 
 # --------------------------------------------------------------------------- #
