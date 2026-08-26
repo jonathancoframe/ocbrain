@@ -179,10 +179,24 @@ class SupersedeConfig:
     ``direct_cap`` bounds how many direct supersessions one caller may land in
     a trailing 24 hours. Overflow is *routed*, never refused: an agent that
     hits the cap still gets its correction recorded, as a proposal.
+
+    ``curator_direct`` exempts the scheduled wiki curator from that cap for an
+    ordinary belief -- unpinned, and outside ``global:*``. A per-caller budget
+    sized for a runtime agent is the wrong instrument for a process that
+    recompiles the whole corpus hourly: past its eighth correction the curator
+    pends everything, and because a proposal does not change the input that
+    produced it, the next cycle proposes the same supersessions again. The live
+    core reached 283 undecided proposals over 33 beliefs this way in 18 hours.
+    Turning this off restores the all-pending behaviour exactly. What bounds the
+    curator instead is the margin rule -- a claim more than 0.05 below the
+    confidence of the belief it would retire is still deferred -- and the digest
+    gate, neither of which can be configured away. Pinned and doctrine targets
+    still pend, and the cap still binds every other caller unchanged.
     """
 
     tier: str = "project"
     direct_cap: int = 8
+    curator_direct: bool = True
 
 
 @dataclass(frozen=True)

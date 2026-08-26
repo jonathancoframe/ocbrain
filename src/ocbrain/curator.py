@@ -1032,6 +1032,13 @@ def apply_claims(
     would retire is deferred: the supersession is still recorded, as an
     undecided proposal in the pending ledger, and the standing belief keeps
     serving until an operator says otherwise.
+
+    The curator supersedes an *ordinary* belief directly, under
+    ``supersede.curator_direct``. A pinned target and anything in ``global:*``
+    still pend, as does everything the margin rule catches. Turning that config
+    off routes all of it to the ledger again. A supersession the ledger already
+    carries undecided is not proposed a second time; those are reported as
+    ``pending_deduped`` rather than ``deferred``.
     """
     resolved_now = now or datetime.now(UTC)
     applied: list[str] = []
@@ -1040,6 +1047,7 @@ def apply_claims(
     superseded: list[str] = []
     coexist_marked: list[dict[str, str]] = []
     deferred: list[str] = []
+    pending_deduped: list[str] = []
     project_scope_id = f"project:{project}"
     actor = f"operator-approved:{CURATOR_VERSION}"
     for claim in claims:
@@ -1268,6 +1276,8 @@ def apply_claims(
                     provenance=EMPTY_PROVENANCE,
                     evidence_ids=list(claim["evidence_ids"]),
                     confidence_ceiling=float(claim["confidence"]),
+                    curator_authored=True,
+                    inherit_confidence=True,
                     extra_pending_reason=(
                         None
                         if margin_shortfall <= 0
@@ -1284,7 +1294,13 @@ def apply_claims(
                 # whose other claims are fine.
                 blocked.append(str(target["canonical_id"]))
                 continue
-            if outcome["mode"] == "pending":
+            if outcome.get("deduped"):
+                # Already in the pending ledger, undecided, from an earlier
+                # cycle. Counted apart from `deferred` so the promote log shows
+                # the loop standing still rather than a queue that keeps growing
+                # or a run that has quietly stopped proposing anything.
+                pending_deduped.append(str(target["canonical_id"]))
+            elif outcome["mode"] == "pending":
                 deferred.append(str(target["canonical_id"]))
             else:
                 superseded.append(str(outcome["successor_id"]))
@@ -1343,6 +1359,7 @@ def apply_claims(
         "superseded": superseded,
         "coexist_marked": coexist_marked,
         "deferred": deferred,
+        "pending_deduped": pending_deduped,
     }
 
 

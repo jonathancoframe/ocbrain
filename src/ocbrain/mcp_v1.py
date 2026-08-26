@@ -69,6 +69,13 @@ SUPERSEDE_SCHEMA_VERSION = "ocbrain.supersede.v1"
 # original did.
 SUPERSEDE_CONFIDENCE_CAP = 0.7
 SUPERSEDE_TIERS = ("project", "pending_all")
+# The one writer entitled to supersede an ordinary belief unattended. Spelled out
+# here rather than imported from `curator`, which imports this module; a test
+# pins the two strings together so a curator version bump cannot silently drop
+# the authority. Matching this string is *necessary* and never sufficient --
+# `brain.supersede` takes `actor` straight from client arguments, so an agent can
+# type it. The `curator_authored` keyword is the half a client cannot reach.
+CURATOR_SUPERSEDE_WRITER = "operator-approved:wiki-curator-v2"
 # Follow ``superseded_by`` this far and no further. A chain longer than this is
 # a corpus problem, not a read to satisfy, and the bound is what stops a cycle
 # from becoming an unbounded walk even before the seen-set catches it.
@@ -1500,12 +1507,37 @@ def _normalized_body_hash(body: str) -> str:
     return sha256_text(compact_whitespace(body).casefold())
 
 
-def _supersede_config() -> tuple[str, int]:
+# One definition of "nobody has decided this yet", used by the proposal listing,
+# the queue depth, the selftest metric and the dedup guard. Two spellings of this
+# predicate is how a dedup guard drifts away from the count that is supposed to
+# prove it works, so there is one, and it names its outer table `proposal`.
+_PROPOSAL_DECIDED_SQL = (
+    "EXISTS (SELECT 1 FROM brain_events AS decision "
+    "WHERE decision.kind='compilation_decided' "
+    "AND json_extract(decision.body_json, '$.proposal_event_id') = proposal.id)"
+)
+_UNDECIDED_SUPERSEDE_SQL = (
+    "FROM brain_events AS proposal WHERE proposal.kind='compilation_proposed' "
+    "AND json_extract(proposal.body_json, '$.attributes.supersedes') IS NOT NULL "
+    f"AND NOT {_PROPOSAL_DECIDED_SQL}"
+)
+
+
+def is_curator_writer(actor: str) -> bool:
+    """Whether this writer string is the scheduled wiki curator's.
+
+    Necessary but never sufficient for curator authority: see
+    :data:`CURATOR_SUPERSEDE_WRITER`.
+    """
+    return str(actor or "").strip() == CURATOR_SUPERSEDE_WRITER
+
+
+def _supersede_config() -> tuple[str, int, bool]:
     config = load_config().supersede
     tier = str(config.tier or "project").strip().lower()
     if tier not in SUPERSEDE_TIERS:
         tier = "project"
-    return tier, int(config.direct_cap)
+    return tier, int(config.direct_cap), bool(config.curator_direct)
 
 
 def _recent_supersede_count(
@@ -1541,14 +1573,21 @@ def _supersede_route(
     *,
     actor: str,
     provenance: Provenance,
+    curator_authored: bool = False,
 ) -> str | None:
     """Why this supersession needs an admin, or ``None`` to land it directly.
 
     Both routes always exist. The tier flag picks the predicate, never which
     code is compiled, so an operator turning ``pending_all`` on and off again
     exercises paths that were live the whole time.
+
+    The doctrine and pinned rules are checked before any authority is granted,
+    so the curator's direct authority covers ordinary beliefs and nothing else.
+    The rate cap is the *last* question asked, and only the curator is excused
+    from it: it exists to bound an untrusted caller and still does that exactly
+    as it did.
     """
-    tier, cap = _supersede_config()
+    tier, cap, curator_direct = _supersede_config()
     if tier == "pending_all":
         return "tier is pending_all: every runtime supersession is reviewed"
     scope_type = str((belief.get("scope") or {}).get("scope_type") or "")
@@ -1557,6 +1596,14 @@ def _supersede_route(
         return f"target is doctrine ({scope_id}); doctrine is never replaced unattended"
     if belief.get("pinned"):
         return "target is pinned; a pin is a standing operator decision"
+    if curator_direct and curator_authored and is_curator_writer(actor):
+        # A per-caller cap sized for a runtime agent is the wrong instrument for
+        # a scheduled process that recompiles the whole corpus every hour: past
+        # the eighth correction it pends everything, forever, and the ledger
+        # grows without bound because nothing it pends ever changes the input
+        # that produced it. The margin rule and the digest gate are what
+        # actually bound the curator, and both still apply above and below here.
+        return None
     recent = _recent_supersede_count(conn, actor=actor, provenance=provenance)
     if cap >= 0 and recent >= cap:
         return f"rate cap reached: {recent} supersessions in the trailing 24h (cap {cap})"
@@ -1647,6 +1694,8 @@ def supersede_transaction(
     evidence_ids: list[str] | None = None,
     confidence_ceiling: float | None = None,
     extra_pending_reason: str | None = None,
+    curator_authored: bool = False,
+    inherit_confidence: bool = False,
 ) -> dict[str, Any]:
     """Retire one serving belief and stand its replacement up, atomically.
 
@@ -1673,6 +1722,23 @@ def supersede_transaction(
     ``extra_pending_reason`` forces the pending route for a caller that has
     decided this supersession is not safe to land unattended even where the tier
     rules would let it.
+
+    ``curator_authored`` is the half of curator authority a client cannot reach.
+    ``brain.supersede`` takes its ``actor`` straight from tool arguments, so the
+    writer string alone would let any agent buy unlimited unattended supersession
+    by typing the curator's name; :func:`supersede_v1` neither accepts this
+    keyword nor passes it, and both halves are required.
+
+    ``inherit_confidence`` keeps the successor at the predecessor's confidence
+    instead of the ``min(old, 0.7)`` ceiling, and is honoured only for a
+    curator-authored supersession that keeps the predecessor's ``key``. The
+    ceiling is right for a *contested correction* -- a replacement must not gain
+    authority by replacing -- and wrong for the curator refreshing its own fact
+    from better evidence, which is the same claim restated. Left capped, every
+    scheduled refresh ratcheted the corpus toward 0.7: on the live core, 30 of
+    33 pending proposals would have dropped confidence on approval, mean -0.09.
+    Inheriting is no-gain as well as no-loss -- a more confident claim still does
+    not raise the fact, because arriving later is still not evidence.
     """
     old_id = str(old["canonical_id"])
     scope = ScopeTag.from_dict(dict(old.get("scope") or {}))
@@ -1691,17 +1757,54 @@ def supersede_transaction(
     if blocked is not None:
         raise ValueError(f"blocked: this content was previously {blocked}")
 
-    ceilings = [float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP), SUPERSEDE_CONFIDENCE_CAP]
-    if confidence_ceiling is not None:
-        ceilings.append(float(confidence_ceiling))
-    confidence = min(ceilings)
+    stored_confidence = float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP)
+    curator_call = curator_authored and is_curator_writer(actor)
+    old_key = str((old.get("attributes") or {}).get("key") or "")
+    new_key = str(attributes.get("key") or "")
+    same_key_refresh = bool(old_key) and old_key == new_key
+    if inherit_confidence and curator_call and same_key_refresh:
+        confidence = stored_confidence
+    else:
+        ceilings = [stored_confidence, SUPERSEDE_CONFIDENCE_CAP]
+        if confidence_ceiling is not None:
+            ceilings.append(float(confidence_ceiling))
+        confidence = min(ceilings)
     attributes = dict(attributes)
     attributes["supersedes"] = old_id
     attributes["valid_from"] = now_iso()
     slop = find_slop(statement, attributes, rules=ENFORCED_RULE_IDS)
     pending_reason = extra_pending_reason or _supersede_route(
-        conn, old, actor=actor, provenance=provenance
+        conn, old, actor=actor, provenance=provenance, curator_authored=curator_authored
     )
+    if pending_reason is not None:
+        # Nothing is written for a proposal the ledger already carries -- not the
+        # proposal, and not the rationale evidence row either. The successor id
+        # is content-and-scope addressed, so an identical re-derivation lands on
+        # an identical pair and is a no-op, while a genuinely different
+        # replacement body for the same target is a different pair and still
+        # mints. Without this the scheduled curator re-proposed the same
+        # supersession every hour forever: 283 undecided proposals over 72
+        # distinct pairs on the live core, one pair carrying 12 copies.
+        duplicate = undecided_supersede_proposal(
+            conn, superseded_id=old_id, successor_id=successor_id
+        )
+        if duplicate is not None:
+            return {
+                "schema_version": SUPERSEDE_SCHEMA_VERSION,
+                "mode": "pending",
+                "deduped": True,
+                "superseded_id": old_id,
+                "successor_id": successor_id,
+                "scope": scope.to_dict(),
+                "confidence": confidence,
+                "pending_reason": pending_reason,
+                "proposal_event_id": str(duplicate["id"]),
+                "proposed_at": str(duplicate["ts"]),
+                "next_step": (
+                    "this supersession is already in the pending ledger, undecided; "
+                    "an admin decides it with brain.proposal_decide"
+                ),
+            }
 
     with _one_transaction(conn):
         evidence_id, evidence_event_id = record_core_v1_evidence(
@@ -1820,16 +1923,42 @@ def _complete_supersede_pair(
 
 
 def pending_supersede_count(conn: sqlite3.Connection) -> int:
-    """Undecided supersede proposals: the queue an operator has to clear."""
+    """Undecided supersede proposals: the raw depth of the queue."""
+    row = conn.execute(f"SELECT COUNT(*) {_UNDECIDED_SUPERSEDE_SQL}").fetchone()
+    return int(row[0])
+
+
+def pending_supersede_targets(conn: sqlite3.Connection) -> int:
+    """Distinct beliefs the undecided queue is waiting to replace.
+
+    The number an operator actually has to work through. Raw depth hides
+    duplication, and duplication is exactly what an unbounded proposal loop
+    produces, so a depth that is not reported beside its distinct count is a
+    metric that can grow without bound while looking like ordinary backlog.
+    """
     row = conn.execute(
-        "SELECT COUNT(*) FROM brain_events AS proposal "
-        "WHERE proposal.kind='compilation_proposed' "
-        "AND json_extract(proposal.body_json, '$.attributes.supersedes') IS NOT NULL "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM brain_events AS decision WHERE decision.kind='compilation_decided' "
-        "  AND json_extract(decision.body_json, '$.proposal_event_id') = proposal.id)"
+        "SELECT COUNT(DISTINCT json_extract(proposal.body_json, '$.attributes.supersedes')) "
+        f"{_UNDECIDED_SUPERSEDE_SQL}"
     ).fetchone()
     return int(row[0])
+
+
+def undecided_supersede_proposal(
+    conn: sqlite3.Connection, *, superseded_id: str, successor_id: str
+) -> sqlite3.Row | None:
+    """The oldest undecided proposal already carrying this exact supersession.
+
+    Keyed on the ``(target, successor)`` pair rather than the target alone: a
+    different replacement body for the same belief is a different proposal and
+    an operator needs to see both.
+    """
+    return conn.execute(
+        f"SELECT proposal.id AS id, proposal.ts AS ts {_UNDECIDED_SUPERSEDE_SQL} "
+        "AND json_extract(proposal.body_json, '$.attributes.supersedes') = ? "
+        "AND json_extract(proposal.body_json, '$.belief_id') = ? "
+        "ORDER BY proposal.rowid LIMIT 1",
+        (superseded_id, successor_id),
+    ).fetchone()
 
 
 def forget_v1(
@@ -1866,18 +1995,13 @@ def proposals_v1(
     limit: int,
     include_decided: bool,
 ) -> dict[str, Any]:
-    decided = {
-        str(json.loads(row["body_json"]).get("proposal_event_id"))
-        for row in conn.execute(
-            "SELECT body_json FROM brain_events WHERE kind='compilation_decided'"
-        )
-    }
     result: list[dict[str, Any]] = []
     for row in conn.execute(
-        "SELECT * FROM brain_events WHERE kind='compilation_proposed' ORDER BY rowid DESC LIMIT ?",
+        f"SELECT proposal.*, {_PROPOSAL_DECIDED_SQL} AS is_decided FROM brain_events AS proposal "
+        "WHERE proposal.kind='compilation_proposed' ORDER BY proposal.rowid DESC LIMIT ?",
         (max(limit * 4, 100),),
     ):
-        is_decided = str(row["id"]) in decided
+        is_decided = bool(row["is_decided"])
         if is_decided and not include_decided:
             continue
         result.append(
@@ -2419,6 +2543,7 @@ def _require_v1(conn: sqlite3.Connection) -> None:
 
 
 __all__ = [
+    "CURATOR_SUPERSEDE_WRITER",
     "shared_continuity_scope",
     "bind_retrieval_id_v1",
     "build_context_v1",
@@ -2432,11 +2557,14 @@ __all__ = [
     "forget_v1",
     "get_v1",
     "ingest_v1",
+    "is_curator_writer",
     "pending_supersede_count",
+    "pending_supersede_targets",
     "prepare_retrieval_packet_v1",
     "proposals_v1",
     "record_context_v1",
     "search_v1",
     "supersede_transaction",
     "supersede_v1",
+    "undecided_supersede_proposal",
 ]

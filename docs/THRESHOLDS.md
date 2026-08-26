@@ -215,6 +215,13 @@ Undecided compilation proposals carrying `attributes.supersedes`. An undecided
 proposal carrying that attribute *is* the pending correction — there is no
 second table and no new status.
 
+The value counts **distinct targets** and the display carries the raw proposal
+count beside it (`33 distinct (283 proposals)`). Raw depth alone was the
+operator's only window onto this queue, and it read as ordinary backlog while a
+proposal loop grew it without bound: 283 proposals were 33 beliefs, one of them
+proposed twelve times. A number that can hide unbounded growth is worse than no
+number, so neither figure is reported without the other.
+
 Depth alone is not a fault; the cost is carried by the age metric below.
 
 ### `pending_supersede_age_hours` — ok ≤ 72, watch ≤ 168 (lower is better)
