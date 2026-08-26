@@ -515,7 +515,8 @@ def _source_pointer_warning(
         candidate = Path(raw).expanduser()
     except (OSError, RuntimeError):
         return {"type": "source_pointer_unresolved", "path": raw}
-    if not candidate.is_absolute():
+    is_absolute = candidate.is_absolute()
+    if not is_absolute:
         if repo_root is None:
             return {"type": "source_pointer_unresolved", "path": raw}
         candidate = repo_root / candidate
@@ -529,9 +530,16 @@ def _source_pointer_warning(
     git_ref = str(pointer.get("git_ref") or "").strip()
     if not git_ref:
         return None
-    git_root = _git_repository_root(repo_root)
-    if git_root is None:
+    if is_absolute:
+        # An explicit path owns its repository identity; repo_root is only a
+        # resolution hint for pointers that need one.
         git_root = _git_repository_root(candidate if candidate.is_dir() else candidate.parent)
+    else:
+        git_root = _git_repository_root(repo_root)
+        if git_root is None:
+            git_root = _git_repository_root(
+                candidate if candidate.is_dir() else candidate.parent
+            )
     if git_root is None or not _git_ref_resolves(git_root, git_ref):
         return {
             "type": "source_git_ref_unresolved",

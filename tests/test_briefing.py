@@ -74,6 +74,19 @@ def _git(root: Path, *args: str) -> str:
     ).stdout
 
 
+def _git_repo_with_tag(root: Path, tag: str) -> Path:
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    spec = root / "SPEC.md"
+    spec.write_text(f"# {tag}\n", encoding="utf-8")
+    _git(root, "add", "--", "SPEC.md")
+    _git(root, "commit", "-q", "-m", tag)
+    _git(root, "tag", tag)
+    return spec
+
+
 def _closeout(conn, ctx, task_ref, status, *, verifier=None, summary="did a thing", **kwargs):
     return record_closeout(
         conn,
@@ -1154,3 +1167,66 @@ def test_cli_repo_root_resolves_a_pointer_without_narrowing_the_ledger(tmp_path,
     assert main([*base, "--repo", str(tmp_path)]) == 0
     with_repo = capsys.readouterr().out
     assert "TASK-LEDGER" not in with_repo
+
+
+@pytest.mark.parametrize(
+    ("git_ref", "expect_warning"),
+    [
+        pytest.param("repo-root-only", True, id="reject-ref-only-in-repo-root"),
+        pytest.param("pointer-only", False, id="accept-ref-only-in-pointer-repo"),
+    ],
+)
+def test_cli_absolute_pointer_checks_its_own_repo(
+    tmp_path, capsys, git_ref, expect_warning
+):
+    from ocbrain.cli import main
+
+    repo_root = tmp_path / "repo-root"
+    pointer_repo = tmp_path / "pointer-repo"
+    _git_repo_with_tag(repo_root, "repo-root-only")
+    spec = _git_repo_with_tag(pointer_repo, "pointer-only")
+
+    db = tmp_path / "absolute-pointer.sqlite"
+    conn = connect(db)
+    init_core_v1(conn)
+    context = ScopeContext(project="absolute-pointer-scope")
+    opened = open_goal(
+        conn,
+        objective=f"Validate {git_ref} in the pointer repository",
+        finish_line="pytest -q",
+        source_path=str(spec),
+        source_git_ref=git_ref,
+        context=context,
+    )
+    conn.commit()
+    conn.close()
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "briefing",
+                "--project",
+                "absolute-pointer-scope",
+                "--repo-root",
+                str(repo_root),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    expected = (
+        [
+            {
+                "goal_id": opened["goal_id"],
+                "type": "source_git_ref_unresolved",
+                "path": str(spec),
+                "git_ref": git_ref,
+            }
+        ]
+        if expect_warning
+        else []
+    )
+    assert payload["warnings"] == expected
