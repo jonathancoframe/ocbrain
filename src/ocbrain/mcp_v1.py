@@ -1690,6 +1690,7 @@ def supersede_transaction(
     confidence_ceiling: float | None = None,
     extra_pending_reason: str | None = None,
     curator_authored: bool = False,
+    inherit_confidence: bool = False,
 ) -> dict[str, Any]:
     """Retire one serving belief and stand its replacement up, atomically.
 
@@ -1722,6 +1723,17 @@ def supersede_transaction(
     writer string alone would let any agent buy unlimited unattended supersession
     by typing the curator's name; :func:`supersede_v1` neither accepts this
     keyword nor passes it, and both halves are required.
+
+    ``inherit_confidence`` keeps the successor at the predecessor's confidence
+    instead of the ``min(old, 0.7)`` ceiling, and is honoured only for a
+    curator-authored supersession that keeps the predecessor's ``key``. The
+    ceiling is right for a *contested correction* -- a replacement must not gain
+    authority by replacing -- and wrong for the curator refreshing its own fact
+    from better evidence, which is the same claim restated. Left capped, every
+    scheduled refresh ratcheted the corpus toward 0.7: on the live core, 30 of
+    33 pending proposals would have dropped confidence on approval, mean -0.09.
+    Inheriting is no-gain as well as no-loss -- a more confident claim still does
+    not raise the fact, because arriving later is still not evidence.
     """
     old_id = str(old["canonical_id"])
     scope = ScopeTag.from_dict(dict(old.get("scope") or {}))
@@ -1740,10 +1752,18 @@ def supersede_transaction(
     if blocked is not None:
         raise ValueError(f"blocked: this content was previously {blocked}")
 
-    ceilings = [float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP), SUPERSEDE_CONFIDENCE_CAP]
-    if confidence_ceiling is not None:
-        ceilings.append(float(confidence_ceiling))
-    confidence = min(ceilings)
+    stored_confidence = float(old.get("confidence") or SUPERSEDE_CONFIDENCE_CAP)
+    curator_call = curator_authored and is_curator_writer(actor)
+    old_key = str((old.get("attributes") or {}).get("key") or "")
+    new_key = str(attributes.get("key") or "")
+    same_key_refresh = bool(old_key) and old_key == new_key
+    if inherit_confidence and curator_call and same_key_refresh:
+        confidence = stored_confidence
+    else:
+        ceilings = [stored_confidence, SUPERSEDE_CONFIDENCE_CAP]
+        if confidence_ceiling is not None:
+            ceilings.append(float(confidence_ceiling))
+        confidence = min(ceilings)
     attributes = dict(attributes)
     attributes["supersedes"] = old_id
     attributes["valid_from"] = now_iso()

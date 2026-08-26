@@ -1277,6 +1277,7 @@ def apply_claims(
                     evidence_ids=list(claim["evidence_ids"]),
                     confidence_ceiling=float(claim["confidence"]),
                     curator_authored=True,
+                    inherit_confidence=True,
                     extra_pending_reason=(
                         None
                         if margin_shortfall <= 0

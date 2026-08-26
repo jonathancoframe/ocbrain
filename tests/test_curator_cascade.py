@@ -160,7 +160,9 @@ def test_key_body_change_routes_through_supersession(tmp_path: Path) -> None:
     assert successor["attributes"]["supersedes"] == original
     assert successor["attributes"]["valid_from"]
     # Recency is not authority: the model's own number never lands unexamined.
-    assert successor["confidence"] <= 0.7
+    # A same-key curator refresh holds the fact's standing rather than taking
+    # the 0.7 contested-correction ceiling, so it neither gains nor loses.
+    assert successor["confidence"] == get_core_v1_belief(conn, original)["confidence"] == 0.9
 
     # Exactly one paired correction, written by the decision, not by the curator.
     supersessions = _corrections(conn, "supersede")

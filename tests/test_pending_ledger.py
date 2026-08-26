@@ -8,11 +8,14 @@ claims and pended them again. The live core reached 283 undecided proposals over
 33 beliefs in eighteen hours, one pair carrying twelve identical copies, and the
 only operator-facing number said "283" as though that were a backlog.
 
-Two guards close it, and each is pinned here:
+Three guards close it, and each is pinned here:
 
 * a supersession the ledger already carries undecided is not minted twice,
-* and the curator supersedes an *ordinary* belief directly instead of pending it.
-The third test class is the one that matters most and is easiest to forget:
+* the curator supersedes an *ordinary* belief directly instead of pending it,
+* and a same-key curator refresh holds the fact's confidence instead of
+  ratcheting it toward the contested-correction ceiling.
+
+The fourth test class is the one that matters most and is easiest to forget:
 ``brain.supersede`` reads ``actor`` straight from client arguments, so curator
 authority must not be purchasable by typing the curator's name.
 """
@@ -403,3 +406,116 @@ def test_the_curator_actor_string_is_the_one_authority_recognises(tmp_path: Path
     assert CURATOR_ACTOR == CURATOR_SUPERSEDE_WRITER
     assert not is_curator_writer("agent:claude-code")
     assert not is_curator_writer("operator-approved:compact-v1")
+
+
+# --------------------------------------------------------------------------- #
+# The confidence ratchet
+# --------------------------------------------------------------------------- #
+def test_a_same_key_curator_refresh_inherits_the_stored_confidence(tmp_path: Path) -> None:
+    """The ceiling is for a contested correction, not for a fact restating itself.
+
+    Measured on the live core before this: approving the 33 pending proposals
+    as-proposed would have dropped confidence on 30 of them, mean -0.09, every
+    one landing on 0.65 or 0.70. Hourly, that walks the whole corpus to 0.7.
+    """
+    conn = _core(tmp_path)
+    old = _seed(
+        conn,
+        belief_id="belief:vm",
+        body="The research VM is asa1.",
+        attributes={"key": "research-vm-live"},
+        confidence=0.85,
+    )
+
+    outcome = _propose(
+        conn,
+        old,
+        "The research VM is asa2.",
+        actor=CURATOR_ACTOR,
+        curator_authored=True,
+        inherit_confidence=True,
+        confidence_ceiling=0.82,
+    )
+
+    assert outcome["mode"] == "direct"
+    # Neither the 0.7 ceiling nor the claim's own 0.82 pulls the fact down.
+    assert outcome["confidence"] == 0.85
+    assert get_core_v1_belief(conn, outcome["successor_id"])["confidence"] == 0.85
+    conn.close()
+
+
+def test_inheriting_confidence_never_raises_a_fact(tmp_path: Path) -> None:
+    """No-gain as well as no-loss: arriving later is still not evidence."""
+    conn = _core(tmp_path)
+    old = _seed(
+        conn,
+        belief_id="belief:vm",
+        body="The research VM is asa1.",
+        attributes={"key": "research-vm-live"},
+        confidence=0.6,
+    )
+
+    outcome = _propose(
+        conn,
+        old,
+        "The research VM is asa2.",
+        actor=CURATOR_ACTOR,
+        curator_authored=True,
+        inherit_confidence=True,
+        confidence_ceiling=0.99,
+    )
+
+    assert outcome["confidence"] == 0.6
+    conn.close()
+
+
+def test_a_cross_key_curator_supersession_keeps_the_ceiling(tmp_path: Path) -> None:
+    """Replacing a *different* fact is a contested correction, ceiling and all."""
+    conn = _core(tmp_path)
+    old = _seed(
+        conn,
+        belief_id="belief:vm",
+        body="The research VM is asa1.",
+        attributes={"key": "research-vm-live"},
+        confidence=0.9,
+    )
+
+    outcome = supersede_transaction(
+        conn,
+        old=old,
+        statement="The research VM is asa2.",
+        rationale="a different fact now covers this",
+        attributes={"key": "research-vm-successor"},
+        actor=CURATOR_ACTOR,
+        provenance=EMPTY_PROVENANCE,
+        curator_authored=True,
+        inherit_confidence=True,
+    )
+    conn.commit()
+
+    assert outcome["confidence"] == 0.7
+    conn.close()
+
+
+def test_an_agent_supersession_keeps_the_ceiling(tmp_path: Path) -> None:
+    """Only the curator refreshing its own fact is exempt, and only via the keyword."""
+    conn = _core(tmp_path)
+    old = _seed(
+        conn,
+        belief_id="belief:vm",
+        body="The research VM is asa1.",
+        attributes={"key": "research-vm-live"},
+        confidence=0.9,
+    )
+
+    # Even asking for inheritance: an agent is not the curator.
+    outcome = _propose(
+        conn,
+        old,
+        "The research VM is asa2.",
+        actor="agent:claude-code",
+        inherit_confidence=True,
+    )
+
+    assert outcome["confidence"] == 0.7
+    conn.close()
