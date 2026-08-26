@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "brain-promote.sh"
+
+
+def _curate_argv(**overrides: str) -> list[str]:
+    env = os.environ.copy()
+    for name in (
+        "OCBRAIN_PROMOTE_MAX_TOKENS",
+        "OCBRAIN_PROMOTE_PROJECT",
+        "OCBRAIN_PROMOTE_PROVIDER",
+    ):
+        env.pop(name, None)
+    env.update(
+        {
+            "OCBRAIN_DB": "/tmp/ocbrain-shell-test.sqlite",
+            "OCBRAIN_PYTHON": "/tmp/ocbrain-shell-test-python",
+            "OCBRAIN_ROOT": str(ROOT),
+            **overrides,
+        }
+    )
+    completed = subprocess.run(  # noqa: S603 - fixed repository script
+        ["/bin/bash", str(SCRIPT), "--print-curate-argv"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+    )
+    assert completed.stdout.endswith(b"\0")
+    return [part.decode() for part in completed.stdout[:-1].split(b"\0")]
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", "16000"),
+        ("openai", "16000"),
+        ("moonshot", "8000"),
+    ],
+)
+def test_provider_selects_safe_scheduled_token_default(
+    provider: str, expected: str
+) -> None:
+    argv = _curate_argv(OCBRAIN_PROMOTE_PROVIDER=provider)
+
+    assert argv[argv.index("--max-tokens") + 1] == expected
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "moonshot"])
+def test_explicit_token_override_wins_for_every_provider(provider: str) -> None:
+    argv = _curate_argv(
+        OCBRAIN_PROMOTE_PROVIDER=provider,
+        OCBRAIN_PROMOTE_MAX_TOKENS="12345",
+    )
+
+    assert argv[argv.index("--max-tokens") + 1] == "12345"
+
+
+def test_curate_argv_preserves_quoting_and_forwards_all_arguments() -> None:
+    argv = _curate_argv(
+        OCBRAIN_DB="/tmp/db path/brain.sqlite",
+        OCBRAIN_PYTHON="/tmp/python path/python",
+        OCBRAIN_ROOT="/tmp/repo path",
+        OCBRAIN_PROMOTE_PROVIDER="moonshot",
+        OCBRAIN_PROMOTE_PROJECT="project with spaces",
+        OCBRAIN_PROMOTE_MAX_BELIEFS="17",
+        OCBRAIN_PROMOTE_MAX_TOKENS="7000",
+        OCBRAIN_WIKI_DIR="/tmp/wiki path",
+    )
+
+    assert argv == [
+        "/tmp/python path/python",
+        "/tmp/repo path/scripts/wiki-curator.py",
+        "--db",
+        "/tmp/db path/brain.sqlite",
+        "--provider",
+        "moonshot",
+        "--project",
+        "project with spaces",
+        "--wiki-dir",
+        "/tmp/wiki path",
+        "--max-beliefs",
+        "17",
+        "--max-tokens",
+        "7000",
+        "--apply",
+    ]

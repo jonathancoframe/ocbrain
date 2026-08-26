@@ -52,11 +52,32 @@ else
 fi
 PROMOTE_PROVIDER="${OCBRAIN_PROMOTE_PROVIDER:-anthropic}"
 PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
-# Adaptive thinking shares the completion budget. Large eligible evidence sets
-# can otherwise exhaust the default before the curator closes its claim list.
-PROMOTE_MAX_TOKENS="${OCBRAIN_PROMOTE_MAX_TOKENS:-16000}"
+# Moonshot's prompt and completion share the model's context window, while the
+# Anthropic and OpenAI defaults can safely leave more room for completion.
+case "$PROMOTE_PROVIDER" in
+  moonshot) PROMOTE_DEFAULT_MAX_TOKENS=8000 ;;
+  *) PROMOTE_DEFAULT_MAX_TOKENS=16000 ;;
+esac
+PROMOTE_MAX_TOKENS="${OCBRAIN_PROMOTE_MAX_TOKENS:-$PROMOTE_DEFAULT_MAX_TOKENS}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
 BUDGET_SECONDS="${OCBRAIN_PROMOTE_BUDGET_SECONDS:-1800}"
+
+CURATE_ARGS=(
+  "$PY" "$REPO/scripts/wiki-curator.py"
+  --db "$DB"
+  --provider "$PROMOTE_PROVIDER"
+  "${CURATE_SCOPE_ARGS[@]}"
+  --wiki-dir "$WIKI_DIR"
+  --max-beliefs "$PROMOTE_MAX_BELIEFS"
+  --max-tokens "$PROMOTE_MAX_TOKENS"
+  --apply
+)
+
+# Side-effect-free probe for deterministic tests of the real shell expansion.
+if [[ "${1:-}" == "--print-curate-argv" ]]; then
+  printf '%s\0' "${CURATE_ARGS[@]}"
+  exit 0
+fi
 
 # Which hygiene classes may apply unattended. Both are unambiguous: `expired`
 # acts on an explicit supersession or a passed valid_until, `redundant` only on
@@ -152,14 +173,7 @@ fi
 # 1. Curate. Digest-gated per project, so a scope whose evidence has not changed
 # makes no API call and a fully quiet cycle is free.
 run_with_budget "$BUDGET_SECONDS" \
-  "$PY" "$REPO/scripts/wiki-curator.py" \
-  --db "$DB" \
-  --provider "$PROMOTE_PROVIDER" \
-  "${CURATE_SCOPE_ARGS[@]}" \
-  --wiki-dir "$WIKI_DIR" \
-  --max-beliefs "$PROMOTE_MAX_BELIEFS" \
-  --max-tokens "$PROMOTE_MAX_TOKENS" \
-  --apply \
+  "${CURATE_ARGS[@]}" \
   || echo "curate step failed or was capped; continuing with retirement"
 
 # 2. Retire. Reported either way; only applied when explicitly enabled.
