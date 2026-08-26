@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from ocbrain import __version__
+from ocbrain.briefing import (
+    DEFAULT_BRIEFING_BUDGET_CHARS,
+    build_briefing,
+    build_ledger,
+)
 from ocbrain.bundle import export_bundle, import_bundle
 from ocbrain.compact import (
     COMPACT_VERSION,
@@ -535,6 +540,25 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--limit", type=int, default=12)
     digest.add_argument("--include-private", action="store_true")
     digest.set_defaults(func=cmd_digest)
+    briefing = commands.add_parser(
+        "briefing",
+        help="Deterministic, bounded session-start reorientation for one scope",
+    )
+    add_context_args(briefing)
+    briefing.add_argument("--budget-chars", type=int, default=DEFAULT_BRIEFING_BUDGET_CHARS)
+    briefing.add_argument(
+        "--text",
+        action="store_true",
+        help="Print the rendered briefing only. This is what a SessionStart hook wants.",
+    )
+    briefing.set_defaults(func=cmd_briefing)
+    ledger = commands.add_parser(
+        "ledger", help="Which tasks are verified done, which failed, which are in flight"
+    )
+    add_context_args(ledger)
+    ledger.add_argument("--task-ref", help="One task's full attempt chain, ignoring scope")
+    ledger.add_argument("--limit", type=int, default=25)
+    ledger.set_defaults(func=cmd_ledger)
     mcp_parser = commands.add_parser("mcp", help="Run the core stdio MCP server")
     mcp_parser.add_argument("--profile", choices=["runtime", "admin"], default="runtime")
     mcp_parser.add_argument(
@@ -2628,6 +2652,40 @@ def cmd_digest(args: argparse.Namespace) -> int:
         return 0
     scopes = None if args.include_private else PUBLIC_SCOPES
     output(args, knowledge_digest(conn, project=args.project, scopes=scopes, limit=args.limit))
+    return 0
+
+
+def cmd_briefing(args: argparse.Namespace) -> int:
+    """Print the session-start briefing.
+
+    ``--text`` exists for the SessionStart hook: Claude Code injects a hook's
+    stdout into the conversation verbatim since 2.1.0, so what the hook prints
+    is what lands in the window. JSON there would spend the budget on braces.
+    """
+    conn = open_db(args)
+    payload = build_briefing(
+        conn,
+        context=context_from_args(args),
+        budget_chars=args.budget_chars,
+    )
+    if args.text:
+        print(payload["text"])
+        return 0
+    output(args, payload)
+    return 0
+
+
+def cmd_ledger(args: argparse.Namespace) -> int:
+    conn = open_db(args)
+    output(
+        args,
+        build_ledger(
+            conn,
+            context=context_from_args(args),
+            task_ref=args.task_ref,
+            limit=args.limit,
+        ),
+    )
     return 0
 
 
