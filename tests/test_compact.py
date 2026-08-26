@@ -757,6 +757,43 @@ def test_cli_dry_run_is_the_default_and_writes_nothing(tmp_path, capsys, monkeyp
     assert get_core_v1_belief(conn, "belief_drop")["status"] == "current"
 
 
+def test_cli_requires_explicit_authority_before_building_a_hosted_adjudicator(
+    tmp_path, monkeypatch
+):
+    from ocbrain.cli import _compaction_adjudicator, build_parser
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unit-test-placeholder")
+    db = tmp_path / "core.sqlite"
+    conn = _core(tmp_path)
+    try:
+        args = build_parser().parse_args(["--db", str(db), "compact"])
+        assert _compaction_adjudicator(conn, args, ("hosted_ok",)) is None
+
+        allowed = build_parser().parse_args(
+            ["--db", str(db), "compact", "--allow-hosted-egress"]
+        )
+        assert callable(_compaction_adjudicator(conn, allowed, ("hosted_ok",)))
+    finally:
+        conn.close()
+
+
+def test_dry_run_report_discloses_hosted_egress_audit_writes(tmp_path):
+    from ocbrain.cli import render_compaction
+
+    conn = _core(tmp_path)
+    body = "the nightly job publishes a receipt and then exits"
+    _seed(conn, belief_id="belief_keep", body=body, confidence=0.9)
+    _seed(conn, belief_id="belief_drop", body=body, confidence=0.7)
+    _sidecar(tmp_path, {"belief_keep": NEAR_A, "belief_drop": NEAR_A})
+    plan = plan_compaction(conn)
+    plan["hosted_calls"] = 1
+
+    report = render_compaction(plan, applied=None)
+    assert "DRY RUN. No beliefs were changed." in report
+    assert "recorded 1 egress audit(s)" in report
+    assert "Nothing was written" not in report
+
+
 def test_cli_apply_is_refused_without_yes(tmp_path, capsys, monkeypatch):
     from ocbrain.cli import main
 

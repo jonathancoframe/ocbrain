@@ -263,6 +263,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compact_parser.add_argument("--model", default="", help="override the provider default")
     compact_parser.add_argument(
+        "--allow-hosted-egress",
+        action="store_true",
+        help=(
+            "allow eligible belief bodies to be sent to the configured hosted "
+            "provider for adjudication; otherwise the ambiguous tail stays undecided"
+        ),
+    )
+    compact_parser.add_argument(
         "--json", action="store_true", help="emit the plan as JSON instead of a report"
     )
     compact_parser.set_defaults(func=cmd_compact)
@@ -2833,10 +2841,17 @@ def render_compaction(plan: dict[str, Any], *, applied: dict[str, Any] | None) -
     for index, cluster in enumerate(plan["excluded"], 1):
         lines += _compact_side_by_side(cluster, index=index, heading="EXCLUDED")
     if applied is None:
+        if plan.get("hosted_calls"):
+            dry_run_status = (
+                "DRY RUN. No beliefs were changed. "
+                f"Hosted adjudication recorded {plan['hosted_calls']} egress audit(s)."
+            )
+        else:
+            dry_run_status = "DRY RUN. Nothing was written."
         lines += [
             "",
             "=" * 78,
-            "DRY RUN. Nothing was written.",
+            dry_run_status,
             "Authorise with: ocbrain compact --apply --yes",
             "=" * 78,
         ]
@@ -2860,12 +2875,16 @@ def render_compaction(plan: dict[str, Any], *, applied: dict[str, Any] | None) -
 
 
 def _compaction_adjudicator(conn, args: argparse.Namespace, egress_policies: tuple[str, ...]):
-    """The hosted adjudicator, or ``None`` when no key is configured.
+    """The hosted adjudicator, or ``None`` without explicit authority and a key.
 
-    Missing credentials degrade the run rather than failing it: a compaction
-    plan that reports its mechanical findings and says the tail was not decided
-    is useful, and one that raises because an env var is unset is not.
+    A provider credential proves reachability, not operator intent. Compaction
+    therefore requires ``--allow-hosted-egress`` before it can send even an
+    otherwise eligible belief body. Missing authority or credentials degrade
+    the run rather than failing it: the mechanical plan remains useful and the
+    ambiguous tail is reported as undecided.
     """
+    if not args.allow_hosted_egress:
+        return None
     defaults = PROVIDER_DEFAULTS[args.provider]
     model = args.model or defaults["model"]
     api_key = os.environ.get(defaults["api_key_env"])
