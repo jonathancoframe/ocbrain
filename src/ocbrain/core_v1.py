@@ -43,6 +43,11 @@ CORE_V1_SCHEMA_VERSION = "ocbrain.core.v1"
 # shipped; this constant exists so degraded mode can refuse a procedure the day
 # one is minted, rather than the day someone remembers to add the guard.
 PROCEDURE_BELIEF_TYPE = "procedure"
+# A goal is task state stored on the belief machinery, not a knowledge claim.
+# It rides `current_beliefs` because `CORE_V1_TABLES` is a closed allow-list and
+# `belief_type` is free text -- but it must never be *retrieved* like knowledge.
+# See `ocbrain.briefing` and `_servable_knowledge_sql` below.
+GOAL_BELIEF_TYPE = "goal"
 CORE_V1_EVENT_SCHEMA = "ocbrain.event.v1"
 HYBRID_RRF_K = 60
 # Qwen3's low positive tail is not evidence of topical relevance. Keep a
@@ -1821,7 +1826,7 @@ def search_core_v1(
         placeholders = ",".join("?" for _ in compatible)
         scope_sql = f"(cb.scope_type='global' OR cb.scope_id IN ({placeholders}))"
         scope_params = list(compatible)
-    delivery_sql = _delivery_sql(delivery_target)
+    delivery_sql = _servable_knowledge_sql(delivery_target)
     visibility_counts = _serving_visibility_counts(
         conn,
         scope_sql=scope_sql,
@@ -2347,6 +2352,25 @@ def _delivery_sql(target: str) -> str:
     raise ValueError(f"unsupported delivery target: {target}")
 
 
+def _servable_knowledge_sql(target: str) -> str:
+    """The delivery gate, plus the belief types that are not knowledge at all.
+
+    Goals are the only such type today. A goal is retrieved by scope and status
+    and by nothing else -- deterministic selection beats similarity judgement by
+    +10.8pp, widening to +21pp at long context (arXiv 2606.01435) -- so letting
+    one into the hybrid candidate pool would give it a *second*, ranked door,
+    and the two doors would disagree. Worse, a goal is a restatement of an
+    objective in the caller's own words, which is precisely the shape that
+    scores well against a query about that objective and displaces the knowledge
+    the caller actually asked for.
+
+    One predicate, one call site: ``retrieve_core_v1`` builds this once and
+    passes it to the lexical arm, the eligible pool, and the inventory counts,
+    so the three can never drift apart.
+    """
+    return f"({_delivery_sql(target)}) AND COALESCE(cb.belief_type, '') <> '{GOAL_BELIEF_TYPE}'"
+
+
 def _serving_visibility_counts(
     conn: sqlite3.Connection,
     *,
@@ -2561,6 +2585,7 @@ __all__ = [
     "CORE_V1_SCHEMA_VERSION",
     "CORE_V1_TABLES",
     "CORE_V1_USER_VERSION",
+    "GOAL_BELIEF_TYPE",
     "LEGACY_IMPORT_KINDS",
     "PROCEDURE_BELIEF_TYPE",
     "append_core_event",
