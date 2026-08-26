@@ -33,11 +33,11 @@ Shared evidence is deliberately **not** a merge signal. It reads like one -- in
 the survey that motivated this module every top-ranked pair shared evidence ids
 -- but on the same corpus 904 belief pairs share an evidence id and 91% of them
 sit below the cosine floor, because evidence ids record which batch the curator
-compiled from, not what a belief says. Two beliefs reading "Use `mac-sleep` for
-intentional sleep" and "Coframe's data lake root is ~/CoframeAppliedLake" carry
-*identical* evidence sets at cosine 0.21. A merger that trusted that signal would
-retire one of them. It is reported, because an operator reading a plan wants to
-know, and it decides nothing.
+compiled from, not what a belief says. Two unrelated beliefs -- one about retry
+backoff and another about map clustering -- can carry *identical* evidence sets
+at low cosine similarity. A merger that trusted that signal would retire one of
+them. It is reported, because an operator reading a plan wants to know, and it
+decides nothing.
 
 Nothing here deletes. A merge is one soft ``supersede`` correction per loser: the
 loser is retired with ``superseded_by`` naming the survivor and its validity
