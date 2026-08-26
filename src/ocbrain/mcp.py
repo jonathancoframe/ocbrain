@@ -1100,7 +1100,7 @@ def _call_harness_tool_v1(
             goal_id=require_string(arguments, "goal_id"),
             status=require_string(arguments, "status"),
             verifier_uri=require_string(arguments, "verifier_uri"),
-            verifier_status=optional_string(arguments, "verifier_status") or "passed",
+            verifier_status=require_string(arguments, "verifier_status"),
             note=optional_string(arguments, "note"),
             actor=optional_string(arguments, "actor") or "agent",
             provenance=provenance,
@@ -1847,7 +1847,8 @@ def tool_list(
                 "transition is appended as a new event, never an in-place edit, so when it "
                 "closed and who said so stay answerable. A closure that cites no evidence is "
                 "indistinguishable from a goal someone got bored of, so verifier_uri is "
-                "required."
+                "required. Done requires an explicitly passed verifier; failed, unknown, "
+                "and not_required evidence can only close a goal as abandoned."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1864,6 +1865,10 @@ def tool_list(
                     "verifier_status": {
                         "type": "string",
                         "enum": ["passed", "failed", "unknown", "not_required"],
+                        "description": (
+                            "Required explicitly. status=done accepts only passed; abandoned "
+                            "preserves any listed verifier state."
+                        ),
                     },
                     "note": {"type": "string"},
                     "actor": {"type": "string"},
@@ -1879,7 +1884,7 @@ def tool_list(
                         },
                     },
                 },
-                "required": ["goal_id", "status", "verifier_uri"],
+                "required": ["goal_id", "status", "verifier_uri", "verifier_status"],
             },
         },
         {

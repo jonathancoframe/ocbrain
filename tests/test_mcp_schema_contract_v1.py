@@ -40,7 +40,7 @@ SEMANTIC_REQUIRED = {
     "brain.briefing": set(),
     "brain.ledger": set(),
     "brain.goal_open": {"objective", "finish_line", "source_path"},
-    "brain.goal_close": {"goal_id", "status", "verifier_uri"},
+    "brain.goal_close": {"goal_id", "status", "verifier_uri", "verifier_status"},
     "brain.preview": {"query"},
     "brain.egress_preview": set(),
     "brain.correct": {"target", "layer", "op"},

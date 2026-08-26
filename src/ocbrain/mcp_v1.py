@@ -1776,37 +1776,35 @@ def supersede_transaction(
     pending_reason = extra_pending_reason or _supersede_route(
         conn, old, actor=actor, provenance=provenance, curator_authored=curator_authored
     )
-    if pending_reason is not None:
-        # Nothing is written for a proposal the ledger already carries -- not the
-        # proposal, and not the rationale evidence row either. The successor id
-        # is content-and-scope addressed, so an identical re-derivation lands on
-        # an identical pair and is a no-op, while a genuinely different
-        # replacement body for the same target is a different pair and still
-        # mints. Without this the scheduled curator re-proposed the same
-        # supersession every hour forever: 283 undecided proposals over 72
-        # distinct pairs on the live core, one pair carrying 12 copies.
-        duplicate = undecided_supersede_proposal(
-            conn, superseded_id=old_id, successor_id=successor_id
-        )
-        if duplicate is not None:
-            return {
-                "schema_version": SUPERSEDE_SCHEMA_VERSION,
-                "mode": "pending",
-                "deduped": True,
-                "superseded_id": old_id,
-                "successor_id": successor_id,
-                "scope": scope.to_dict(),
-                "confidence": confidence,
-                "pending_reason": pending_reason,
-                "proposal_event_id": str(duplicate["id"]),
-                "proposed_at": str(duplicate["ts"]),
-                "next_step": (
-                    "this supersession is already in the pending ledger, undecided; "
-                    "an admin decides it with brain.proposal_decide"
-                ),
-            }
-
     with _one_transaction(conn):
+        if pending_reason is not None:
+            # Nothing is written for a proposal the ledger already carries -- not the
+            # proposal, and not the rationale evidence row either. The lookup runs
+            # under the same write lock as the append so concurrent identical callers
+            # cannot both observe the pair as absent. The successor id is content-and-
+            # scope addressed, so an identical re-derivation is a no-op while a
+            # genuinely different replacement body for the same target still mints.
+            duplicate = undecided_supersede_proposal(
+                conn, superseded_id=old_id, successor_id=successor_id
+            )
+            if duplicate is not None:
+                return {
+                    "schema_version": SUPERSEDE_SCHEMA_VERSION,
+                    "mode": "pending",
+                    "deduped": True,
+                    "superseded_id": old_id,
+                    "successor_id": successor_id,
+                    "scope": scope.to_dict(),
+                    "confidence": confidence,
+                    "pending_reason": pending_reason,
+                    "proposal_event_id": str(duplicate["id"]),
+                    "proposed_at": str(duplicate["ts"]),
+                    "next_step": (
+                        "this supersession is already in the pending ledger, undecided; "
+                        "an admin decides it with brain.proposal_decide"
+                    ),
+                }
+
         evidence_id, evidence_event_id = record_core_v1_evidence(
             conn,
             body=f"Superseding {old_id}. Reason: {rationale}\n\nReplacement claim: {statement}",
