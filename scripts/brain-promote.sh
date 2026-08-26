@@ -52,6 +52,12 @@ else
 fi
 PROMOTE_PROVIDER="${OCBRAIN_PROMOTE_PROVIDER:-anthropic}"
 PROMOTE_MAX_BELIEFS="${OCBRAIN_PROMOTE_MAX_BELIEFS:-24}"
+# Adaptive thinking shares the completion budget, so a scope with a lot of
+# eligible evidence can exhaust it before the claim list closes and the whole
+# cycle raises instead of promoting anything. The curator's own 8000 default
+# stopped clearing the coframe scope on 2026-08-24, once corrections became
+# eligible evidence; 15 cycles failed that way before this was passed through.
+PROMOTE_MAX_TOKENS="${OCBRAIN_PROMOTE_MAX_TOKENS:-16000}"
 WIKI_DIR="${OCBRAIN_WIKI_DIR:-$(dirname -- "$DB")/wiki}"
 BUDGET_SECONDS="${OCBRAIN_PROMOTE_BUDGET_SECONDS:-1800}"
 
@@ -155,6 +161,7 @@ run_with_budget "$BUDGET_SECONDS" \
   "${CURATE_SCOPE_ARGS[@]}" \
   --wiki-dir "$WIKI_DIR" \
   --max-beliefs "$PROMOTE_MAX_BELIEFS" \
+  --max-tokens "$PROMOTE_MAX_TOKENS" \
   --apply \
   || echo "curate step failed or was capped; continuing with retirement"
 
