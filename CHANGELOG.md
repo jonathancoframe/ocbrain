@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- Stop the pending supersede ledger growing without bound. The first unattended
+  night gave it producers and no consumer: the per-caller rate cap
+  (`supersede.direct_cap`, default 8/24h) is sized for a runtime agent, so past
+  its eighth correction the scheduled curator pended everything — and because a
+  *proposal* does not change the input that produced it, the next hourly cycle
+  re-derived the same claims and pended them again. The live core reached **312
+  undecided proposals against 33 beliefs in nineteen hours**, one pair carrying
+  twelve identical copies, growing at roughly 17/hour with nothing to stop it.
+  Two changes close it, and it takes both:
+  - **Dedup at proposal time.** A supersession the ledger already carries
+    undecided is not minted twice. The successor id is content-and-scope
+    addressed, so an identical re-derivation is an exact `(target, successor)`
+    match and writes nothing at all — not the proposal, not the rationale
+    evidence row — while a different replacement body for the same belief is a
+    different pair and still mints, because two people disagreeing about one
+    fact is something an operator has to see. Reported as `pending_deduped`.
+  - **Curator direct authority** for an ordinary belief — unpinned, outside
+    `global:*` — under `supersede.curator_direct` (default on). Dedup alone
+    collapses the backlog but does not stop the growth: the model rewords the
+    same fact between cycles, so ~4 genuinely-new pairs per hour survive pair
+    matching. Landing the supersession is what ends the loop, because the next
+    cycle then sees its own claim already serving. The agent-facing cap is
+    untouched, and the margin rule and digest gate still bound the curator.
+  Replaying two consecutive cycles against a copy of the live core: **+24
+  proposals per cycle before, +0 after**.
+- Stop the curator ratcheting the corpus toward 0.7. `min(old, claim, 0.7)` is
+  right for a contested correction — a replacement must not gain authority by
+  replacing — and wrong for the curator restating its own fact from better
+  evidence. Approving the live core's 33 pending proposals as-proposed would
+  have **dropped confidence on 30 of them, mean −0.09**, every one landing on
+  0.65 or 0.70; run hourly that walks the whole corpus down. A curator-authored
+  supersession that keeps the predecessor's `key` now inherits the
+  predecessor's confidence instead. It is no-gain as well as no-loss, and
+  cross-key curator supersessions and every agent-issued supersession keep the
+  ceiling. Replayed over the live backlog: 24 facts replaced, **0 dropped, 24
+  held, mean +0.0000**.
+- Report the pending supersede queue as distinct targets with the raw proposal
+  count beside it (`33 distinct (312 proposals)`, previously a bare `312`). That
+  number was the operator's only window onto this queue and it read as ordinary
+  backlog while a loop grew it without bound. A metric that can hide unbounded
+  growth is worse than no metric.
+- Give "undecided proposal" one definition. The proposal listing, the queue
+  depth, the selftest metric and the new dedup guard now share a single SQL
+  predicate, so a dedup guard cannot drift away from the count that is supposed
+  to prove it works.
+
 - Stop the curator from silently overwriting a fact it has already compiled. A
   claim on a key the corpus already served used to be an update in place: the
   body was replaced and the confidence overwritten with whatever the hosted
