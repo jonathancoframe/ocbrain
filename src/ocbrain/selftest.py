@@ -334,6 +334,44 @@ THRESHOLDS: dict[str, Threshold] = {
         "so a lag of a few hundred is normal drift rather than staleness. "
         "Judgement.",
     ),
+    "briefing_determinism": Threshold(
+        HIGHER_BETTER,
+        1.0,
+        1.0,
+        "Binary by construction. `brain.briefing` promises byte-identical output "
+        "for the same scope and corpus state, and a harness that reorients "
+        "through it every iteration inherits that promise. Anything below 1.0 "
+        "means the promise is already broken, so there is no watch band to sit "
+        "in.",
+    ),
+    "briefing_budget_compliance": Threshold(
+        HIGHER_BETTER,
+        1.0,
+        1.0,
+        "Also binary. The budget is a hard ceiling the renderer enforces before "
+        "it spends anything on items; a briefing over budget means the skeleton "
+        "reservation is wrong, not that a scope got busy.",
+    ),
+    "goal_pointer_resolution": Threshold(
+        HIGHER_BETTER,
+        1.0,
+        0.80,
+        "Share of open goals whose source_pointer still resolves on this "
+        "machine. A goal is a pointer to a spec in the repo; when the spec moves "
+        "and the goal does not, the goal is pointing at nothing. Watch rather "
+        "than alarm at 80% because a pointer written on another machine can "
+        "legitimately not resolve on this one. Judgement.",
+    ),
+    "goal_open_age_days": Threshold(
+        LOWER_BETTER,
+        14.0,
+        45.0,
+        "Age of the oldest open goal. Goal drift is a distinct failure that "
+        "pass/fail benchmarks cannot see (arXiv 2608.06663, 1,547 papers), and "
+        "an objective nobody has closed or abandoned in six weeks is the "
+        "observable form of it. Judgement: no measurement exists yet because "
+        "goals ship with this release.",
+    ),
 }
 
 
@@ -1790,11 +1828,187 @@ def _integrity(conn: sqlite3.Connection) -> Metric:
 # --------------------------------------------------------------------------- #
 
 
+def _briefing_scopes(conn: sqlite3.Connection, *, limit: int = 5) -> list[str]:
+    """Which project scopes to exercise the briefing against, deterministically.
+
+    Every scope that has an open goal, plus the busiest scopes by closeout
+    count, capped. Sorted, so two runs against an unchanged core pick the same
+    scopes -- a determinism metric measured over a shifting sample would be
+    measuring the sample.
+    """
+    scopes: set[str] = set()
+    if _table_exists(conn, "current_beliefs"):
+        for row in conn.execute(
+            "SELECT DISTINCT scope_id FROM current_beliefs "
+            "WHERE serve=1 AND status='current' AND belief_type='goal'"
+        ):
+            scope_id = str(row[0] or "")
+            if scope_id.startswith("project:"):
+                scopes.add(scope_id.split(":", 1)[1])
+    if _table_exists(conn, "task_closeouts"):
+        for row in conn.execute(
+            "SELECT json_extract(context_json, '$.project') AS project, COUNT(*) AS n "
+            "FROM task_closeouts WHERE json_extract(context_json, '$.project') IS NOT NULL "
+            "GROUP BY project ORDER BY n DESC, project LIMIT ?",
+            (limit,),
+        ):
+            project = str(row["project"] or "").strip()
+            if project:
+                scopes.add(project)
+    return sorted(scopes)[:limit]
+
+
+def _harness_surface(conn: sqlite3.Connection, now: datetime) -> list[Metric]:
+    """Section E: is the loop-facing surface keeping its two promises?
+
+    Determinism and boundedness are the whole contract, so they are measured
+    rather than asserted once in a unit test against a fixture. A unit test says
+    the code can be deterministic; this says the corpus an operator actually has
+    does not break it.
+
+    Two precision-side metrics the harness literature asks for are deliberately
+    absent here, because they already exist elsewhere in this scorecard and a
+    second name for the same number is how a scorecard stops being read:
+    ``pollution_rate`` (section B) is the false-positive injection measure --
+    beliefs approved and then removed within a horizon -- and ``zero_result_rate``
+    with ``calibration_gap`` (sections A and B) together are the abstention
+    calibration. Nothing is faked in to fill a row.
+    """
+    from ocbrain.briefing import DEFAULT_BRIEFING_BUDGET_CHARS, build_briefing, list_goals
+    from ocbrain.scope import ScopeContext
+
+    projects = _briefing_scopes(conn)
+    if not projects:
+        reason = "no project scope has a goal or a closeout to brief on"
+        return [
+            _unmeasured("briefing_determinism", "E", "Briefing determinism", reason, scopes=0),
+            _unmeasured(
+                "briefing_budget_compliance", "E", "Briefing within budget", reason, scopes=0
+            ),
+            _unmeasured("goal_pointer_resolution", "E", "Goal spec pointers resolve", reason),
+            _unmeasured("goal_open_age_days", "E", "Oldest open goal", reason),
+        ]
+
+    identical = 0
+    within_budget = 0
+    divergent: list[str] = []
+    oversized: list[str] = []
+    for project in projects:
+        context = ScopeContext(project=project)
+        first = build_briefing(conn, context=context)
+        second = build_briefing(conn, context=context)
+        if first["text"] == second["text"]:
+            identical += 1
+        else:
+            divergent.append(project)
+        if first["used_chars"] <= first["budget_chars"]:
+            within_budget += 1
+        else:
+            oversized.append(project)
+
+    metrics = [
+        _measured(
+            "briefing_determinism",
+            "E",
+            "Briefing determinism",
+            identical / len(projects),
+            display=f"{identical}/{len(projects)} scopes byte-identical",
+            basis="brain.briefing called twice per scope, bytes compared",
+            scopes=len(projects),
+            divergent_scopes=divergent or None,
+        ),
+        _measured(
+            "briefing_budget_compliance",
+            "E",
+            "Briefing within budget",
+            within_budget / len(projects),
+            display=f"{within_budget}/{len(projects)} within {DEFAULT_BRIEFING_BUDGET_CHARS} chars",
+            basis="rendered characters against the declared budget",
+            scopes=len(projects),
+            oversized_scopes=oversized or None,
+        ),
+    ]
+
+    goals: list[dict[str, Any]] = []
+    for project in projects:
+        goals.extend(
+            list_goals(conn, context=ScopeContext(project=project), status="open", limit=0)
+        )
+    unique = {goal["goal_id"]: goal for goal in goals}
+    if not unique:
+        metrics.append(
+            _unmeasured(
+                "goal_pointer_resolution",
+                "E",
+                "Goal spec pointers resolve",
+                "no goals are open in the sampled scopes",
+                open_goals=0,
+            )
+        )
+        metrics.append(
+            _unmeasured(
+                "goal_open_age_days",
+                "E",
+                "Oldest open goal",
+                "no goals are open in the sampled scopes",
+                open_goals=0,
+            )
+        )
+        return metrics
+
+    unresolved = [
+        goal["goal_id"] for goal in unique.values() if goal.get("warning") is not None
+    ]
+    metrics.append(
+        _measured(
+            "goal_pointer_resolution",
+            "E",
+            "Goal spec pointers resolve",
+            (len(unique) - len(unresolved)) / len(unique),
+            display=f"{len(unique) - len(unresolved)}/{len(unique)} resolve",
+            basis="source_pointer.path checked on this filesystem",
+            open_goals=len(unique),
+            unresolved=unresolved or None,
+        )
+    )
+    ages: list[tuple[float, str]] = []
+    for goal in unique.values():
+        opened = _parse_ts(goal.get("opened_at"))
+        if opened is not None:
+            ages.append((max((now - opened).total_seconds() / 86400.0, 0.0), goal["goal_id"]))
+    if not ages:
+        metrics.append(
+            _unmeasured(
+                "goal_open_age_days",
+                "E",
+                "Oldest open goal",
+                "no open goal carries a parseable opened_at",
+                open_goals=len(unique),
+            )
+        )
+        return metrics
+    age, oldest_id = max(ages)
+    metrics.append(
+        _measured(
+            "goal_open_age_days",
+            "E",
+            "Oldest open goal",
+            age,
+            display=f"{age:.1f}d",
+            basis="now minus opened_at of the longest-open goal",
+            open_goals=len(unique),
+            oldest_goal_id=oldest_id,
+        )
+    )
+    return metrics
+
+
 SECTION_TITLES = {
     "A": "Retrieval health",
     "B": "Corpus quality",
     "C": "Correction pathway",
     "D": "Plumbing",
+    "E": "Harness surface",
 }
 
 
@@ -1825,6 +2039,7 @@ def run_selftest(
     metrics.extend(_storage(conn, cutoff, since_days))
     metrics.append(_sidecar_freshness(conn))
     metrics.append(_integrity(conn))
+    metrics.extend(_harness_surface(conn, now))
 
     tally = {OK: 0, WATCH: 0, ALARM: 0, NOT_MEASURED: 0}
     for metric in metrics:
