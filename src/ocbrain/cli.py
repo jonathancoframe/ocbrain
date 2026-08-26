@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import textwrap
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ocbrain import __version__
 from ocbrain.bundle import export_bundle, import_bundle
-from ocbrain.config import describe_config
+from ocbrain.compact import (
+    COMPACT_VERSION,
+    DEFAULT_COSINE_FLOOR,
+    DEFAULT_MERGE_LIMIT,
+    adjudicate,
+    apply_compaction,
+    plan_compaction,
+    undo_command,
+    undo_merge,
+)
+from ocbrain.config import describe_config, load_config
 from ocbrain.core_ops import (
     backup_database,
     database_status,
@@ -26,6 +40,7 @@ from ocbrain.core_v1 import (
     record_core_v1_evidence,
 )
 from ocbrain.curation import apply_curated_manifest
+from ocbrain.curator import PROVIDER_DEFAULTS, resolve_selection_policy
 from ocbrain.db import (
     DEFAULT_DB_PATH,
     PUBLIC_SCOPES,
@@ -56,7 +71,7 @@ from ocbrain.events import (
     record_tombstone,
     validate_skill_telemetry,
 )
-from ocbrain.fsutil import file_fingerprint, history_runtime
+from ocbrain.fsutil import file_fingerprint, history_runtime, snapshot_sqlite
 from ocbrain.history_window import (
     _PRIVATE_KEY_BEGIN_RE,
     HistoryWindow,
@@ -205,6 +220,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="mark one belief superseded by another, then exit",
     )
     hygiene_parser.set_defaults(func=cmd_hygiene)
+
+    compact_parser = commands.add_parser(
+        "compact",
+        help="Collapse historical near-duplicate beliefs into one, reversibly",
+    )
+    compact_parser.add_argument(
+        "--cosine",
+        type=float,
+        default=DEFAULT_COSINE_FLOOR,
+        help="cosine at or above which two same-scope beliefs enter one cluster",
+    )
+    compact_parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_MERGE_LIMIT,
+        help="maximum beliefs one run may retire; the rest are reported as deferred",
+    )
+    compact_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="print the plan and write nothing (the default)",
+    )
+    compact_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="retire the planned losers; additionally requires --yes",
+    )
+    compact_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm that a human read the plan; --apply does nothing without it",
+    )
+    compact_parser.add_argument(
+        "--undo",
+        metavar="BELIEF_ID",
+        help="put one merged-away belief back into service, then exit",
+    )
+    compact_parser.add_argument(
+        "--provider", choices=sorted(PROVIDER_DEFAULTS), default="anthropic"
+    )
+    compact_parser.add_argument("--model", default="", help="override the provider default")
+    compact_parser.add_argument(
+        "--json", action="store_true", help="emit the plan as JSON instead of a report"
+    )
+    compact_parser.set_defaults(func=cmd_compact)
 
     config_parser = commands.add_parser(
         "config",
@@ -2677,6 +2738,217 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
         os.chmod(hook, 0o755)
         installed.append({"hook": hook.name, "link": str(target), "points_to": rel})
     output(args, {"installed": installed, "count": len(installed)})
+    return 0
+
+
+def _compact_side_by_side(cluster: dict[str, Any], *, index: int, heading: str) -> list[str]:
+    """One cluster rendered so a human can actually adjudicate the machine.
+
+    Every body in full, beside its id, scope, confidence and evidence count, and
+    the pipeline's own verdict spelled out underneath. This block is the entire
+    point of the dry run: an operator authorises a merge by reading it, so it
+    must carry enough to disagree with, not a count.
+    """
+    survivor = cluster.get("survivor")
+    lines = [
+        "",
+        f"{heading} {index}  scope={cluster['scope_id']}  members={cluster['size']}"
+        f"  min_cosine={cluster['min_cosine']}  min_jaccard={cluster['min_jaccard']}",
+        "-" * 78,
+    ]
+    for member in cluster["members"]:
+        if survivor is None:
+            marker = "  ."
+        elif member["belief_id"] == survivor:
+            marker = "KEEP"
+        elif member["belief_id"] in (cluster.get("losers") or []):
+            marker = "MERGE"
+        else:
+            marker = "  ."
+        lines.append(
+            f"  [{marker:>5}] {member['belief_id']}  key={member['key'] or '(none)'}"
+            f"  conf={member['confidence']}  evidence={member['evidence_count']}"
+        )
+        for chunk in textwrap.wrap(member["body"], width=72) or [""]:
+            lines.append(f"          {chunk}")
+    if cluster.get("stage"):
+        lines.append(f"  stage: {cluster['stage']}")
+    if cluster.get("reason"):
+        for chunk in textwrap.wrap(f"verdict: {cluster['reason']}", width=76):
+            lines.append(f"  {chunk}")
+    if cluster.get("deferred_reason"):
+        lines.append(f"  deferred: {cluster['deferred_reason']}")
+    lines.append(
+        f"  evidence: shared={cluster['shares_evidence']} "
+        f"identical={cluster['identical_evidence']} (reported only; decides nothing)"
+    )
+    if cluster.get("egress_audit_id"):
+        lines.append(f"  egress audit: {cluster['egress_audit_id']}")
+    return lines
+
+
+def render_compaction(plan: dict[str, Any], *, applied: dict[str, Any] | None) -> str:
+    """The dry-run report a human reads before authorising anything."""
+    if not plan.get("measured"):
+        return (
+            f"compaction not measured: {plan.get('detail')}\n"
+            f"serving beliefs: {plan.get('serving')}\n"
+            "build the sidecar with `ocbrain vector-build`, then re-run."
+        )
+    stages = plan["stages"]
+    lines = [
+        "=" * 78,
+        f"OCBrain compaction plan  ({COMPACT_VERSION})",
+        "=" * 78,
+        f"serving beliefs        : {plan['serving']}",
+        f"cosine floor           : {plan['cosine_floor']}   (same scope only)",
+        f"restatement threshold  : {plan['restatement_threshold']}",
+        f"merge cap              : {plan['limit']} losers per run",
+        "",
+        "cascade",
+        f"  clusters found                : {stages['clusters_found']}",
+        f"  excluded by guard             : {stages['excluded_by_guard']}",
+        f"  resolved mechanically         : "
+        f"{stages['resolved_identical_bodies'] + stages['resolved_restatement']}"
+        f"  (identical bodies {stages['resolved_identical_bodies']},"
+        f" restatement {stages['resolved_restatement']})",
+        f"  escalated to a model          : {stages['escalated']}",
+        f"    withheld, not egress-eligible: {stages['withheld_egress']}",
+        f"    left undecided, no provider  : {stages['not_adjudicated']}",
+        f"    adjudicated -> merge         : {stages['adjudicated_merge']}",
+        f"    adjudicated -> coexist       : {stages['adjudicated_coexist']}",
+        f"  hosted calls made             : {plan['hosted_calls']}",
+        "",
+        f"proposed merges        : {len(plan['merges'])}"
+        f"  retiring {plan['would_retire']} beliefs",
+        f"serving after          : {plan['serving_after']}",
+        f"deferred over the cap  : {len(plan['deferred'])}",
+    ]
+    for index, cluster in enumerate(plan["merges"], 1):
+        lines += _compact_side_by_side(cluster, index=index, heading="MERGE")
+    for index, cluster in enumerate(plan["deferred"], 1):
+        lines += _compact_side_by_side(cluster, index=index, heading="DEFERRED")
+    for index, cluster in enumerate(plan.get("coexisting") or [], 1):
+        lines += _compact_side_by_side(cluster, index=index, heading="COEXIST")
+    for index, cluster in enumerate(plan["excluded"], 1):
+        lines += _compact_side_by_side(cluster, index=index, heading="EXCLUDED")
+    if applied is None:
+        lines += [
+            "",
+            "=" * 78,
+            "DRY RUN. Nothing was written.",
+            "Authorise with: ocbrain compact --apply --yes",
+            "=" * 78,
+        ]
+    else:
+        lines += [
+            "",
+            "=" * 78,
+            f"APPLIED. {applied['retired']} beliefs retired behind their survivors.",
+            "Every one is a soft supersession: the body is still readable with",
+            "  brain.get <belief_id> mode=as_stored",
+            "and mode=resolve follows the pointer to the survivor.",
+            "",
+            "Undo any single merge with:",
+        ]
+        for entry in applied["applied"]:
+            lines.append(f"  {undo_command(entry['belief_id'])}")
+        for entry in applied["failed"]:
+            lines.append(f"  FAILED {entry['belief_id']}: {entry['error']}")
+        lines.append("=" * 78)
+    return "\n".join(lines)
+
+
+def _compaction_adjudicator(conn, args: argparse.Namespace, egress_policies: tuple[str, ...]):
+    """The hosted adjudicator, or ``None`` when no key is configured.
+
+    Missing credentials degrade the run rather than failing it: a compaction
+    plan that reports its mechanical findings and says the tail was not decided
+    is useful, and one that raises because an env var is unset is not.
+    """
+    defaults = PROVIDER_DEFAULTS[args.provider]
+    model = args.model or defaults["model"]
+    api_key = os.environ.get(defaults["api_key_env"])
+    if not api_key:
+        return None
+
+    def adjudicator(members: list[str], beliefs: dict[str, Any]) -> dict[str, Any]:
+        return adjudicate(
+            conn,
+            members,
+            beliefs,
+            provider=args.provider,
+            model=model,
+            api_key=api_key,
+            base_url=defaults["base_url"],
+            egress_policies=egress_policies,
+        )
+
+    return adjudicator
+
+
+def _ensure_compaction_snapshot(db: Path, *, started_at: float) -> Path:
+    """A snapshot no older than this run, taken now if none exists.
+
+    The precondition is "recoverable", not "backed up at some point". A snapshot
+    from before the run is only a restore point if nothing has been written
+    since, so the age test is against the run's own start rather than a fixed
+    window.
+    """
+    resolved = db.expanduser().resolve()
+    snapshot_dir = resolved.parent / "backups"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    existing = [
+        path
+        for path in snapshot_dir.glob("*.sqlite")
+        if path.stat().st_mtime >= started_at
+    ]
+    if existing:
+        return max(existing, key=lambda path: path.stat().st_mtime)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return snapshot_sqlite(resolved, snapshot_dir / f"pre-compact-{stamp}.sqlite")
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    started_at = time.time()
+    conn = open_existing_core_v1(args.db)
+    try:
+        if args.undo:
+            result = undo_merge(conn, belief_id=args.undo)
+            output(args, {"action": "compact", "undone": result})
+            return 0
+        curator_cfg = load_config().curator
+        egress_policies, visibilities = resolve_selection_policy(
+            egress_policies=tuple(curator_cfg.egress_policies),
+            visibilities=tuple(curator_cfg.visibilities),
+        )
+        plan = plan_compaction(
+            conn,
+            cosine_floor=args.cosine,
+            limit=args.limit,
+            adjudicator=_compaction_adjudicator(conn, args, egress_policies),
+            egress_policies=egress_policies,
+            visibilities=visibilities,
+        )
+        applied = None
+        if args.apply:
+            # Two independent gates. `--apply` says what to do; `--yes` says a
+            # human read the plan above and meant it. A single flag would let a
+            # shell history entry or a copied command line retire beliefs that
+            # nobody reviewed, which is the one thing this command must not do.
+            if not args.yes:
+                print(render_compaction(plan, applied=None))
+                print("\nrefusing to apply: --apply also requires --yes")
+                return 0
+            snapshot = _ensure_compaction_snapshot(args.db, started_at=started_at)
+            print(f"snapshot covering this run: {snapshot}")
+            applied = apply_compaction(conn, plan)
+    finally:
+        conn.close()
+    if args.json:
+        output(args, {"action": "compact", "plan": plan, "applied": applied})
+        return 0
+    print(render_compaction(plan, applied=applied))
     return 0
 
 

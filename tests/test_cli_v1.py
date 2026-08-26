@@ -81,6 +81,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_selftest.py, which drives the CLI route against a
     # seeded core and asserts the exit-code gate in both directions.
     selftest_acceptance = {"selftest"}
+    # Covered in tests/test_compact.py, which drives the dry run, the --apply
+    # refusal without --yes, the applying path, and the undo.
+    compaction_acceptance = {"compact"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
@@ -89,6 +92,7 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         | scope_acceptance
         | repo_guard_acceptance
         | selftest_acceptance
+        | compaction_acceptance
     )
 
 
