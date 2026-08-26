@@ -129,17 +129,22 @@ the fact changed. An unchanged body is still a free no-op, and a claim that
 merely rewords an existing fact still updates it in place.
 
 Because it is the same transaction, it inherits the same routing. A doctrine
-target, a pinned target, and everything past `supersede.direct_cap`
-(`OCBRAIN_SUPERSEDE_DIRECT_CAP`, default 8 per caller per 24 hours) become
-undecided proposals in the pending ledger instead of landing, and
-`brain.digest` reports the depth as `pending_corrections`. That default is sized
-for a runtime agent, and a busy cycle will park its tail: a replay of every
-key collision in one 253-fact corpus landed 8 supersessions and deferred 35.
-Nothing is lost either way — `ocbrain` proposal decisions finish a deferred pair
-later — but raise the cap if a scheduled curator is expected to correct more
-than eight facts a day unattended.
+target and a pinned target become undecided proposals in the pending ledger
+instead of landing, and `brain.digest` reports the depth as
+`pending_corrections`.
 
-Two guards bound this, and neither can be configured away:
+The per-caller rate cap (`supersede.direct_cap`, `OCBRAIN_SUPERSEDE_DIRECT_CAP`,
+default 8 per caller per 24 hours) does **not** apply to the curator, under
+`supersede.curator_direct` (default on). That cap is sized for a runtime agent
+and was the wrong instrument here. Its first unattended night on the live core
+is the whole argument: past the eighth correction the curator pended everything,
+and because a pending proposal does not change the input that produced it, the
+next hourly cycle re-derived the same claims and pended them again — **283
+undecided proposals against 33 beliefs in eighteen hours**, one pair carrying
+twelve identical copies, growing at roughly 17/hour with nothing to stop it.
+Setting `curator_direct` to false restores the all-pending behaviour exactly.
+
+Two guards bound the curator instead, and neither can be configured away:
 
 - A claim more than 0.05 below the confidence of the belief it would retire is
   deferred rather than enacted. Arriving later is not the same as being right.
@@ -147,6 +152,27 @@ Two guards bound this, and neither can be configured away:
   correction on its target is **blocked**. A scheduled curator reads a window of
   evidence, not a diff, so Monday's sources come back around every cycle; without
   this, Wednesday's run quietly restores what a human corrected on Tuesday.
+
+A supersession the ledger already carries **undecided** is not proposed a second
+time. The successor's id is content-and-scope addressed, so an identical
+re-derivation produces an identical `(target, successor)` pair and is a no-op —
+nothing is written, not even the rationale evidence row — while a genuinely
+different replacement body for the same belief is a different pair and still
+mints, because two people disagreeing about one fact is something an operator
+has to see. Those no-ops are reported as `pending_deduped`, separately from
+`deferred`, so a loop standing still and a run that has quietly stopped
+proposing anything do not look the same in the promote log.
+
+When the curator refreshes **its own fact** — the successor keeps the
+predecessor's `key` — the successor inherits the predecessor's confidence
+instead of the `min(old, claim, 0.7)` ceiling. That ceiling is right for a
+contested correction, where a replacement must not gain authority by replacing,
+and wrong for the same claim restated from better evidence: approving the live
+core's 33 pending proposals as-proposed would have dropped confidence on 30 of
+them, mean −0.09, every one landing on 0.65 or 0.70. Run hourly, that walks the
+whole corpus to 0.7. Inheritance is no-gain as well as no-loss — a more
+confident claim still does not raise the fact. Cross-key curator supersessions
+and every agent-issued supersession keep the ceiling.
 
 Claims about something the corpus already covers but does not contradict are
 marked rather than merged: both beliefs keep serving and each records the other

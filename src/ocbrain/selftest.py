@@ -300,7 +300,10 @@ THRESHOLDS: dict[str, Threshold] = {
         None,
         None,
         "Reported, never gated: depth alone is not a fault, and the cost of a "
-        "pending supersession is carried by pending_supersede_age_hours, which is.",
+        "pending supersession is carried by pending_supersede_age_hours, which is. "
+        "The value counts distinct targets and the display carries the raw "
+        "proposal count beside it, because raw depth alone read as ordinary "
+        "backlog while a proposal loop grew it without bound.",
     ),
     "db_size_mb": Threshold(
         INFO,
@@ -1168,32 +1171,49 @@ def _correction_adoption(conn: sqlite3.Connection, cutoff: str) -> Metric:
 
 
 def _pending_queue(conn: sqlite3.Connection, now: datetime) -> list[Metric]:
-    """Undecided supersede proposals and the age of the oldest.
+    """Distinct beliefs awaiting a supersede decision, and the age of the oldest.
 
     An undecided proposal carrying ``attributes.supersedes`` *is* the pending
-    correction -- there is no second table and no new status -- so this counts
-    exactly what ``mcp_v1.pending_supersede_count`` counts, and adds the age the
+    correction -- there is no second table and no new status -- so this reads
+    exactly what ``mcp_v1.pending_supersede_count`` reads, and adds the age the
     count alone cannot express. The stale belief keeps serving until an admin
     decides, so age is the real cost.
+
+    The headline is *distinct targets*, with the raw proposal count beside it.
+    Raw depth alone reported 283 on the live core and looked like ordinary
+    backlog; it was 33 beliefs, one of them proposed twelve times by a loop that
+    re-proposed the same supersessions every hour. A metric whose number hides
+    unbounded growth is worse than no metric, so both are shown and neither can
+    be read without the other.
     """
     rows = list(
         conn.execute(
-            "SELECT p.id AS id, p.ts AS ts, p.writer AS writer FROM brain_events p "
+            "SELECT p.id AS id, p.ts AS ts, p.writer AS writer, "
+            "json_extract(p.body_json, '$.attributes.supersedes') AS target "
+            "FROM brain_events p "
             "WHERE p.kind='compilation_proposed' "
             "AND json_extract(p.body_json, '$.attributes.supersedes') IS NOT NULL "
             "AND NOT EXISTS (SELECT 1 FROM brain_events d WHERE d.kind='compilation_decided' "
             "AND json_extract(d.body_json, '$.proposal_event_id') = p.id) ORDER BY p.ts"
         )
     )
+    targets = {str(row["target"]) for row in rows}
     depth = Metric(
         key="pending_supersede_depth",
         section="C",
         label="Pending supersede queue depth",
-        value=float(len(rows)),
-        display=str(len(rows)),
+        value=float(len(targets)),
+        display=f"{len(targets)} distinct ({len(rows)} proposals)",
         status=OK,
-        basis="undecided compilation proposals carrying attributes.supersedes",
-        detail={"pending": len(rows)},
+        basis=(
+            "distinct beliefs targeted by undecided compilation proposals carrying "
+            "attributes.supersedes, and the raw proposal count"
+        ),
+        detail={
+            "pending": len(rows),
+            "proposals": len(rows),
+            "distinct_targets": len(targets),
+        },
     )
     if not rows:
         return [
