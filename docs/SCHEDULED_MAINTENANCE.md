@@ -83,6 +83,7 @@ Environment:
 | `OCBRAIN_PROMOTE_PROVIDER` | `anthropic` | Also `openai`, `moonshot` |
 | `OCBRAIN_PROMOTE_PROJECT` | unset | Set it to curate exactly one scope for a one-off run; unset uses `curator.projects` |
 | `OCBRAIN_PROMOTE_MAX_BELIEFS` | `24` | Upper bound per run; fewer is better |
+| `OCBRAIN_PROMOTE_MAX_TOKENS` | provider-aware | Completion-token budget. Defaults to `8000` for `moonshot` and `16000` for `anthropic` or `openai`; an explicit value overrides the provider default. |
 | `OCBRAIN_HYGIENE_CLASSES` | `--class expired --class redundant` | Both surviving classes. Narrow it to one, e.g. `--class expired` |
 | `OCBRAIN_HYGIENE_APPLY` | `0` (report only) | `1` lets the sweep retire beliefs |
 | `OCBRAIN_PROMOTE_BUDGET_SECONDS` | `1800` | Ceiling on the curate stage |
