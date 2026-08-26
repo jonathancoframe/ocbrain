@@ -45,17 +45,31 @@ set -uo pipefail
 OCBRAIN_BIN="${OCBRAIN_BIN:-ocbrain}"
 BUDGET="${OCBRAIN_BRIEFING_BUDGET:-1500}"
 
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
 project="${OCBRAIN_PROJECT:-}"
-if [ -z "$project" ]; then
-  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$root" ] && project="$(basename "$root")"
+if [ -z "$project" ] && [ -n "$root" ]; then
+  project="$(basename "$root")"
 fi
 [ -z "$project" ] && exit 0
 
 command -v "$OCBRAIN_BIN" >/dev/null 2>&1 || exit 0
 
-"$OCBRAIN_BIN" briefing \
-  --project "$project" \
-  --runtime claude-code \
-  --budget-chars "$BUDGET" \
-  --text 2>/dev/null || exit 0
+# A goal's spec pointer is stored relative to its repo, so the pointer check
+# needs a real local directory. Without one every goal whose spec lives in the
+# repo prints as source_pointer_unresolved -- a warning that means "I was not
+# told where to look", shown to every session until agents learn to ignore it.
+# The git root is already in hand; pass it.
+#
+# --repo-root, not --repo: --repo joins the retrieval scope and narrows which
+# closeouts the ledger and chain sections report, which is a much worse trade
+# than a cosmetic warning. --repo-root only points the pointer check at disk.
+#
+# Positional parameters rather than an array: macOS still ships bash 3.2, where
+# expanding an empty array under `set -u` is an unbound-variable error, and this
+# hook must never be the reason a session fails to start.
+set -- --project "$project"
+[ -n "$root" ] && set -- "$@" --repo-root "$root"
+set -- "$@" --runtime claude-code --budget-chars "$BUDGET" --text
+
+"$OCBRAIN_BIN" briefing "$@" 2>/dev/null || exit 0
