@@ -413,6 +413,10 @@ def test_v1_runtime_and_admin_profiles_are_distinct(tmp_path):
         "brain.ingest",
         "brain.closeout",
         "brain.supersede",
+        "brain.briefing",
+        "brain.ledger",
+        "brain.goal_open",
+        "brain.goal_close",
     }
 
     admin = handle_request(
@@ -533,6 +537,10 @@ def test_v1_stdio_loop_survives_malformed_frames_and_keeps_runtime_surface(tmp_p
         "brain.ingest",
         "brain.closeout",
         "brain.supersede",
+        "brain.briefing",
+        "brain.ledger",
+        "brain.goal_open",
+        "brain.goal_close",
     }
 
 

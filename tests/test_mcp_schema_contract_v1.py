@@ -33,6 +33,14 @@ SEMANTIC_REQUIRED = {
     "brain.ingest": {"body"},
     "brain.closeout": {"status", "summary"},
     "brain.supersede": {"target", "body", "reason"},
+    # The loop-facing surface. `brain.briefing` has no required field at all and
+    # deliberately no `query`: that absence is what makes it a contract rather
+    # than a search, and this table is where a future edit adding one would be
+    # caught.
+    "brain.briefing": set(),
+    "brain.ledger": set(),
+    "brain.goal_open": {"objective", "finish_line", "source_path"},
+    "brain.goal_close": {"goal_id", "status", "verifier_uri"},
     "brain.preview": {"query"},
     "brain.egress_preview": set(),
     "brain.correct": {"target", "layer", "op"},

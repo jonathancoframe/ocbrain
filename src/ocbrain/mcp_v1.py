@@ -19,6 +19,7 @@ from ocbrain.closeout import record_closeout
 from ocbrain.config import load_config
 from ocbrain.core_v1 import (
     CORE_V1_SCHEMA_VERSION,
+    GOAL_BELIEF_TYPE,
     append_core_event,
     canonical_json,
     compilation_block_reason,
@@ -1090,9 +1091,13 @@ def digest_v1(
             )
         }
     rows = conn.execute(
+        # Goals are excluded here for the same reason they are excluded from
+        # retrieval: a digest reports current *knowledge*, and a goal is task
+        # state. `brain.briefing` serves goals, deterministically and by status.
         "SELECT * FROM current_beliefs WHERE serve=1 AND status='current' "
+        "AND COALESCE(belief_type, '') <> ? "
         "ORDER BY pinned DESC, last_compiled_at DESC, belief_id LIMIT ?",
-        (max(limit * 8, 40),),
+        (GOAL_BELIEF_TYPE, max(limit * 8, 40)),
     )
     current: list[dict[str, Any]] = []
     excluded = 0
