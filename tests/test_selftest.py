@@ -462,6 +462,46 @@ def test_pending_queue_measures_the_age_of_the_oldest_undecided_supersede(core: 
     assert age["status"] == OK
 
 
+def test_pending_queue_headlines_distinct_targets_not_raw_proposal_count(core: Path) -> None:
+    """Raw depth alone hid an unbounded proposal loop behind a plausible number.
+
+    Three proposals against two beliefs: an operator has two decisions to make,
+    and needs to see that the queue is duplicated rather than deep.
+    """
+    conn = connect(core)
+    for index, (target, body) in enumerate(
+        [
+            ("belief:keep-a", "Replacement one."),
+            ("belief:keep-a", "Replacement one."),
+            ("belief:keep-b", "Replacement two."),
+        ]
+    ):
+        append_core_event(
+            conn,
+            "compilation_proposed",
+            {
+                "belief_id": f"belief:successor-{index}",
+                "body": body,
+                "evidence_ids": [],
+                "scope": SCOPE.to_dict(),
+                "confidence": 0.7,
+                "attributes": {"supersedes": target},
+            },
+            writer="agent-two",
+            ts=_ts(2),
+        )
+    conn.commit()
+    conn.close()
+
+    depth = _metric(_score(core), "pending_supersede_depth")
+    assert depth["value"] == 2.0
+    assert depth["display"] == "2 distinct (3 proposals)"
+    assert depth["detail"]["distinct_targets"] == 2
+    assert depth["detail"]["proposals"] == 3
+    # The age metric still measures the whole queue, unchanged.
+    assert _metric(_score(core), "pending_supersede_age_hours")["detail"]["pending"] == 3
+
+
 def test_contradictions_rate_finds_the_duplicate_key_pair_in_a_served_packet(core: Path) -> None:
     metric = _metric(_score(core), "contradictions_nonempty_rate")
     # Only ret_2 served both halves of the shared-key pair.
