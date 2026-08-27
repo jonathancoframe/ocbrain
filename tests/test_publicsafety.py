@@ -366,3 +366,77 @@ def test_diff_range_ignores_removed_lines(repo: Path) -> None:
     head = _git(repo, "rev-parse", "HEAD").strip()
     result = ps.scan(repo, diff_range=f"{base}..{head}")
     assert not any(f.rule == "secret_leak" for f in result.findings), result.report()
+
+
+# --------------------------------------------------------------------------- #
+# The detector shapes the 2026-08-24 leaks proved missing
+# --------------------------------------------------------------------------- #
+
+
+def test_private_path_flags_developer_and_documents_containers():
+    hits = ps.private_path_segments(
+        "see /Users/bob/Developer/secret-repo/src/x.py and /Users/bob/Documents/private-notes/a.md",
+        ps.WORKSPACE_ALLOWLIST,
+    )
+    assert hits == ["secret-repo", "private-notes"]
+
+
+def test_private_path_still_allowlists_this_repo_under_developer():
+    assert (
+        ps.private_path_segments(
+            "/Users/example/Developer/ocbrain/src/x.py", ps.WORKSPACE_ALLOWLIST
+        )
+        == []
+    )
+
+
+def test_private_path_flags_a_home_dotdir():
+    """An absolute home dot-dir path always reveals a username; `~/…` does not."""
+    hits = ps.private_path_segments(
+        "wrote /Users/bob/.privatebrain/logs/run.log", ps.WORKSPACE_ALLOWLIST
+    )
+    assert hits == [".privatebrain"]
+    assert ps.private_path_segments("wrote ~/.privatebrain/logs/run.log", set()) == []
+
+
+def test_infra_identifiers_flag_a_routable_ipv4_but_not_documentation_ranges():
+    assert ps.infrastructure_identifier_kinds('host="10.11.12.13"', None) == [
+        "routable IPv4 literal"
+    ]
+    for exempt in ("127.0.0.1", "0.0.0.0", "192.0.2.7", "198.51.100.9", "203.0.113.4"):
+        assert ps.infrastructure_identifier_kinds(f"connect to {exempt}", None) == []
+    # Not an address at all: an octet over 255 is a version or a counter.
+    assert ps.infrastructure_identifier_kinds("build 300.1.1.1", None) == []
+
+
+def test_infra_identifiers_flag_the_oslogin_spelling_but_not_snake_case_code():
+    assert ps.infrastructure_identifier_kinds('user="alice_example_com"', None) == [
+        "OS Login account spelling"
+    ]
+    # The live tree's proven false-positive shapes must stay silent.
+    assert ps.infrastructure_identifier_kinds("search_documents_ai trigger", None) == []
+    assert ps.infrastructure_identifier_kinds("run_stage_dev pipeline", None) == []
+
+
+def test_local_account_pattern_guards_against_generic_and_short_names():
+    assert ps.local_account_pattern("runner") is None
+    assert ps.local_account_pattern("root") is None
+    assert ps.local_account_pattern("bob") is None
+    pattern = ps.local_account_pattern("examplemachineaccount")
+    assert pattern is not None
+    assert ps.infrastructure_identifier_kinds(
+        "log at /var/examplemachineaccount/x", pattern
+    ) == ["this machine's account name"]
+
+
+def test_infra_findings_withhold_the_matched_value(repo):
+    """CI logs on a public repo are public; a finding must not re-leak its match."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "note.md").write_text('the box is at host="10.11.12.13"\n', encoding="utf-8")
+    _git(repo, "add", "docs/note.md")
+    _git(repo, "commit", "-qm", "add note")
+    result = ps.scan(repo)
+    findings = [f for f in result.findings if f.rule == "infra_identifier"]
+    assert len(findings) == 1
+    assert "10.11.12.13" not in findings[0].detail
+    assert "routable IPv4 literal" in findings[0].detail

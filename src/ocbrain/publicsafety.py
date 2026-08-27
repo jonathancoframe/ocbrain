@@ -56,15 +56,88 @@ _FORBIDDEN_PREFIXES = ("data/", "logs/")
 _FORBIDDEN_SUFFIXES = (".jsonl",)
 
 # Files excluded from *content* scans (b/c/d) — see module docstring.
+# normalize.py is procmine's redaction module: like this file, it necessarily
+# spells out the shapes it exists to remove, examples included.
 _CONTENT_SKIP_EXACT = {
     "uv.lock",
     "src/ocbrain/publicsafety.py",
+    "scripts/procmine/normalize.py",
     DENYLIST_REL,
 }
 
 # Absolute /Users/ path tokens, and the project-container segment inside them.
 _USERS_PATH_RE = re.compile(r"/Users/[^\s:\"'()\[\]<>|]+")
-_CONTAINER_RE = re.compile(r"/(?:workspace|code|repos|projects|git)/([A-Za-z0-9][A-Za-z0-9._-]*)")
+_CONTAINER_RE = re.compile(
+    r"/(?:workspace|code|repos|projects|git|Developer|Documents|Desktop|Downloads)"
+    r"/([A-Za-z0-9][A-Za-z0-9._-]*)"
+)
+# A dot-directory directly under a home directory (`/Users/<name>/.something/…`).
+# The tilde spelling (`~/.ocbrain/…`) stays usable in docs because it names
+# nobody; an absolute one reveals a username (covered by the account-name rule
+# on the machine that owns it) and the tool behind the dot-dir. The agent homes
+# this project itself documents are expected shapes; anything else is flagged.
+_HOME_DOTDIR_RE = re.compile(r"/Users/[^/\s]+/(\.[A-Za-z0-9][A-Za-z0-9._-]*)")
+_KNOWN_AGENT_DOTDIRS = {".ocbrain", ".openclaw", ".claude", ".codex", ".cursor", ".hermes"}
+
+# Infrastructure identifiers that carry no credential but deanonymize the
+# operator or the estate. These are exactly the shapes this scanner passed over
+# on 2026-08-24, when an internal IPv4 and a GCP OS Login account name sat on
+# public main inside committed atlas artifacts (scrubbed in 2f653f7): the
+# built-ins looked for credentials, and none of these is one. Same shapes as
+# scripts/procmine/normalize.py redacts -- copied, not imported, because the
+# package-boundary tests pin src/ocbrain as one distribution with no script
+# imports.
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# Loopback, unspecified, broadcast, and the RFC 5737 documentation ranges stay
+# usable in examples; everything else routable is presumed real.
+_IPV4_EXEMPT_PREFIXES = ("127.", "0.", "255.", "192.0.2.", "198.51.100.", "203.0.113.")
+# The OS Login spelling of a work email: `first_last_com`. Narrower than the
+# normalize.py redaction pattern on purpose: a redactor can afford to over-match
+# (worst case, an identifier gets masked), a scanner cannot (the live tree
+# proved `search_documents_ai` and friends match an `_ai` TLD arm). Alpha-only
+# name parts, and only the TLDs that read as nothing else.
+_OSLOGIN_USER_RE = re.compile(r"\b[a-z]+_[a-z]+_(?:com|org|net)\b", re.IGNORECASE)
+# Account names too generic to treat as identifying: flagging these would class
+# half of any CI tree (GitHub-hosted runners execute as `runner`).
+_GENERIC_ACCOUNTS = {"runner", "root", "admin", "ubuntu", "jenkins", "builder", "user", "vagrant"}
+
+
+def local_account_pattern(account: str | None = None) -> re.Pattern[str] | None:
+    """A pattern for the scanning machine's own account name, or None.
+
+    The one string guaranteed private on every operator machine is the account
+    the scan runs as, and it needs no configuration to know. Guarded on length
+    and a generic-name set so a hosted runner or a bare `root` never turns the
+    whole tree into findings.
+    """
+    name = account if account is not None else Path.home().name
+    if len(name) < 8 or name.lower() in _GENERIC_ACCOUNTS:
+        return None
+    return re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+
+
+def infrastructure_identifier_kinds(
+    text: str, account_pattern: re.Pattern[str] | None
+) -> list[str]:
+    """Which identifying shapes appear in ``text`` -- shapes only, never values.
+
+    Findings from this check land in CI logs, and on a public repository those
+    logs are public too: printing the matched token would re-leak exactly what
+    the finding exists to keep out.
+    """
+    kinds: list[str] = []
+    for match in _IPV4_RE.finditer(text):
+        token = match.group(0)
+        if token.startswith(_IPV4_EXEMPT_PREFIXES):
+            continue
+        if all(int(part) <= 255 for part in token.split(".")):
+            kinds.append("routable IPv4 literal")
+            break
+    if _OSLOGIN_USER_RE.search(text):
+        kinds.append("OS Login account spelling")
+    if account_pattern is not None and account_pattern.search(text):
+        kinds.append("this machine's account name")
+    return kinds
 
 # ``assigned_secret`` (text.py) fires on keyword-assignment to an UNQUOTED RHS,
 # which is exactly the false-positive class the real tree proves out:
@@ -215,6 +288,10 @@ def private_path_segments(text: str, allowlist: set[str]) -> list[str]:
         for seg in _CONTAINER_RE.finditer(token):
             name = seg.group(1)
             if name not in allowlist:
+                hits.append(name)
+        for seg in _HOME_DOTDIR_RE.finditer(token):
+            name = seg.group(1)
+            if name not in _KNOWN_AGENT_DOTDIRS and name not in allowlist:
                 hits.append(name)
     return hits
 
@@ -389,6 +466,7 @@ def _read_text(path: Path) -> str | None:
 
 def scan(root: Path, *, diff_range: str | None = None) -> ScanResult:
     result = ScanResult(diff_range=diff_range)
+    account_pattern = local_account_pattern()
     denylist, present = load_denylist(root)
     result.denylist_present = present
     result.denylist_size = len(denylist)
@@ -437,6 +515,16 @@ def scan(root: Path, *, diff_range: str | None = None) -> ScanResult:
                             "private_path",
                             rel,
                             f"absolute /Users/ path reveals non-allowlisted segment '{seg}'",
+                            line=i,
+                        )
+                    )
+                # (e) infrastructure identifiers -- tree-wide, shapes only.
+                for kind in infrastructure_identifier_kinds(line, account_pattern):
+                    result.findings.append(
+                        Finding(
+                            "infra_identifier",
+                            rel,
+                            f"line carries a {kind} (value withheld from this report)",
                             line=i,
                         )
                     )
