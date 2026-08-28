@@ -83,6 +83,17 @@ CURATOR_SUPERSEDE_WRITER = "operator-approved:wiki-curator-v2"
 # Follow ``superseded_by`` this far and no further. A chain longer than this is
 # a corpus problem, not a read to satisfy, and the bound is what stops a cycle
 # from becoming an unbounded walk even before the seen-set catches it.
+#
+# This bounds the *forward* walk only, and deliberately does not transfer to
+# `core_v1._belief_lineage_members`, which walks the same pointer backwards.
+# Two reasons, both measured: the forward walk pays a belief read per hop while
+# the backward walk loads the era pointers once and traverses in memory; and the
+# backward walk is answering "what is this belief's whole record", where the
+# deepest serving lineage in the 2026-08-28T19:28:58Z snapshot is 12
+# generations, so bounding it here would drop two generations of verdicts out of
+# ranking today.
+# A test pins the divergence, so tightening one walk cannot silently tighten the
+# other.
 MAX_RESOLUTION_HOPS = 10
 GET_MODES = ("resolve", "as_stored")
 # The advisory contradiction pass is O(n^2) over the packet, so it is bounded by
@@ -1308,11 +1319,12 @@ def feedback_v1(
     column, and feedback is the only ranking signal the corpus has.
 
     The rule was written instruction-side first ("when a retrieval returns zero
-    items, do not file brain.feedback for it") and it did not hold: on the live
-    core, 183 of the 1,086 zero-item retrievals carry a relevance verdict
-    anyway, 174 of them ``irrelevant``. The zero-item case is now recorded by
-    the server as ``no_coverage`` when the receipt is written, from the item
-    count it already holds, and is not a value a caller can file.
+    items, do not file brain.feedback for it") and it did not hold: in the
+    corpus snapshot frozen at 2026-08-28T19:28:58Z, 183 of the 1,086 zero-item
+    retrievals carry a relevance verdict anyway, 174 of them ``irrelevant``.
+    The zero-item case is now recorded by the server as ``no_coverage`` when the
+    receipt is written, from the item count it already holds, and is not a value
+    a caller can file.
     """
     if outcome in {NO_COVERAGE_OUTCOME, SERVED_OUTCOME}:
         raise ValueError(

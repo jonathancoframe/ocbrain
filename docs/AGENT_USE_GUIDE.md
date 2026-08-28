@@ -103,10 +103,13 @@ Use the packet's `retrieval_use_id` and one honest outcome:
 - `ignored` — deliberately not used;
 - `harmful` — would have caused a worse decision.
 
-Every one of these judges *served items*, so a retrieval that returned nothing
-is refused with an error rather than recorded. The server writes that case
-itself, as `no_coverage`, when it writes the receipt; `no_coverage` is not a
-value a caller can file.
+Every one of these judges *served items*, so on a v1 core a retrieval that
+returned nothing is refused with an error rather than recorded. The server
+writes that case itself, as `no_coverage`, when it writes the receipt;
+`no_coverage` is not a value a caller can file. A legacy v0 core neither records
+nor refuses it — its `outcome` CHECK has no such value and its receipts do not
+carry an item count on every path — so there the same rule holds as an
+instruction only, and the server says so in its own instruction block.
 
 Feedback is not a durable correction. Admin-only `brain.correct` records a
 later semantic constraint.

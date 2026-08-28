@@ -1,22 +1,31 @@
 """What feedback is allowed to say, and how long a belief's record survives.
 
+Every corpus figure below is from one snapshot frozen at 2026-08-28T19:28:58Z.
+The corpus is live and moved four times over the hour these were written, so an
+undated count here would read as a claim that no longer reproduces.
+
 Two defects, one column. ``retrieval_uses.outcome`` carries both "the corpus had
 nothing for this query" and "the corpus served the wrong thing", and feedback is
-the only ranking signal the brain has. On the live core, 1,086 of 2,044
+the only ranking signal the brain has. In the snapshot, 1,086 of 2,048
 retrievals served zero items and 183 of those carry a relevance verdict anyway,
 174 of them ``irrelevant`` -- filed against a written instruction not to file
 them. An instruction that 183 rows ignore is not a rule, so the server enforces
 it and records the zero-item case itself.
 
 The second defect runs the other way: every curator pass mints a new belief_id,
-so the retrieval history stayed behind on an id nothing serves. 373 of 575
+so the retrieval history stayed behind on an id nothing serves. 390 of 587
 ever-retrieved ids are retracted. These tests pin the successor inheriting its
 ancestors' record, once, across a three-generation chain.
+
+A third group covers what the two cores are each *told*. The refusal lives in
+the v1 path, and the text asserting it was served to every connection; these pin
+each string to the core that enforces it.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -24,6 +33,7 @@ import pytest
 from ocbrain.cli import main as cli_main
 from ocbrain.core_v1 import (
     NO_COVERAGE_OUTCOME,
+    RELEVANCE_OUTCOMES,
     SERVED_OUTCOME,
     _retrieval_feedback_scores,
     append_core_event,
@@ -33,8 +43,9 @@ from ocbrain.core_v1 import (
     record_core_v1_retrieval,
     retrieval_history_by_lineage,
 )
-from ocbrain.db import connect
-from ocbrain.mcp_v1 import feedback_v1, supersede_v1
+from ocbrain.db import connect, init_db, log_retrieval_use
+from ocbrain.mcp import call_tool, handle_request, instructions_text, tool_list
+from ocbrain.mcp_v1 import MAX_RESOLUTION_HOPS, feedback_v1, supersede_v1
 from ocbrain.scope import ScopeContext, ScopeTag
 
 SCOPE = ScopeTag(
@@ -398,3 +409,359 @@ def test_an_unjudged_retrieval_is_not_history(tmp_path: Path) -> None:
 
     assert retrieval_history_by_lineage(conn, {gen1, gen3}) == {}
     assert _retrieval_feedback_scores(conn, {gen3}) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Defect 1 -- what the two cores are each told, and what each one enforces
+#
+# The refusal lives in `feedback_v1`, which only a v1 core reaches. The
+# instruction block and the tool description are served on every connection.
+# A legacy v0 core cannot keep either half of the v1 promise: its
+# `retrieval_uses.outcome` CHECK has no `no_coverage` value, and its receipts do
+# not carry a served-item count on every path. So the text it is served must not
+# make the claim. These tests pin the text to the core that is actually enforcing
+# it -- in both directions, so narrowing the v1 wording fails too.
+# --------------------------------------------------------------------------- #
+def _legacy_core(tmp_path: Path):
+    conn = connect(tmp_path / "legacy.sqlite")
+    init_db(conn)
+    return conn
+
+
+def _feedback_tool(*, core_v1: bool = True) -> dict:
+    return next(tool for tool in tool_list(core_v1=core_v1) if tool["name"] == "brain.feedback")
+
+
+def _feedback_description(*, core_v1: bool) -> str:
+    return str(_feedback_tool(core_v1=core_v1)["description"])
+
+
+def _feedback_schema_enum() -> list[str]:
+    return list(_feedback_tool()["inputSchema"]["properties"]["outcome"]["enum"])
+
+
+def test_the_v1_instructions_state_the_refusal_and_the_recorded_outcome() -> None:
+    text = instructions_text(core_v1=True)
+    assert "refuses it" in text
+    assert "no_coverage" in text
+
+
+def test_the_legacy_instructions_claim_neither_refusal_nor_no_coverage() -> None:
+    """A legacy core does neither, so it must not be described as doing either."""
+    text = instructions_text(core_v1=False)
+    assert "no_coverage" not in text
+    assert "refuses" not in text
+    # It still has to say the useful part: do not file, do not re-poll.
+    assert "do not file brain.feedback for it" in text
+    assert "do not re-poll the same query" in text
+
+
+def test_neither_instruction_block_names_a_field_its_core_does_not_emit(
+    tmp_path: Path,
+) -> None:
+    """`coverage.feedback_needed` exists only in the v1 envelope.
+
+    Naming it to a legacy client is the same defect one layer down: prose
+    pointing at an instrument that is not there. The legacy `coverage` block is
+    built in `shared_context` and has no such key, so the legacy wording states
+    the condition without it.
+    """
+    assert "feedback_needed" in instructions_text(core_v1=True)
+    assert "feedback_needed" not in instructions_text(core_v1=False)
+
+    legacy = _legacy_core(tmp_path)
+    payload = json.loads(
+        call_tool(
+            legacy,
+            {"name": "brain.context", "arguments": {"query": "anything", "context": {}}},
+        )["content"][0]["text"]
+    )
+    assert "feedback_needed" not in payload["coverage"]
+    legacy.close()
+
+    core = _core(tmp_path)
+    payload = json.loads(
+        call_tool(
+            core,
+            {"name": "brain.context", "arguments": {"query": "anything", "context": {}}},
+        )["content"][0]["text"]
+    )
+    assert payload["coverage"]["feedback_needed"] is False
+    core.close()
+
+
+def test_the_feedback_description_promises_the_refusal_only_on_a_v1_core() -> None:
+    assert "no_coverage" in _feedback_description(core_v1=True)
+    assert "refused" in _feedback_description(core_v1=True)
+    legacy = _feedback_description(core_v1=False)
+    assert "no_coverage" not in legacy
+    assert "refus" not in legacy
+
+
+def test_a_legacy_connection_is_served_the_legacy_instructions(tmp_path: Path) -> None:
+    """The end-to-end seam: `initialize` picks the text from the open core."""
+    legacy = _legacy_core(tmp_path)
+    response = handle_request(legacy, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert "no_coverage" not in response["result"]["instructions"]
+    legacy.close()
+
+    core = _core(tmp_path)
+    response = handle_request(core, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert "no_coverage" in response["result"]["instructions"]
+    core.close()
+
+
+def test_a_legacy_connection_is_listed_the_legacy_feedback_description(tmp_path: Path) -> None:
+    legacy = _legacy_core(tmp_path)
+    response = handle_request(legacy, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    described = next(
+        tool for tool in response["result"]["tools"] if tool["name"] == "brain.feedback"
+    )
+    assert "no_coverage" not in described["description"]
+    legacy.close()
+
+
+def test_a_legacy_receipt_cannot_prove_a_read_served_nothing(tmp_path: Path) -> None:
+    """Why the v1 guard is not simply ported to the legacy path.
+
+    On a legacy core `brain.get` of a belief and `brain.digest` both write
+    ``knowledge_id`` NULL with ``served_ids_json`` ``'[]'`` while having served
+    an item, so an empty receipt there is not evidence of an empty packet: a
+    served-count refusal would refuse feedback on reads that did serve. If this
+    ever stops being true, the legacy text can make the claim -- and this test
+    is what says so.
+    """
+    conn = _legacy_core(tmp_path)
+    served_a_belief = log_retrieval_use(
+        conn, None, runtime="mcp", task_ref="brain.get", note="object=belief", outcome="served"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT knowledge_id, served_ids_json FROM retrieval_uses WHERE id=?", (served_a_belief,)
+    ).fetchone()
+    assert row["knowledge_id"] is None
+    assert row["served_ids_json"] == "[]"
+    conn.close()
+
+
+def test_a_legacy_core_cannot_hold_the_no_coverage_value(tmp_path: Path) -> None:
+    """The other half of the reason: the legacy CHECK constraint forbids it."""
+    conn = _legacy_core(tmp_path)
+    retrieval_id = log_retrieval_use(conn, None, runtime="mcp", task_ref="brain.context")
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(
+            "UPDATE retrieval_uses SET outcome=? WHERE id=?",
+            (NO_COVERAGE_OUTCOME, retrieval_id),
+        )
+    conn.rollback()
+    conn.close()
+
+
+def _file_legacy_feedback(conn, retrieval_id: str, outcome: str) -> None:
+    call_tool(
+        conn,
+        {
+            "name": "brain.feedback",
+            "arguments": {"retrieval_use_id": retrieval_id, "outcome": outcome},
+        },
+    )
+
+
+def test_the_legacy_feedback_path_reads_the_shared_outcome_vocabulary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy allowed-set is the shared tuple, not a second hand-typed copy.
+
+    Two literals spelling one vocabulary is how the two paths drift apart, and
+    comparing error text cannot tell them apart while they still agree. So the
+    tuple is narrowed under the running server: if the legacy path reads it,
+    ``helpful`` stops being accepted; if it carries its own copy, nothing moves.
+    """
+    conn = _legacy_core(tmp_path)
+    retrieval_id = log_retrieval_use(
+        conn, None, runtime="mcp", task_ref="brain.context", served_ids=["know:1"]
+    )
+    conn.commit()
+
+    _file_legacy_feedback(conn, retrieval_id, "helpful")
+    assert _outcome(conn, retrieval_id) == "helpful"
+
+    monkeypatch.setattr("ocbrain.mcp.RELEVANCE_OUTCOMES", ("used",))
+    with pytest.raises(ValueError, match="used"):
+        _file_legacy_feedback(conn, retrieval_id, "helpful")
+    assert _outcome(conn, retrieval_id) == "helpful"
+    _file_legacy_feedback(conn, retrieval_id, "used")
+    assert _outcome(conn, retrieval_id) == "used"
+    conn.close()
+
+
+def test_the_advertised_outcome_enum_is_the_same_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What clients are told they may send is what the server actually takes.
+
+    The schema `enum` was a third hand-typed copy of the five outcomes, beside
+    the v1 validator and the legacy one. Comparing it to the tuple would pass
+    while they merely happen to agree, so the tuple is narrowed underneath and
+    the published schema has to follow it.
+    """
+    assert _feedback_schema_enum() == list(RELEVANCE_OUTCOMES)
+    monkeypatch.setattr("ocbrain.mcp.RELEVANCE_OUTCOMES", ("used", "harmful"))
+    assert _feedback_schema_enum() == ["used", "harmful"]
+
+
+# --------------------------------------------------------------------------- #
+# Defect 1 -- each half of the reclassification predicate, on its own
+#
+# The command selects rows that (a) have no `retrieval_items` and (b) whose
+# `served_ids_json` names nothing. Removing both conjuncts at once is caught by
+# either half, which proves neither. One test per conjunct, each seeded so that
+# only the conjunct under test can exclude the row.
+# --------------------------------------------------------------------------- #
+def test_a_receipt_naming_items_is_spared_even_with_no_item_rows(tmp_path: Path) -> None:
+    """The `served_ids_json` half, alone.
+
+    A core whose `retrieval_items` were never backfilled still has the id list
+    in the receipt column. Without this conjunct its real, judged retrievals are
+    swept into `no_coverage` under `--apply`, and nothing reports it.
+    """
+    conn = _core(tmp_path)
+    belief = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa2.")
+    judged = _serve(conn, belief, query="how do I reach the research vm")
+    conn.execute("DELETE FROM retrieval_items WHERE retrieval_use_id=?", (judged,))
+    _force_verdict(conn, judged, "irrelevant")
+
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM retrieval_items WHERE retrieval_use_id=?", (judged,)
+        ).fetchone()[0]
+        == 0
+    )
+    assert json.loads(
+        conn.execute(
+            "SELECT served_ids_json FROM retrieval_uses WHERE id=?", (judged,)
+        ).fetchone()[0]
+    ) == [belief]
+
+    assert reclassify_no_coverage_receipts(conn, apply=False)["candidates"] == 0
+    reclassify_no_coverage_receipts(conn, apply=True)
+    conn.commit()
+    assert _outcome(conn, judged) == "irrelevant"
+
+
+def test_a_receipt_with_item_rows_is_spared_even_with_an_empty_id_list(tmp_path: Path) -> None:
+    """The `NOT EXISTS` half, alone: the mirror-image damaged receipt."""
+    conn = _core(tmp_path)
+    belief = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa2.")
+    judged = _serve(conn, belief, query="how do I reach the research vm")
+    conn.execute("UPDATE retrieval_uses SET served_ids_json='[]' WHERE id=?", (judged,))
+    _force_verdict(conn, judged, "irrelevant")
+
+    assert reclassify_no_coverage_receipts(conn, apply=False)["candidates"] == 0
+    reclassify_no_coverage_receipts(conn, apply=True)
+    conn.commit()
+    assert _outcome(conn, judged) == "irrelevant"
+
+
+# --------------------------------------------------------------------------- #
+# Defect 2 -- the walk's depth, against the forward walk's bound
+# --------------------------------------------------------------------------- #
+def test_the_lineage_walk_is_not_bounded_by_the_resolution_hop_limit(
+    tmp_path: Path,
+) -> None:
+    """A chain longer than `MAX_RESOLUTION_HOPS` still carries all its history.
+
+    The forward walk in `mcp_v1._resolve_supersession_chain` stops after ten
+    hops because each hop is a separate belief read and a long chain there is a
+    corpus problem rather than a read to satisfy. This walk answers a different
+    question -- *what is this belief's whole record* -- from one query and an
+    in-memory traversal, and the live core's deepest serving lineage was
+    measured at 11 generations on 2026-08-28, one past that bound. Bounding it
+    at ten would silently drop a generation of verdicts from ranking today.
+    """
+    conn = _core(tmp_path)
+    generations = [_seed(conn, belief_id="belief:vm", body="The VM is reached with ssh asa0.")]
+    for step in range(MAX_RESOLUTION_HOPS + 2):
+        successor = supersede_v1(
+            conn,
+            target=generations[-1],
+            body=f"The VM is reached with ssh asa{step + 1}.",
+            reason=f"asa{step} was retired",
+            context=CONTEXT,
+            # A new actor per generation: the supersede rate cap is per caller,
+            # and a chain this deep on the live core is many callers over weeks,
+            # not one agent in an afternoon.
+            actor=f"agent:test-{step}",
+        )
+        conn.commit()
+        assert successor.get("mode") == "direct", successor.get("pending_reason")
+        generations.append(str(successor["successor_id"]))
+    assert len(generations) == MAX_RESOLUTION_HOPS + 3 > MAX_RESOLUTION_HOPS
+
+    for index, ancestor in enumerate(generations[:-1]):
+        feedback_v1(conn, _serve(conn, ancestor, query=f"vm {index}"), outcome="used", note=None)
+    conn.commit()
+
+    newest = generations[-1]
+    history = retrieval_history_by_lineage(conn, {newest})
+    assert history[newest]["n"] == len(generations) - 1
+    assert history[newest]["inherited_n"] == len(generations) - 1
+
+
+# --------------------------------------------------------------------------- #
+# Defect 2 -- history recorded under a collapsed alias
+# --------------------------------------------------------------------------- #
+def test_history_recorded_under_an_alias_is_attributed_to_the_belief(tmp_path: Path) -> None:
+    """Retrieval rows written before an alias was collapsed still count.
+
+    Order is the whole test. `record_core_v1_retrieval` resolves the id at write
+    time, so a retrieval served *after* the alias exists is already stored under
+    the canonical id and proves nothing about this walk. The rows that need the
+    walk are the ones written **before** the collapse, which keep the old id
+    forever. `object_aliases` has 0 rows on the live core, so nothing in the
+    corpus exercises this and the whole alias block could be deleted with the
+    rest of the suite green -- it is the mechanism the SQL this replaced named in
+    its own docstring, so it gets a falsifier rather than a comment.
+    """
+    conn = _core(tmp_path)
+    belief = _seed(conn, belief_id="belief:vm", body="The research VM is reached with ssh asa2.")
+    alias_id = "belief:vm-old-id"
+
+    under_the_alias = _serve(conn, alias_id, query="reach the vm")
+    feedback_v1(conn, under_the_alias, outcome="helpful", note=None)
+    conn.commit()
+    assert (
+        conn.execute(
+            "SELECT object_id FROM retrieval_items WHERE retrieval_use_id=?", (under_the_alias,)
+        ).fetchone()[0]
+        == alias_id
+    )
+
+    source_event = str(conn.execute("SELECT id FROM brain_events LIMIT 1").fetchone()[0])
+    conn.execute(
+        "INSERT INTO object_aliases(alias_id, canonical_id, object_kind, source, source_event_id) "
+        "VALUES (?, ?, 'belief', 'test', ?)",
+        (alias_id, belief, source_event),
+    )
+    conn.commit()
+
+    history = retrieval_history_by_lineage(conn, {belief})
+    assert history[belief] == {"n": 1, "signal": 2.0, "inherited_n": 0}
+
+    # And an heir inherits it, since the alias hangs off the ancestor it walks to.
+    successor = supersede_v1(
+        conn,
+        target=belief,
+        body="The research VM is reached with ssh asa2; asa1 was terminated.",
+        reason="rewritten",
+        context=CONTEXT,
+        actor="agent:test",
+    )
+    conn.commit()
+    heir = str(successor["successor_id"])
+    assert retrieval_history_by_lineage(conn, {heir})[heir] == {
+        "n": 1,
+        "signal": 2.0,
+        "inherited_n": 1,
+    }

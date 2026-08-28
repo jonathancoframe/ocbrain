@@ -2320,7 +2320,8 @@ def retrieval_served_item_count(conn: sqlite3.Connection, retrieval_use_id: str)
 
     Reads both halves of the receipt and takes the larger: ``served_ids_json``
     is written in the same statement as the row itself, ``retrieval_items`` is
-    the normalized copy. They agree on all 2,044 rows of the live core, and
+    the normalized copy. They agree on all 2,048 rows of the corpus snapshot
+    frozen at 2026-08-28T19:28:58Z (0 disagreements in either direction), and
     reading both means neither a core whose item rows were never backfilled nor
     one whose receipt column is empty can be mistaken for a zero-item read.
     """
@@ -2630,13 +2631,23 @@ def _belief_lineage_members(
     projector stamps on the *predecessor* of every supersession -- including the
     curator's key-collision cascade, whose successor is minted through ordinary
     compilation and carries no ``supersedes`` of its own. Walking the other
-    pointer would see 60 of the live core's 216 era closures.
+    pointer would see 64 of the 274 era closures in the 2026-08-28T19:28:58Z
+    snapshot.
 
     The era pointers are read once per call and the walk runs in Python.
     Expressed as a recursive CTE instead, each step re-scans ``current_beliefs``
     evaluating ``json_extract`` per row, because no index covers that
     expression: 85 ms per ranked retrieval against 1.5 ms here, on a hot path
     that runs on every ``brain.context``.
+
+    Depth is deliberately unbounded, unlike ``mcp_v1.MAX_RESOLUTION_HOPS``, which
+    caps the *forward* walk over this same pointer at ten. That bound exists
+    because resolution reads a belief per hop and only needs one answer, so a
+    long chain there is a corpus problem. This walk needs every generation, pays
+    one query for the whole pointer map, and is bounded by the edges in it; the
+    deepest serving lineage in the 2026-08-28T19:28:58Z snapshot measured 12
+    generations, so a ten-hop cap here would silently drop two of them. The
+    seen-set is what terminates a cycle, and it is checked before descending.
     """
     predecessors: dict[str, list[str]] = {}
     for row in conn.execute(

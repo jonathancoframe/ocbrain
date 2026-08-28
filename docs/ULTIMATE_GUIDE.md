@@ -340,14 +340,16 @@ is not a valid product shape.
 `retrieval_uses` records what context was served, to whom, for what task, and
 whether it helped.
 
-The `outcome` CHECK constraint in `db.py` allows ten values, and the column
-defaults to `unknown`:
+The column defaults to `unknown`. The legacy `db.py` `CHECK` constraint allows
+ten values; a v1 core's `retrieval_uses.outcome` has no `CHECK` and carries an
+eleventh, `no_coverage`:
 
 - `improved`
 - `failed`
 - `neutral`
 - `unknown` (default)
 - `served`
+- `no_coverage` — **v1 only**; the legacy `CHECK` rejects it
 - `helpful`
 - `used`
 - `irrelevant`
@@ -359,8 +361,13 @@ reads) **and the packet held at least one item**; a v1 core writes
 `no_coverage` when it held none, derived from the item count in the same
 statement that writes the receipt. `brain.feedback` records the agent's verdict
 and accepts `helpful`, `used`, `irrelevant`, `ignored`, or `harmful` — all of
-which judge served items, so it refuses any verdict on a `no_coverage` read and
-refuses `no_coverage` itself as a caller-supplied value. The
+which judge served items, so on a v1 core it refuses any verdict on a
+`no_coverage` read and refuses `no_coverage` itself as a caller-supplied value.
+A legacy core does neither: the value is unwritable there, and its receipts do
+not carry a served-item count on every path (`brain.get` of a belief and
+`brain.digest` both write `knowledge_id` NULL with `served_ids_json` `[]` having
+served an item), so a served-count refusal would refuse feedback on reads that
+did serve. The legacy instruction block is worded to match. The
 `improved`/`failed`/`neutral` values are reserved for loop-ingest-style outcome
 reporting.
 
