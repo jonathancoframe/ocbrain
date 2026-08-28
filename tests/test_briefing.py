@@ -102,6 +102,11 @@ def _closeout(conn, ctx, task_ref, status, *, verifier=None, summary="did a thin
         actions=[],
         outcomes=[],
         awaiting=kwargs.pop("awaiting", "a human" if status == "blocked" else None),
+        # Anything that is not a clean success owes an `unresolved`; the fixture
+        # supplies a default so these tests stay about the briefing.
+        unresolved=kwargs.pop(
+            "unresolved", None if status == "completed" else "the thing did not work"
+        ),
         actor="test",
         **kwargs,
     )

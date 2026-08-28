@@ -121,17 +121,22 @@ def test_closeout_records_the_observed_identity_beside_the_claimed_one(tmp_path:
         task_ref="t",
         status="completed",
         summary="Threaded server-observed provenance into both write paths.",
-        context=ScopeContext(project="bountiful", session="a-slug", runtime="Claude Code, sort of"),
+        context=ScopeContext(project="bountiful", runtime="Claude Code, sort of"),
         provenance=Provenance.capture(client_name="claude-code", env=dict(CLAUDE_ENV)),
     )
     conn.commit()
     row = conn.execute(
-        "SELECT runtime, session_id, server_connection_id, client_session_hint, "
+        "SELECT runtime, runtime_family, session_id, session_id_source, "
+        "server_connection_id, client_session_hint, "
         "client_runtime_key, provenance_json FROM task_closeouts WHERE id=?",
         (receipt["id"],),
     ).fetchone()
     assert row["runtime"] == "Claude Code, sort of"
-    assert row["session_id"] == "a-slug"
+    assert row["runtime_family"] == "claude-code"
+    # No session was claimed, so the harness-attested hint fills the column and
+    # says so. Before, this row would have carried whatever the model typed.
+    assert row["session_id"] == CLAUDE_ENV["CLAUDE_CODE_SESSION_ID"]
+    assert row["session_id_source"] == "harness_attested"
     assert row["client_session_hint"] == CLAUDE_ENV["CLAUDE_CODE_SESSION_ID"]
     assert row["client_runtime_key"] == CLAUDE_ENV["AI_AGENT"]
     assert len(row["server_connection_id"]) == 32

@@ -382,6 +382,111 @@ check too slow to run hourly does not get run.
 
 ---
 
+## Section E — write-time closeout gates
+
+Not selftest metrics: these are constants in `src/ocbrain/closeout.py` that
+decide whether a `brain.closeout` call is accepted. They are documented here
+because this file is where a constant's provenance lives, and a gate that
+refuses a client's work has to justify its number at least as hard as a gate
+that colours a row amber.
+
+All three are configurable under the `closeout` config section, so an operator
+who disagrees changes one line rather than forking the write path.
+
+### `RUNTIME_SESSION_SHAPES` — `{runtime_uuid, runtime_hex}`
+
+Which shapes of `context.session` reach `task_closeouts.session_id`. A UUID
+(8-4-4-4-12 hex, which is what Claude Code and Codex mint) or a bare 32/40-char
+hex id. Everything else is refused under the default policy.
+
+**Measured**, 2026-08-28 on a copy of the live core, 1,236 closeouts from
+2026-07-15: 208 (16.8%) runtime-shaped, 431 absent, and 597 hand-written —
+`fleet_cleanup_audit`, `2026-07-22`, `2026-07-21 personalization headers`,
+`/root/portfolio_receipt`. **All 91 closeouts that join a Claude Code transcript
+are UUIDs; zero of the 597 hand-written ids join one.** So the boundary is not a
+strictness dial: admitting exactly the machine-minted shapes keeps 91 of 91
+joinable rows and costs none.
+
+`runtime_hex` is admitted on the same reasoning rather than on observation —
+zero live `session_id` values carry it, but a 32/40-char hex id is machine-minted
+and high-cardinality, and refusing a real runtime's real id would make the gate
+unsatisfiable for that client. **Judgement**, and the weaker half of this entry.
+
+Prose alone had six weeks to fix this: the UUID rate went 15.1% in July to 19.1%
+in August. That is why the shape is enforced in the server rather than asked for
+in a docstring.
+
+### `closeout.session_id_policy` — default `enforce`
+
+`enforce` refuses a non-runtime-shaped id; `quarantine` keeps the claim in the
+receipt and out of the identity column; `off` restores pre-2026-08-28 behaviour.
+
+**Judgement.** The case for `enforce`: the gate is always satisfiable, because
+omitting `context.session` is legal and the server then fills the column from its
+own connection id, so no client can be unable to file a closeout. The error is
+also the only channel that has ever reached an agent, and it names
+`$CLAUDE_CODE_SESSION_ID` and `$OCBRAIN_SESSION_ID` — a quarantine fixes the
+column's type but can never produce a joinable id, because nothing tells the
+agent to go and find one.
+
+**The cost, measured:** replaying all 1,236 live closeouts through the shipped
+defaults refuses **746 (60.4%)** — 597 for the session shape, 149 more for a
+missing `unresolved`. Every one is satisfiable on retry and both refusals are
+reported together so one retry clears both, but a cron job that does not retry
+loses that receipt. An operator who would rather keep every receipt sets
+`{"closeout": {"session_id_policy": "quarantine"}}`.
+
+### `SERVER_CONNECTION_SESSION_PREFIX` — `conn:`
+
+**Convention.** A server connection id names a *connection*, not a conversation,
+and joins no transcript. The prefix makes that structural rather than something
+a later miner has to remember: a `conn:` value can never be mistaken for a
+transcript filename by a string comparison.
+
+### `CLEAN_SUCCESS_STATUSES` — `{completed}`
+
+A closeout owes an `unresolved` unless it is `completed` **and** no verifier it
+filed reports `failed`.
+
+**Measured**, same corpus: 281 of 1,236 (22.7%) trip this — 187 by status, and
+**94 more that claim `completed` while carrying a failed verifier**. Gating on
+status alone would miss all 94, which is why the verifier evidence is a second,
+independent trigger. Live status distribution was completed 1,049 / partial 148 /
+blocked 38 / **failed 1**; one failure in six weeks of agent work is not a
+failure rate, it is a reporting gap, and `brain.ledger`'s only job is surfacing
+the attempts that did not work.
+
+Deliberately **not** a status override. Of the twelve closeouts whose verifiers
+all failed, seven are read-only audits where the FAIL verdict is the deliverable
+("Read-only re-review found remaining blockers; verdict FAIL"). Deriving `failed`
+from the evidence would relabel successful work. The caller keeps the verdict and
+owes a sentence.
+
+### `RUNTIME_FAMILY_RULES` — seven families
+
+**Measured from the listing**, not invented: every token is a substring of a
+spelling in the live `SELECT runtime, COUNT(*)` output. That column held **159
+distinct spellings across 1,236 rows** — five of "local mac", four of "codex
+desktop", and `local macOS + readonlyprod ClickHouse` (13 rows) with an
+environment welded onto the client name. Nothing could be grouped by it.
+
+Matching is on whole hyphen-delimited **segments**. A substring match put those
+13 ClickHouse rows in the `cli` family, because "ClickHouse" contains "cli" —
+a normaliser that guesses is worse than a column nobody can group.
+
+`unknown` is a real member and covers 438 of 1,236 rows: `local`, `desktop`,
+`macOS` name the machine, not the client, and inventing one for them would be
+guessing. `closeout.runtime_aliases` is where an install's own labels go; it
+ships empty for the same reason `scopes.aliases` does. The environment detail
+those spellings were carrying now has `runtime_detail`.
+
+The function is pure and history-independent, because `task_closeouts` is
+append-only under a trigger and the 159 historical spellings can never be
+rewritten in place. Applied to them at read time it yields codex 426, unknown
+438, hermes 123, mcp 93, claude-code 83, cursor 57, cli 16.
+
+---
+
 ## Changing a threshold
 
 Change the number in `THRESHOLDS` and change its `source` in the same commit,

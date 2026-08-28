@@ -450,7 +450,10 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   client_session_hint TEXT,
   client_runtime_key TEXT,
   parent_closeout_id TEXT,
-  task_ref_norm TEXT
+  task_ref_norm TEXT,
+  session_id_source TEXT,
+  runtime_family TEXT,
+  unresolved TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain
   ON task_closeouts(task_ref_norm, closed_at);
@@ -672,6 +675,16 @@ _V6_TASK_CLOSEOUT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parent_closeout_id", "TEXT"),
     ("task_ref_norm", "TEXT"),
 )
+# Closeout identity and failure discipline. Nullable and never backfilled, for
+# the same reason `task_ref_norm` is not: `task_closeouts` carries an UPDATE
+# trigger and is append-only, so a historical row can never be rewritten in
+# place. `ocbrain.closeout.runtime_family` is a pure function precisely so the
+# 159 historical runtime spellings stay analysable on read.
+_V7_TASK_CLOSEOUT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("session_id_source", "TEXT"),
+    ("runtime_family", "TEXT"),
+    ("unresolved", "TEXT"),
+)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -738,6 +751,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     for column, decl in _V6_RETRIEVAL_USE_COLUMNS:
         _ensure_column(conn, "retrieval_uses", column, decl)
     for column, decl in _V6_TASK_CLOSEOUT_COLUMNS:
+        _ensure_column(conn, "task_closeouts", column, decl)
+    for column, decl in _V7_TASK_CLOSEOUT_COLUMNS:
         _ensure_column(conn, "task_closeouts", column, decl)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_closeouts_chain "

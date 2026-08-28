@@ -366,7 +366,15 @@ CREATE TABLE IF NOT EXISTS task_closeouts (
   -- before they existed: the fold happens at write time and history is never
   -- rewritten. See ocbrain.closeout.normalize_task_ref.
   parent_closeout_id TEXT,
-  task_ref_norm TEXT
+  task_ref_norm TEXT,
+  -- Write-time discipline, all three derived in ocbrain.closeout and NULL on
+  -- every historical row. `session_id_source` says on whose word `session_id`
+  -- was filled (harness_attested / agent_reported / server_connection / none);
+  -- `runtime_family` is the groupable form of the free-text `runtime` above,
+  -- which stays verbatim; `unresolved` is what the caller said did not work.
+  session_id_source TEXT,
+  runtime_family TEXT,
+  unresolved TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_closeouts_session_hint
   ON task_closeouts(client_session_hint, closed_at);
@@ -493,6 +501,9 @@ _ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("task_closeouts", "client_runtime_key", "TEXT"),
     ("task_closeouts", "parent_closeout_id", "TEXT"),
     ("task_closeouts", "task_ref_norm", "TEXT"),
+    ("task_closeouts", "session_id_source", "TEXT"),
+    ("task_closeouts", "runtime_family", "TEXT"),
+    ("task_closeouts", "unresolved", "TEXT"),
 )
 
 _ADDITIVE_CORE_V1_INDEXES: tuple[str, ...] = (
