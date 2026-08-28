@@ -20,6 +20,9 @@ from ocbrain.config import load_config
 from ocbrain.core_v1 import (
     CORE_V1_SCHEMA_VERSION,
     GOAL_BELIEF_TYPE,
+    SHA256_TEXT_RE,
+    STABLE_OBJECT_ID_RE,
+    TERMINAL_ARTIFACT_URI_RE,
     append_core_event,
     canonical_json,
     compilation_block_reason,
@@ -27,6 +30,7 @@ from ocbrain.core_v1 import (
     get_core_v1_belief,
     get_core_v1_evidence,
     is_core_v1,
+    looks_like_exact_locator,
     now_iso,
     record_core_v1_evidence,
     record_core_v1_retrieval,
@@ -189,8 +193,18 @@ def build_context_v1(
                 "scope": dict(raw_item.get("scope") or {}),
                 "score": float(raw_item.get("score") or 0.0),
                 "relevance": float(raw_item.get("relevance") or 0.0),
-                "confidence": float(raw_item.get("confidence") or 0.0),
-                "confidence_band": str(raw_item.get("confidence_band") or "unknown"),
+                # `confidence` and `confidence_band` used to sit here. They were
+                # an authored reliability score with no measurable provenance,
+                # and joined to recorded feedback they ran backwards: on the
+                # reference corpus, packets judged irrelevant or harmful held
+                # items averaging 0.8707 confidence against 0.7263 for packets
+                # judged used or helpful. A reader weighting on that field was
+                # being pointed at the rows readers liked least. These two are
+                # facts about the record instead -- how many evidence objects
+                # back it, and when the newest of them was recorded -- so a
+                # reader can go and check rather than defer.
+                "evidence_count": int(raw_item.get("evidence_count") or 0),
+                "evidence_latest_at": raw_item.get("evidence_latest_at"),
                 "status": "current",
                 "evidence_ids": _evidence_ids_for_delivery(
                     conn,
@@ -457,24 +471,14 @@ def _source_payload(
 
 EXACT_MATCH_LIMIT = 8
 EXACT_MATCH_MAX_QUERY_CHARS = 512
-_SHA256_TEXT_RE = re.compile(r"^[0-9a-f]{64}$")
-_STABLE_OBJECT_ID_RE = re.compile(r"^(?:evt|evd|belief|close|ret)_[0-9a-f]{16}$")
 _URI_REFERENCE_RE = re.compile(r"^[a-z][a-z0-9+.-]*:\S+$", re.IGNORECASE)
-_TERMINAL_ARTIFACT_URI_RE = re.compile(
-    r"^(?:[a-z][a-z0-9+.-]*://\S+|ocbrain-bundle:sha256:[0-9a-f]{64}|"
-    r"closeout:close_[0-9a-f]{16})$",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_exact_locator(query: str) -> bool:
-    text = str(query).strip()
-    lowered = text.lower()
-    return bool(
-        _STABLE_OBJECT_ID_RE.fullmatch(lowered)
-        or _SHA256_TEXT_RE.fullmatch(lowered)
-        or _TERMINAL_ARTIFACT_URI_RE.fullmatch(text)
-    )
+# One definition of "this query names a record", shared with ``search_core_v1``.
+# Two copies is how ``brain.search`` came to short-circuit on a locator while
+# ``brain.context`` fell through to dense ranking.
+_SHA256_TEXT_RE = SHA256_TEXT_RE
+_STABLE_OBJECT_ID_RE = STABLE_OBJECT_ID_RE
+_TERMINAL_ARTIFACT_URI_RE = TERMINAL_ARTIFACT_URI_RE
+_looks_like_exact_locator = looks_like_exact_locator
 
 
 def exact_lookup_v1(

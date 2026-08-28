@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+- Stop `brain.context` answering an id it does not hold. `brain.search` has
+  short-circuited on a locator-shaped query since the exact-lookup pre-pass
+  landed; `brain.context` never did, and a locator shares no lexical terms with
+  any body, so the query fell through to a dense arm that always has a nearest
+  neighbour to offer. Recorded `harmful` feedback names the case: the
+  nonexistent, exactly well-formed `belief_ffffffffffffffff` came back as an
+  unrelated fact, and it survived a vector rebuild because the shape of the
+  failure has nothing to do with the vectors. Reproduced on a `mode=ro` copy of
+  the live core: that locator returned **two** unrelated beliefs at cosine
+  0.5603 and 0.6134. A locator-shaped query is now resolved by equality against
+  the serving projection and a miss is empty. Over 100 well-formed absent belief
+  ids on a copy of the live core: **17 of 100 returned an unrelated belief
+  before, 0 of 100 after**. The same run in the other direction is the reason
+  this is a fix and not just a refusal — asking for a belief *by its own id*
+  resolved to that belief **0 of 100 times before, 99 of 100 after**, the
+  hundredth being a `goal`, which is task state and has never been retrievable
+  as knowledge. The visibility gate is the ranker's own: holding an id is not
+  authorisation, so confidential material whose scope the caller did not name
+  stays unreachable by locator. `looks_like_exact_locator` now has one
+  definition, in `core_v1`, shared with the `brain.search` pre-pass — two copies
+  is how the two surfaces came to disagree.
+- Stop serving `confidence` and `confidence_band` in the context packet. The
+  field is authored, not measured: 345 of the live core's 347 serving beliefs
+  carry one, every one inside `[0.65, 1.0]`, and 116 of them are the same round
+  0.85. Joined to recorded feedback it points the wrong way — moderate-band
+  items drew 68 `irrelevant` and 0 `harmful` of 1,061 judged (6.41%), strong-band
+  items drew 463 `irrelevant` and 23 `harmful` of 1,331 (36.51%). That per-item
+  ratio is not identified, because an outcome is recorded per *retrieval* and
+  one verdict tars every item in the packet; re-measured at the packet grain,
+  one vote each over 470 judged retrievals, the direction survives intact:
+  packets judged irrelevant or harmful held items averaging **0.8707**
+  confidence, packets judged used or helpful **0.7263**. A reader weighting on
+  that field was being steered toward the rows readers liked least. In its place
+  the packet carries `evidence_count` and `evidence_latest_at` — how many
+  evidence objects back the belief and when the newest was recorded. These are
+  not offered as better predictors of usefulness; at the packet grain they
+  barely separate the two verdict classes at all (1.06 vs 1.02 evidence objects,
+  32.0 vs 34.4 days old). They are offered because they are facts about the
+  record that a reader can go and check, which the authored score never was.
+- Put the confidence term of `ranking_prior` behind
+  `retrieval.confidence_prior_enabled`, **defaulting to on**, and report the
+  flag on every packet. Whether that term should go, or `confidence` should be
+  re-derived from evidence count, recency and verifier status, is an operator
+  decision and not one a bug fix gets to make, so the default reproduces every
+  packet built to date. Replaying the 200 most recent distinct recorded queries
+  against a copy of the live core, switching it off moved the served set on
+  **30 of 200** queries (31 items in, 31 out), reordered another 113, and changed
+  the top-1 item on 13, out of 2,236 items served either way. Provenance in
+  `docs/THRESHOLDS.md`.
+- Golden context contract: no expected value in
+  `tests/fixtures/golden_context_v1.json` changed. Served ids, `scope_mix`,
+  `eligible_count` and `source_handle_count` are byte-identical on all eleven
+  cases. `serialized_bytes` moved on all eleven — 1947→1977 and 1891→1921 for
+  the single-item cases, 2823→2883 and 2944→3004 for the two-item cases, and
+  +32/+33 on the six empty ones for the new `confidence_prior_enabled` ranking
+  key — but that value is asserted against a re-serialization of the packet, not
+  against a pinned literal, so it needed no edit. The contract was tightened
+  rather than relaxed: the packet item key set is now pinned outright, and every
+  case asserts the envelope contains no `confidence` field anywhere. Both new
+  gates are mutation-proved, as are the locator short-circuit, its visibility
+  gate, and the evidence-recency lookup.
+
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap
   (`supersede.direct_cap`, default 8/24h) is sized for a runtime agent, so past

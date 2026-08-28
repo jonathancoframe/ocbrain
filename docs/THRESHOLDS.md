@@ -382,6 +382,50 @@ check too slow to run hourly does not get run.
 
 ---
 
+## Section E — serving policy dials
+
+Not selftest thresholds: these are constants in the *served read path* that an
+operator can change. They are documented here because the same rule applies —
+a number nobody can trace is a number nobody should trust.
+
+### `confidence_prior_enabled` — ships `True`
+
+`retrieval.confidence_prior_enabled` (`src/ocbrain/config.py`, default mirrored
+by `CONFIDENCE_PRIOR_ENABLED` in `src/ocbrain/core_v1.py`) decides whether
+`ranking_prior` keeps its `0.85 + 0.15 * confidence` factor.
+
+**Measured**, 2026-08-28, on a `mode=ro` backup copy of the 208 MB live core
+(347 serving beliefs):
+
+- 345 of 347 serving beliefs carry a `confidence`, every one inside
+  `[0.65, 1.0]`, clustered on authored round numbers — 0.85 ×116, 0.80 ×85,
+  0.75 ×64, 0.70 ×26, 0.90 ×24, 0.99 ×11. Bands: strong 317, moderate 28,
+  unknown 2.
+- Joining `retrieval_items` to `retrieval_uses.outcome` over judged outcomes
+  (`used`, `helpful`, `irrelevant`, `harmful`): moderate-band items drew 68
+  `irrelevant` and 0 `harmful` of 1,061 (6.41%); strong-band items drew 463
+  `irrelevant` and 23 `harmful` of 1,331 (36.51%). Ratio 5.70x.
+- `outcome` is recorded per *retrieval*, not per item, so one verdict tars every
+  item in that packet and the 5.70x is not identified. Re-measured with one vote
+  per packet — 470 judged retrievals — the direction holds: packets judged
+  irrelevant/harmful held items averaging **0.8707** confidence and 89.63%
+  strong-band, against **0.7263** and 40.90% for packets judged used/helpful.
+- Replaying the 200 most recent distinct recorded queries against that copy,
+  switching the term off moved the served *set* on 30 of 200 queries (31 items
+  in, 31 out), reordered another 113, and changed the top-1 item on 13. Total
+  items served was 2,236 either way.
+
+**Judgement, deferred.** The default is `True` because that is the behaviour
+every packet ever served was built with, and because the honest reading of the
+measurement is "this field does not mean what it says", which is an argument for
+re-deriving it, not automatically for deleting its ranking weight. Whether the
+term should go, or `confidence` should be re-derived from evidence count,
+evidence recency, and verifier status, is an operator decision. Flip it with
+`OCBRAIN_RETRIEVAL_CONFIDENCE_PRIOR_ENABLED=0` or the config file, and read
+`ranking.confidence_prior_enabled` on any packet to see which way it ran.
+
+---
+
 ## Changing a threshold
 
 Change the number in `THRESHOLDS` and change its `source` in the same commit,
