@@ -13,25 +13,71 @@
   one of those guards would rank live beliefs by the legacy product, and all 907
   tests would still pass — the two formulas would just quietly average.
   Tracing `sys.settrace` over `retrieve.py` while dispatching the complete
-  advertised admin surface against a copy of the live core (208 MB, 1,247
-  current beliefs, 6,492 evidence objects): **0 of its 22 top-level functions
-  run**. The read-side CLI, traced separately against the same copy, reaches
-  none of them either. That zero is now asserted.
-  The gate carries its own mutation proof. The identical driver on a legacy core
-  must reach `retrieve` and **did run 9 distinct functions**; blinding the
-  tracer makes the v1 assertion pass on an empty set and fails that one instead,
-  so the zero cannot be an empty check masquerading as a passing one. A separate
-  static count freezes the call sites at `{mcp.py: 2, cli.py: 1,
-  shared_context.py: 1}`, because the dynamic gate can only see call sites the
-  driver reaches. Planting one v1-reachable `retrieve(...)` call in `call_tool`
-  above the `is_core_v1` return: **both gates fail, 2 of 4 tests red**; removed,
-  green.
+  advertised admin surface against `pre-compaction-20260828-claude.sqlite`, a
+  frozen 208,285,696-byte copy of the live core holding 1,247 current-belief
+  rows and 6,492 evidence objects: **0 of its 22 top-level functions run**. Those
+  two counts describe that file and nothing else — the live core reads 1,258 /
+  6,651 at 19:20Z the same day, because it is compacted and re-minted hourly.
+  Two drivers now assert that zero, one over `call_tool` and one over the
+  read-side CLI, and each carries its own positive control on a legacy core
+  where the count **must** be non-zero (it runs 9 distinct functions), so
+  blinding either driver fails rather than passing on an empty set. A static
+  scanner freezes the call sites at `{mcp.py: 2, cli.py: 1,
+  shared_context.py: 1}`, because a dynamic driver can only see call sites it
+  dispatches. Planting one v1-reachable `retrieve(...)` call in `call_tool`
+  above the `is_core_v1` return: **both gates fail**; removed, green.
+- Fix the containment gate's own two blind spots, found by adversarial review of
+  the commit above. Neither was hypothetical; both were demonstrated with a live
+  legacy call executing on a v1 core while the whole suite stayed green.
+  **The static scanner was an allow-list by import form.** It skipped any module
+  without a line *beginning* `from ocbrain.retrieve import retrieve`, and its
+  regex excluded aliased and attribute-qualified calls — so a function-local
+  import, a relative import, an alias, or `ocbrain.retrieve.retrieve(...)` was
+  invisible, and so was the parenthesized multi-line form this repo already uses
+  elsewhere. Against nine planted call sites written in nine legal binding
+  forms, it found **0 of 9**. It is now an AST binding resolver with no
+  import-form filter, counting every *reference* to the bound name rather than
+  only a direct `retrieve(` — and `test_the_call_site_scanner_resolves_every_evasive_binding_form`
+  plants all nine and requires all nine. Mutating the resolver back three ways
+  (top-level-only import scan, dropped attribute branch, calls-only counting)
+  fails that test each time.
+  **The dynamic gate had zero coverage of `cli.py`.** The driver dispatched
+  `mcp.call_tool` only, so the CLI trace cited as evidence was a one-off
+  analysis nothing re-ran — and `cmd_preview` is where the reviewer's planted
+  call lived. `READ_SIDE_CLI` now drives `status`, `briefing`, `digest`,
+  `search` and `preview` (with `--project` and `--cross-scope`) under the same
+  tracer, with the same legacy-core positive control; deleting `preview` from
+  that table fails the control.
+  Both of the reviewer's probes — a shim with a function-local import, and the
+  same shim with a relative one — now fail the static gate, and the first also
+  fails the new CLI gate.
+- Give `build_context` the guard its docstring was borrowing. It called the
+  legacy ranker unconditionally; the only `is_core_v1` check was one frame up in
+  `mcp.py`. That made the containment a property of today's call graph rather
+  than of the function — a second caller would have opened a live unguarded path
+  without changing the frozen call-site table, so neither gate would have seen
+  it. `build_context(v1_conn, ...)` did not raise; it returned a packet ranked by
+  the retired blend, because `current_beliefs` is a table name both schemas
+  share and nothing else fails. It now refuses a v1 core and points at
+  `build_context_v1`. `retrieve.py`'s other three call sites were re-read: all
+  three already refuse in their own frame.
+- Pin the tracer to the module under test. `_RETRIEVE_SOURCE` was built from the
+  repo layout, but under a bare interpreter `ocbrain` resolves through the
+  editable install instead of the checkout, no frame matches, and every count in
+  the gate reads a clean zero for the wrong reason — the reviewer hit exactly
+  this and caught it only because the positive control was empty too. It is now
+  derived from the imported module and asserted to be this worktree's file.
 - Nothing in the legacy dual path was deleted, and the reason is a measurement.
-  Every one of the **21 core databases in `~/.ocbrain/backups/` is v1-shaped** —
-  20 logical tables, `schema_meta.core_schema = ocbrain.core.v1`, zero of
-  `db.py`'s `evidence`/`knowledge` tables — including the ones whose names imply
-  otherwise (`pre-v2-20260825`, `pre-v22-20260825`, `pre-brainfix-20260804`,
+  **Every** core database in `~/.ocbrain/backups/` is v1-shaped —
+  `schema_meta.core_schema = ocbrain.core.v1`, zero of `db.py`'s
+  `evidence`/`knowledge` tables — including the ones whose names imply otherwise
+  (`pre-v2-20260825`, `pre-v22-20260825`, `pre-brainfix-20260804`,
   `ocbrain-sparse-wiki-20260722-1115`, and the oldest, `ocbrain-2026-07-15`).
+  The claim is "all of them", not a count: that directory gains a file per
+  compaction, and re-running the sweep read-only over all 24 core files present
+  at 19:20Z on 2026-08-28 returned 24 v1-shaped, 0 legacy-shaped. The one
+  non-core file, `ops-2026-07-17-pre-v1.1.0.sqlite`, does come back
+  legacy-shaped, which is the sweep's positive control.
   No legacy-shaped core exists on this install. But `v1_migration.py` is still
   reached by the shipped `ocbrain core-migrate-v1` command and is the only
   reader for a *downstream* legacy archive, and `db.py` exports `connect`,

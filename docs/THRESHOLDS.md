@@ -395,12 +395,18 @@ confidence * pinned * catalog_stub` product with a repo-FTS fallback).
 ### `retrieve.py` functions executing on a v1 core — must be exactly 0
 
 Measured 2026-08-28 by tracing `sys.settrace` over `src/ocbrain/retrieve.py`
-while dispatching the complete advertised admin tool surface against a copy of
-the live core (208 MB, 1,247 current beliefs, 6,492 evidence objects,
-`schema_meta.core_schema = ocbrain.core.v1`). **Zero** of `retrieve.py`'s 22
-top-level functions ran. The read-side CLI (`preview`, `search`, `briefing`,
-`digest`, `status`, including `--project` and `--cross-scope` variants) was
-traced separately against the same copy and also reached none of them.
+while dispatching the complete advertised admin tool surface against
+`~/.ocbrain/backups/pre-compaction-20260828-claude.sqlite` — a frozen 208,285,696-byte
+copy of the live core holding 1,247 current-belief rows and 6,492 evidence
+objects, `schema_meta.core_schema = ocbrain.core.v1`. Those two counts describe
+**that file**, not the live corpus: the live core is compacted and re-minted
+hourly and read 1,258 / 6,651 at 19:20Z the same day. Cite the filename, not the
+figures, and re-read it with `?immutable=1` rather than correcting it.
+**Zero** of `retrieve.py`'s 22 top-level functions ran.
+
+The read-side CLI is driven by the same gate, on the same terms — see the
+dispatch counts below. It is not a separate one-off trace, because a trace
+nothing re-runs is provenance, not a gate.
 
 The number is 0 rather than a band because the two formulas must never mix. A
 single unguarded call would rank live beliefs by the legacy product and every
@@ -421,23 +427,51 @@ failure, but it is far enough above 0 that a silent instrument cannot clear it.
 
 ### `LEGACY_RETRIEVE_CALL_SITES` — `{mcp.py: 2, cli.py: 1, shared_context.py: 1}`
 
-Counted 2026-08-28 across `src/ocbrain/*.py`: `mcp.py:736` (scoped
+Counted 2026-08-28 across `src/ocbrain/**/*.py`: `mcp.py:736` (scoped
 `brain.search`) and `mcp.py:778` (`brain.preview`), `cli.py:1241`
-(`cmd_preview`), and `shared_context.py:39` (`build_context`). Every one sits in
-a branch dominated by an `is_core_v1(conn)` early return.
+(`cmd_preview`), and `shared_context.py:52` (`build_context`). Each of the four
+sits below an `is_core_v1(conn)` refusal **in its own frame** — not merely in a
+caller's. `build_context` acquired its own guard on 2026-08-28 for exactly that
+reason: its only check was one frame up in `mcp.py`, which made the containment
+a property of the call graph rather than of the function, so a second caller
+could open a live unguarded path without changing this table.
 
 The dynamic gate can only see call sites the tool driver reaches, so a fourth
 call added in a module the driver never dispatches would slip past it. This
-count is the backstop. Adding a call site fails this test on purpose: the new
-guard has to be proved by hand before the table is updated.
+count is the backstop, and it is an AST binding resolver rather than a line
+scan: it resolves function-local, relative, aliased, parenthesized and
+attribute-qualified imports, and it counts every *reference* to the bound name,
+not only a direct `retrieve(` call. The first version of this gate matched
+import lines by prefix and found **0 of 9** planted evasive call sites;
+`test_the_call_site_scanner_resolves_every_evasive_binding_form` is what holds
+the replacement to all nine. Adding a call site fails this test on purpose: the
+new guard has to be proved by hand before the table is updated.
 
-### Dispatch count — 23
+### Dispatch counts — 23 MCP tool calls, 8 CLI commands
 
 19 tools in `tools_for_profile(ADMIN_PROFILE)` plus 4 scoped/cross-scope
-variants. Asserted so that an emptied or drifted argument table cannot report a
-clean zero by dispatching nothing; `test_tool_coverage_is_complete` separately
-requires the table to equal the advertised surface exactly, so a tool added to
-the server fails the suite until it is driven here.
+variants, and 8 read-side CLI invocations (`status`, `briefing`, `digest`,
+`search` and `preview`, including `--project` and `--cross-scope` variants).
+Both are asserted so that an emptied or drifted driver cannot report a clean
+zero by dispatching nothing; `test_tool_coverage_is_complete` separately
+requires the tool table to equal the advertised surface exactly, so a tool added
+to the server fails the suite until it is driven here.
+
+The CLI count exists because the MCP driver reaches `call_tool` only. `cli.py`
+hosts its own legacy call site, and until 2026-08-28 nothing regression-guarded
+it: a call planted in `cmd_preview` above the `is_core_v1` return executed the
+legacy ranker on a v1 core with the whole suite green. Each driver carries its
+own positive control on a legacy core, so blinding either one fails rather than
+passing on an empty set.
+
+### `_RETRIEVE_SOURCE` must resolve inside the worktree
+
+The tracer keys on a filename. Under a bare interpreter `ocbrain` resolves
+through the editable install rather than the checkout under test, no frame ever
+matches, and every count in this section reads a clean zero for the wrong
+reason. `_RETRIEVE_SOURCE` is therefore derived from the imported module and
+pinned to this worktree's path by
+`test_the_tracer_is_keyed_to_the_module_under_test`.
 
 ---
 
@@ -452,6 +486,14 @@ not earned.
 entry has a non-trivial source string, and
 `test_every_metric_has_a_threshold_entry` enforces that no metric is emitted
 without one.
+
+Section E's constants are not in `selftest.THRESHOLDS`; they are module-level
+names in `tests/test_legacy_retriever_unreachable_v1.py`, so neither test above
+governs them. The same rule applies by hand: change the constant and its
+Section E paragraph in the same commit, and re-run the mutation proof the
+paragraph names. A constant that only a test file holds is the easiest kind to
+edit until green, which is why its provenance is written down here rather than
+left in a comment.
 
 If a threshold is being widened to make a red row go green, that is the moment
 to check whether the row is telling the truth. `calibration_gap` on this install
