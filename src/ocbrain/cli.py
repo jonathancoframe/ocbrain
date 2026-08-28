@@ -45,7 +45,12 @@ from ocbrain.core_v1 import (
     record_core_v1_evidence,
 )
 from ocbrain.curation import apply_curated_manifest
-from ocbrain.curator import PROVIDER_DEFAULTS, resolve_selection_policy
+from ocbrain.curator import (
+    DEFAULT_MEASURED_TTL_DAYS,
+    DEFAULT_VOLATILE_TTL_DAYS,
+    PROVIDER_DEFAULTS,
+    resolve_selection_policy,
+)
 from ocbrain.db import (
     DEFAULT_DB_PATH,
     PUBLIC_SCOPES,
@@ -279,6 +284,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="emit the plan as JSON instead of a report"
     )
     compact_parser.set_defaults(func=cmd_compact)
+
+    volatility_parser = commands.add_parser(
+        "wiki-volatility",
+        help="Re-date serving beliefs by volatility class; prints a plan by default",
+    )
+    volatility_parser.add_argument(
+        "--volatile-days",
+        type=int,
+        default=DEFAULT_VOLATILE_TTL_DAYS,
+        help="TTL for a belief naming a host, version, credential or live state",
+    )
+    volatility_parser.add_argument(
+        "--measured-days",
+        type=int,
+        default=DEFAULT_MEASURED_TTL_DAYS,
+        help="TTL for a measurement or result",
+    )
+    volatility_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="print the plan and write nothing (the default)",
+    )
+    volatility_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the new expiries; additionally requires --yes",
+    )
+    volatility_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm that a human read the plan, including already_expired",
+    )
+    volatility_parser.add_argument(
+        "--actor", default="operator", help="who authorised the re-dating"
+    )
+    volatility_parser.set_defaults(func=cmd_wiki_volatility)
 
     config_parser = commands.add_parser(
         "config",
@@ -910,6 +952,40 @@ def cmd_hygiene(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     output(args, {"action": "hygiene", **payload})
+    return 0
+
+
+def cmd_wiki_volatility(args: argparse.Namespace) -> int:
+    """Plan, or on an explicit double confirmation apply, volatility-class TTLs.
+
+    Dry run by default and dry run unless *both* ``--apply`` and ``--yes`` are
+    given, because the number that matters here -- how many serving beliefs the
+    new scheme has already expired -- is only knowable from the plan.
+    """
+    from ocbrain.curator import apply_volatility_ttl, plan_volatility_ttl
+
+    conn = open_existing_core_v1(args.db)
+    try:
+        if args.apply and args.yes:
+            result = apply_volatility_ttl(
+                conn,
+                actor=args.actor,
+                volatile_ttl_days=args.volatile_days,
+                measured_ttl_days=args.measured_days,
+            )
+            result["applied"] = True
+        else:
+            result = plan_volatility_ttl(
+                conn,
+                volatile_ttl_days=args.volatile_days,
+                measured_ttl_days=args.measured_days,
+            )
+            result["applied"] = False
+            if args.apply and not args.yes:
+                result["refused"] = "--apply needs --yes; nothing was written"
+    finally:
+        conn.close()
+    output(args, {"action": "wiki-volatility", **result})
     return 0
 
 
