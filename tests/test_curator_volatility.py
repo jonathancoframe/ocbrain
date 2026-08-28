@@ -27,6 +27,7 @@ from ocbrain.curator import (
     apply_claims,
     apply_volatility_ttl,
     claim_ttl_days,
+    claim_valid_until,
     claim_volatility,
     plan_volatility_ttl,
 )
@@ -101,6 +102,31 @@ def test_a_measurement_gets_weeks_and_doctrine_gets_no_expiry() -> None:
         == 45
     )
     assert claim_ttl_days(doctrine, current_ttl_days=90, volatility_ttl=True) is None
+
+
+def test_zero_current_ttl_days_disables_expiry_under_either_scheme() -> None:
+    """The operator's off switch has to keep working after the rule was re-keyed.
+
+    `--current-ttl-days 0` is documented as "disables expiry", and under the old
+    lifecycle rule it did. Re-keying TTL on volatility left that number read but
+    ignored: a curator run started with 0 still stamped 14 days on a claim naming
+    a rotating host. An operator-facing control that reads its input and does
+    something else is worse than not having the control.
+    """
+    host = _claim("clickhouse-host", HOST_BODY)
+    measurement = _claim("t1-vs-t1t2", MEASUREMENT_BODY, lifecycle="current")
+    assert claim_ttl_days(host, current_ttl_days=0, volatility_ttl=True) is None
+    assert claim_ttl_days(measurement, current_ttl_days=0, volatility_ttl=True) is None
+    assert claim_ttl_days(host, current_ttl_days=0, volatility_ttl=False) is None
+    assert (
+        claim_valid_until(
+            host, current_ttl_days=0, now=datetime(2026, 8, 28, tzinfo=UTC), volatility_ttl=True
+        )
+        is None
+    )
+    # And a positive number still buys the class TTL, so this is an off switch
+    # rather than a second way to spell "no expiry".
+    assert claim_ttl_days(host, current_ttl_days=90, volatility_ttl=True) == 14
 
 
 def test_the_old_rule_is_reproduced_exactly_when_the_new_one_is_off() -> None:
@@ -321,3 +347,36 @@ def _attribute_snapshot(conn) -> str:
             )
         )
     )
+
+
+def test_the_expiry_off_switch_reaches_the_volatility_sweep_too(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The sibling the compile-path fix left standing.
+
+    `curator.current_ttl_days = 0` means "this brain does not expire beliefs".
+    Honouring it only where claims are compiled, while `ocbrain wiki-volatility`
+    went on re-dating the serving corpus from a module constant, would be an
+    operator control that works in one place and not the other -- the exact
+    shape of the defect being fixed.
+    """
+    conn = _seed_for_sweep(tmp_path)
+    conn.close()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"curator": {"current_ttl_days": 0}}), encoding="utf-8")
+    monkeypatch.setenv("OCBRAIN_CONFIG", str(config_path))
+
+    assert main(["--db", str(tmp_path / "core.sqlite"), "wiki-volatility"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["gains_a_ttl"] == 0
+    assert plan["shortened"] == 0
+    assert plan["already_expired"] == 0
+    assert plan["unchanged"] == plan["serving"]
+
+    before = _attribute_snapshot(connect(tmp_path / "core.sqlite"))
+    assert (
+        main(["--db", str(tmp_path / "core.sqlite"), "wiki-volatility", "--apply", "--yes"]) == 0
+    )
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["rewritten"] == 0
+    assert _attribute_snapshot(connect(tmp_path / "core.sqlite")) == before

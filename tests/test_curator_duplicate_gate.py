@@ -23,17 +23,26 @@ import pytest
 
 import ocbrain.curator
 from ocbrain.compact import DEFAULT_COSINE_FLOOR
+from ocbrain.config import CuratorConfig
 from ocbrain.core_v1 import init_core_v1
 from ocbrain.curator import (
+    DEFAULT_CURRENT_TTL_DAYS,
+    DEFAULT_MEASURED_TTL_DAYS,
+    DEFAULT_VOLATILE_TTL_DAYS,
     DUPLICATE_GATE_EXEMPT_REASONS,
     NEAR_DUPLICATE_COSINE,
     apply_claims,
+    curator_runtime_settings,
     fold_key,
     near_duplicate_neighbor,
     serving_key_row,
 )
 from ocbrain.db import connect
-from ocbrain.hybrid import VECTOR_SCHEMA_VERSION, vector_db_path
+from ocbrain.hybrid import (
+    DEFAULT_DOCUMENT_EMBED_BUDGET,
+    VECTOR_SCHEMA_VERSION,
+    vector_db_path,
+)
 
 PROJECT = "test"
 
@@ -198,6 +207,11 @@ def test_serving_key_row_prefers_the_exact_spelling(tmp_path: Path) -> None:
     can no longer create, so it is seeded onto the projection directly: this
     helper is a reader, and what is being pinned is which of two candidate rows
     it returns.
+
+    Each assertion below names one row, never a set of the possible answers. An
+    earlier draft of this test accepted either candidate on the folded lookup,
+    which made it pass under a fully reversed ORDER BY -- a vacuous assertion in
+    the file added to close a vacuity defect.
     """
     conn = _core(tmp_path)
     apply_claims(
@@ -212,27 +226,58 @@ def test_serving_key_row_prefers_the_exact_spelling(tmp_path: Path) -> None:
             "SELECT last_event_id FROM current_beliefs WHERE belief_id=?", (exact_id,)
         ).fetchone()[0]
     )
-    conn.execute(
-        "INSERT INTO current_beliefs (belief_id, body, belief_type, attributes_json, "
-        "scope_type, scope_id, visibility, egress_policy, confidence, evidence_ids, "
-        "status, serve, pinned, last_event_id, last_compiled_at) "
-        "VALUES (?, ?, 'wiki_fact', ?, 'project', 'project:test', 'internal', "
-        "'local_only', 0.9, '[]', 'current', 1, 0, ?, '2099-01-01T00:00:00+00:00')",
-        (
-            "belief_folded_sibling",
-            "The gate result, the other spelling.",
-            json.dumps({"key": "plane1-recency-gate-result"}),
-            last_event_id,
-        ),
+
+    def _seed_row(belief_id: str, key: str, *, scope_type: str, scope_id: str, at: str) -> None:
+        conn.execute(
+            "INSERT INTO current_beliefs (belief_id, body, belief_type, attributes_json, "
+            "scope_type, scope_id, visibility, egress_policy, confidence, evidence_ids, "
+            "status, serve, pinned, last_event_id, last_compiled_at) "
+            "VALUES (?, ?, 'wiki_fact', ?, ?, ?, 'internal', "
+            "'local_only', 0.9, '[]', 'current', 1, 0, ?, ?)",
+            (
+                belief_id,
+                f"The gate result, spelled {key}.",
+                json.dumps({"key": key}),
+                scope_type,
+                scope_id,
+                last_event_id,
+                at,
+            ),
+        )
+
+    # A project-scoped sibling, newer than the exact row.
+    _seed_row(
+        "belief_folded_sibling",
+        "plane1-recency-gate-result",
+        scope_type="project",
+        scope_id="project:test",
+        at="2099-01-01T00:00:00+00:00",
     )
     conn.commit()
 
     assert str(serving_key_row(conn, "plane-1-recency-gate-result")["belief_id"]) == exact_id
-    # ... and the folded lookup finds the sibling only because no exact row exists.
-    assert str(serving_key_row(conn, "plane1recencygateresult")["belief_id"]) in {
-        exact_id,
-        "belief_folded_sibling",
-    }
+    # ... and the folded lookup answers only because no exact row exists. Of the
+    # two folded candidates it takes the most recently compiled one.
+    assert (
+        str(serving_key_row(conn, "plane1recencygateresult")["belief_id"])
+        == "belief_folded_sibling"
+    )
+
+    # Doctrine outranks recency: a global-scoped row wins even when it is the
+    # oldest of the three.
+    _seed_row(
+        "belief_folded_doctrine",
+        "plane_1_recency_gate_result",
+        scope_type="global",
+        scope_id="global:doctrine",
+        at="1999-01-01T00:00:00+00:00",
+    )
+    conn.commit()
+    assert (
+        str(serving_key_row(conn, "plane1recencygateresult")["belief_id"])
+        == "belief_folded_doctrine"
+    )
+
     assert serving_key_row(conn, "an-unrelated-key") is None
 
 
@@ -438,3 +483,152 @@ def test_the_first_claim_in_an_empty_scope_has_nothing_to_be_a_duplicate_of(
     )
     assert len(result["applied"]) == 1
     assert result["pended_unverified"] == []
+
+
+# --------------------------------------------------------------------------- #
+# the settings in front of the gate, and the budget that decides whether it can
+# answer at all
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unreadable_config_falls_back_to_the_shipped_settings_not_to_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact case `curator_runtime_settings` cites, and the one it must survive.
+
+    `load_config` raising is what the broad `except` is for -- "config problems
+    must not break curation". The literal it returns on that path is a second,
+    independent copy of every default, and it was untested: flipping the
+    duplicate-gate fallback in it to `admit` made a broken config file fail OPEN
+    with nothing in the suite noticing. Asserting the whole dict, rather than
+    the one key, is what stops the next default drifting there unseen.
+    """
+    import ocbrain.config
+
+    def explode(*_args, **_kwargs):
+        raise OSError("config file is not readable")
+
+    monkeypatch.setattr(ocbrain.config, "load_config", explode)
+    assert curator_runtime_settings() == {
+        "duplicate_gate_fallback": "pend",
+        "volatility_ttl": True,
+        "volatile_ttl_days": DEFAULT_VOLATILE_TTL_DAYS,
+        "measured_ttl_days": DEFAULT_MEASURED_TTL_DAYS,
+        "document_embed_budget": DEFAULT_DOCUMENT_EMBED_BUDGET,
+        "current_ttl_days": DEFAULT_CURRENT_TTL_DAYS,
+    }
+
+
+def test_a_broken_config_still_pends_an_unverifiable_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the consequence of that literal, measured rather than read."""
+    import ocbrain.config
+
+    conn = _core(tmp_path)
+    apply_claims(
+        conn, [_claim("first-fact", "The first fact.")], model="test", project=PROJECT
+    )
+    _write_broken_sidecar(tmp_path)
+
+    def explode(*_args, **_kwargs):
+        raise OSError("config file is not readable")
+
+    monkeypatch.setattr(ocbrain.config, "load_config", explode)
+    result = apply_claims(
+        conn,
+        [_claim("second-fact", "A second fact the gate cannot check.")],
+        model="test",
+        project=PROJECT,
+    )
+    assert result["applied"] == []
+    assert len(result["pended_unverified"]) == 1
+
+
+def test_the_configured_embed_budget_reaches_the_readers_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`curator.document_embed_budget` is the knob on the availability cliff.
+
+    Past the budget the reader reports candidates as `uncovered`, the gate
+    returns `candidates_uncovered:N`, and that reason is deliberately NOT an
+    exemption -- so on the shipped `pend` fallback a cycle larger than the
+    budget pends the rest of its claims. An operator whose cycles are larger
+    needs to be able to raise it, which means the number has to travel from the
+    config all the way to the reader.
+    """
+    seen: list[int] = []
+
+    def fake(conn, text, *, candidate_ids, limit=5, embed_budget=None, cache=None):
+        seen.append(embed_budget)
+        ids = list(candidate_ids)
+        return (
+            [],
+            None,
+            {"candidates": len(ids), "reused": 0, "embedded": 0, "uncovered": len(ids)},
+        )
+
+    monkeypatch.setattr(ocbrain.curator, "document_neighbors", fake)
+    monkeypatch.setattr(
+        ocbrain.curator,
+        "curator_runtime_settings",
+        lambda: {
+            "duplicate_gate_fallback": "pend",
+            "volatility_ttl": True,
+            "volatile_ttl_days": 14,
+            "measured_ttl_days": 45,
+            "document_embed_budget": 7,
+            "current_ttl_days": 90,
+        },
+    )
+
+    conn = _core(tmp_path)
+    apply_claims(
+        conn, [_claim("first-fact", "The first fact.")], model="test", project=PROJECT
+    )
+    result = apply_claims(
+        conn,
+        [_claim("second-fact", "A second, genuinely different fact.")],
+        model="test",
+        project=PROJECT,
+    )
+
+    assert seen == [7]
+    # And the cliff itself: an uncovered candidate pends rather than compiles.
+    assert result["applied"] == []
+    assert result["pended_unverified"][0]["reason"] == "candidates_uncovered:1"
+
+
+def test_the_shipped_embed_budget_covers_a_full_max_beliefs_cycle() -> None:
+    """The budget has to exceed what one cycle can write, or the gate stalls itself.
+
+    `--max-beliefs` is capped at 40 in the script and defaults to 24; the
+    candidates needing an on-demand embedding are exactly the beliefs written
+    since the last sidecar build, and `brain-promote.sh` rebuilds the sidecar
+    only after curation. A budget below the cycle's own output is a gate that
+    switches itself off partway through every run.
+    """
+    assert DEFAULT_DOCUMENT_EMBED_BUDGET >= 24
+    assert CuratorConfig().document_embed_budget == DEFAULT_DOCUMENT_EMBED_BUDGET
+
+
+def test_the_embed_budget_config_field_actually_reaches_the_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A knob is only a knob if turning it moves something.
+
+    `curator_runtime_settings` is where the config file becomes a number the
+    gate uses; a field the loader never reads is a config entry that documents a
+    control the operator does not have.
+    """
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"curator": {"document_embed_budget": 9}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("OCBRAIN_CONFIG", str(config_path))
+    assert curator_runtime_settings()["document_embed_budget"] == 9
+
+    config_path.write_text(
+        json.dumps({"curator": {"document_embed_budget": -4}}), encoding="utf-8"
+    )
+    assert curator_runtime_settings()["document_embed_budget"] == 0

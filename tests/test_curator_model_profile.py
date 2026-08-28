@@ -83,6 +83,77 @@ def test_no_provider_default_points_at_a_sunset_model() -> None:
     assert PROVIDER_DEFAULTS["anthropic"]["model"] == "claude-sonnet-5"
 
 
+# Model ids this repo has retired, and the paths allowed to still name one. The
+# default is that a hit is a finding; every exemption is declared here with the
+# reason it is one. Enumerating the *findings* instead is the shape that let the
+# first version of this guard pass while `docs/V2_AUTONOMY_SPEC.md` still showed
+# an operator a config example naming a retired model -- it only ever looked at
+# PROVIDER_DEFAULTS.
+RETIRED_MODEL_IDS = ("gpt-5-mini", "moonshot-v1")
+RETIRED_ID_EXEMPTIONS = {
+    "CHANGELOG.md": "the dated historical record; entries are never rewritten",
+    "src/ocbrain/curator.py": "the comment recording why the defaults moved",
+    "tests/test_curator_model_profile.py": "this guard has to spell the ids it forbids",
+}
+SCANNED_SUFFIXES = {".py", ".md", ".sh", ".json", ".toml", ".txt", ".cfg", ".yml", ".yaml"}
+
+
+def _retired_id_findings(files: dict[str, str]) -> list[str]:
+    """Every ``path:id`` where a retired model id appears outside an exemption."""
+    findings = []
+    for path, text in sorted(files.items()):
+        if path in RETIRED_ID_EXEMPTIONS:
+            continue
+        for retired in RETIRED_MODEL_IDS:
+            if retired in text:
+                findings.append(f"{path}:{retired}")
+    return findings
+
+
+def _repo_text_files() -> dict[str, str]:
+    root = Path(__file__).parents[1]
+    skip = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache"}
+    files = {}
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
+            continue
+        if skip & set(path.relative_to(root).parts):
+            continue
+        # Read as text with replacement rather than shelling out to grep: a NUL
+        # byte silently turns BSD grep into a tool that reports nothing.
+        files[str(path.relative_to(root))] = path.read_text(encoding="utf-8", errors="replace")
+    return files
+
+
+def test_the_retired_model_scan_can_report_dirty() -> None:
+    """An audit is not a pass until it has been shown it can fail.
+
+    Fed a planted hit in a path with no exemption, the scan must name it; fed
+    the same hit in a declared exemption, it must stay quiet. Without this the
+    clean result below is indistinguishable from a scanner that reads nothing.
+    """
+    planted = {"docs/EXAMPLE.md": "model = gpt-5-mini", "src/ocbrain/other.py": "moonshot-v1-32k"}
+    assert _retired_id_findings(planted) == [
+        "docs/EXAMPLE.md:gpt-5-mini",
+        "src/ocbrain/other.py:moonshot-v1",
+    ]
+    assert _retired_id_findings({"CHANGELOG.md": "gpt-5-mini"}) == []
+    assert _retired_id_findings({"docs/EXAMPLE.md": "claude-sonnet-5"}) == []
+
+
+def test_no_file_outside_a_declared_exemption_still_names_a_retired_model() -> None:
+    """The sibling the first fix left standing.
+
+    Correcting `PROVIDER_DEFAULTS` left `model = gpt-5-mini` as a live config
+    example in `docs/V2_AUTONOMY_SPEC.md` -- the line an operator would copy --
+    plus both retired ids as parameters in `tests/test_wiki_curator.py`. The
+    guard that shipped with the correction only inspected the dict it corrected.
+    """
+    scanned = _repo_text_files()
+    assert "src/ocbrain/curator.py" in scanned, "the scan reached nothing; check the walk"
+    assert _retired_id_findings(scanned) == []
+
+
 # --------------------------------------------------------------------------- #
 # the critic
 # --------------------------------------------------------------------------- #

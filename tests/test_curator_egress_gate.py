@@ -242,3 +242,56 @@ def test_a_declared_acknowledgement_downgrades_but_never_hides(
     assert metric["value"] == 0.0
     assert metric["status"] == "watch"
     assert metric["detail"]["acknowledgement"].startswith("single-operator machine")
+
+
+def test_the_payload_limit_caps_what_is_sent_without_truncating_the_denominator(
+    tmp_path: Path,
+) -> None:
+    """The limit stops selecting; it must not stop *counting*.
+
+    This is why the cap is a `continue` and not the `break` it used to be. A
+    `break` at the limit would leave the audit reporting only the refusals it
+    happened to reach before the payload filled up -- the same class of defect
+    as filtering the refusals out in SQL, just with a different cause: a
+    denominator that depends on where the loop stopped.
+    """
+    conn = _core(tmp_path)
+    for index in range(6):
+        record_core_v1_evidence(
+            conn,
+            body=f"Sendable fact {index}.",
+            kind="task_closeout_summary",
+            scope=_scope(),
+            writer="test",
+        )
+    refused_ids = [
+        record_core_v1_evidence(
+            conn,
+            body=f"Local-only fact {index}.",
+            kind="task_closeout_summary",
+            scope=_scope(egress_policy="local_only"),
+            writer="test",
+        )[0]
+        for index in range(3)
+    ]
+    # Order the refused rows last, so a loop that stopped at the limit would
+    # never reach them.
+    conn.executemany(
+        "UPDATE evidence_objects SET recorded_at='2000-01-01T00:00:00+00:00' "
+        "WHERE evidence_id=?",
+        [(evidence_id,) for evidence_id in refused_ids],
+    )
+    conn.commit()
+
+    partition = partition_evidence(conn, limit=2, project=PROJECT)
+    assert len(partition["included"]) == 2
+    assert partition["rejected_count"] == 3
+    assert {row["reason"] for row in partition["rejected"]} == {
+        "egress_policy_not_declared:local_only"
+    }
+    assert sorted(partition["present_egress_policies"]) == ["hosted_ok", "local_only"]
+    # And the two survivors are eligible ones, not the first two rows of the table.
+    assert all(row["egress_policy"] == "hosted_ok" for row in partition["included"])
+
+    # `select_evidence` is the same policy through a narrower door.
+    assert len(select_evidence(conn, limit=2, project=PROJECT)) == 2

@@ -962,14 +962,23 @@ def cmd_wiki_volatility(args: argparse.Namespace) -> int:
     given, because the number that matters here -- how many serving beliefs the
     new scheme has already expired -- is only knowable from the plan.
     """
-    from ocbrain.curator import apply_volatility_ttl, plan_volatility_ttl
+    from ocbrain.curator import (
+        apply_volatility_ttl,
+        curator_runtime_settings,
+        plan_volatility_ttl,
+    )
 
+    # The same off switch the compile path honours. `curator.current_ttl_days=0`
+    # means "this brain does not expire beliefs"; a sweep that re-dated them
+    # anyway would be the operator control that works in one place only.
+    current_ttl_days = curator_runtime_settings()["current_ttl_days"]
     conn = open_existing_core_v1(args.db)
     try:
         if args.apply and args.yes:
             result = apply_volatility_ttl(
                 conn,
                 actor=args.actor,
+                current_ttl_days=current_ttl_days,
                 volatile_ttl_days=args.volatile_days,
                 measured_ttl_days=args.measured_days,
             )
@@ -977,6 +986,7 @@ def cmd_wiki_volatility(args: argparse.Namespace) -> int:
         else:
             result = plan_volatility_ttl(
                 conn,
+                current_ttl_days=current_ttl_days,
                 volatile_ttl_days=args.volatile_days,
                 measured_ttl_days=args.measured_days,
             )

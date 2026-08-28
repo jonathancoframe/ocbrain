@@ -444,6 +444,51 @@ sidecar's stored vectors, and it is not the same scale as
 `CONTRADICTION_COSINE_FLOOR = 0.60`, which scores a *query*-side embedding
 against those documents. Two floors, two scales, one reason each.
 
+### `NEAR_DUPLICATE_NEIGHBORS = 5`
+
+How many of the scored candidates the gate looks at before deciding. The list is
+sorted by descending similarity, so this only ever matters when the top match is
+below the floor and a lower one is not — which cannot happen. It is a bound on
+the returned list, not a decision: the decision is the first neighbour's score
+against `NEAR_DUPLICATE_COSINE`.
+
+**Judgement**, matched deliberately to `CONTRADICTION_NEIGHBORS = 5` so the two
+readers of the same sidecar ask for the same shape of answer. Nothing measured
+argues for 5 over 3 or 10; what would change behaviour is the floor, not this.
+
+### `DEFAULT_DOCUMENT_EMBED_BUDGET = 32` (`src/ocbrain/hybrid.py`)
+
+How many candidate bodies one duplicate-gate call may embed on demand. The
+candidates that need it are exactly the beliefs written since the last sidecar
+build, because those are the rows whose stored vector no longer matches their
+body. Past the budget the extra candidates come back as `uncovered`, the gate
+returns `candidates_uncovered:N`, and that reason is **not** in
+`DUPLICATE_GATE_EXEMPT_REASONS` — so on the shipped `pend` fallback every
+remaining claim in that cycle is pended rather than compiled.
+
+So this is an **availability cliff, not a performance dial**, and it is stated
+that way in `curator.document_embed_budget` because the failure it produces
+looks like the curator quietly doing nothing.
+
+**Judgement, bounded by a measured quantity.** The number that has to fit under
+it is one cycle's own output: `wiki-curator.py --max-beliefs` defaults to 24 and
+is capped at 40, and `scripts/brain-promote.sh` rebuilds the sidecar (line 214)
+only after curation has finished, so every belief a cycle writes stays uncovered
+for the rest of that cycle. 32 sits above the default and below the cap.
+`tests/test_curator_duplicate_gate.py::test_the_shipped_embed_budget_covers_a_full_max_beliefs_cycle`
+holds it above 24 and equal to the config default.
+
+The cliff was measured by this change's adversarial reviewer, not by its author,
+on a `.backup` copy of the live core with a live embedder (2026-08-28): with 40
+serving beliefs' bodies no longer matching their stored vectors,
+`document_neighbors` answered with coverage `{candidates 301, reused 261,
+embedded 32, uncovered 8}` and the gate returned `candidates_uncovered:8`.
+Recorded here as a second-hand measurement because it is one.
+
+Raise the config field if your cycles are larger; each extra candidate is one
+local embedding call. Lowering it does not buy a cheaper gate, it buys a gate
+that refuses to answer.
+
 ### `DEFAULT_VOLATILE_TTL_DAYS = 14`, `DEFAULT_MEASURED_TTL_DAYS = 45`
 
 TTL by how fast a claim's subject moves, replacing a flat 90 days for `current`
@@ -478,6 +523,29 @@ write. On a copy of the live core: 174 doctrine / 140 measured / 33 volatile, 15
 beliefs gain a TTL they never had, 158 move to a shorter one, and **7 are already
 expired** under the new scheme — which is the number to read before running it,
 because those seven stop serving at the next hygiene sweep.
+
+Every corpus figure in this section was taken from a 347-serving-belief snapshot
+on 2026-08-28. Two operator compactions ran later the same day (347 → 303
+serving, 51 retired via supersession), so the date alone no longer identifies the
+snapshot; the rates are what travel, not the counts. Re-measured read-only at
+2026-08-28T19:34Z: 303 serving beliefs, 164 `durable` of which **0** carry a
+`valid_until`, and 139 `current`. The premise — durable buys no expiry at all —
+is unchanged.
+
+### Turning expiry off
+
+`--current-ttl-days 0` (or `curator.current_ttl_days = 0`) means no expiry at
+all, under **either** scheme. Re-keying TTL on volatility initially left that
+number read and then ignored, so a run started with 0 still stamped 14 days on a
+volatile claim. `--no-volatility-ttl` restores the lifecycle rule, where a
+positive `--current-ttl-days` is again the number and `durable` claims never
+expire; `tests/test_wiki_curator_operator_controls.py` holds the chain from the
+flag to the stored `valid_until`.
+
+`ocbrain wiki-volatility` reads the same `curator.current_ttl_days`, so a brain
+that has turned expiry off plans and applies zero rewrites. The compile path and
+the sweep honouring one switch differently is the shape of defect this whole
+section exists to record.
 
 ---
 

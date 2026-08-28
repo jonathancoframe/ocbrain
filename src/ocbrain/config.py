@@ -158,6 +158,17 @@ class CuratorConfig:
     # the next cycle writes nothing at all.
     duplicate_gate_fallback: str = "pend"
 
+    # How many candidate bodies one duplicate-gate call may embed on demand --
+    # the beliefs written since the last sidecar build, whose stored vectors no
+    # longer match. Past this, the extra candidates are reported as `uncovered`,
+    # the gate reports itself unavailable, and `duplicate_gate_fallback` decides.
+    # So on the `pend` default this is an availability cliff: a cycle that
+    # touches more than this many beliefs pends the rest of its claims rather
+    # than compiling them. Raise it (each extra candidate is one local embedding
+    # call) if your cycles are larger than this; do not lower it expecting a
+    # cheaper gate, because what gets cheaper is the gate refusing to answer.
+    document_embed_budget: int = 32
+
     # Whether a claim's TTL comes from its volatility class (a host name expires
     # in days, a measurement in weeks, doctrine not at all) or from the single
     # `current_ttl_days` number that lifecycle used to buy. Applies to newly

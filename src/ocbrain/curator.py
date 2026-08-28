@@ -34,7 +34,11 @@ from typing import Any
 
 from ocbrain.core_v1 import append_core_event, get_core_v1_belief
 from ocbrain.deslop import ENFORCED_RULE_IDS, find_slop
-from ocbrain.hybrid import document_neighbors, semantic_neighbors
+from ocbrain.hybrid import (
+    DEFAULT_DOCUMENT_EMBED_BUDGET,
+    document_neighbors,
+    semantic_neighbors,
+)
 from ocbrain.ids import stable_id
 from ocbrain.mcp_v1 import (
     correct_v1,
@@ -751,9 +755,11 @@ def _request_openai_compatible(
         ],
         "response_format": {"type": "json_object"},
     }
-    # OpenAI's current Chat Completions models (including the default
-    # gpt-5-mini) reject the legacy max_tokens field. Moonshot's compatible
-    # endpoint still uses it, so keep the provider distinction explicit.
+    # OpenAI's current Chat Completions models reject the legacy max_tokens
+    # field; the id itself is whatever `PROVIDER_DEFAULTS["openai"]` says, and
+    # naming one here is how a comment outlives the default it describes.
+    # Moonshot's compatible endpoint still uses max_tokens, so keep the provider
+    # distinction explicit.
     payload[
         "max_completion_tokens" if provider == "openai" else "max_tokens"
     ] = max_tokens
@@ -1098,9 +1104,16 @@ def claim_ttl_days(
     was meant to outlive its evidence, which is a different question from how
     fast the thing it names changes -- so a belief naming which ClickHouse host
     was live on 2026-07-24 was filed `durable` and given no expiry at all.
+
+    ``current_ttl_days <= 0`` means no expiry at all under *either* scheme. That
+    is the operator's off switch, and re-keying the rule on volatility is not a
+    reason to take it away: a control whose input is read and then ignored is
+    worse than no control, because the operator believes it worked.
     """
+    if current_ttl_days <= 0:
+        return None
     if not volatility_ttl:
-        if claim.get("lifecycle") != "current" or current_ttl_days <= 0:
+        if claim.get("lifecycle") != "current":
             return None
         return current_ttl_days
     days = {
@@ -1144,6 +1157,8 @@ def curator_runtime_settings() -> dict[str, Any]:
         "volatility_ttl": True,
         "volatile_ttl_days": DEFAULT_VOLATILE_TTL_DAYS,
         "measured_ttl_days": DEFAULT_MEASURED_TTL_DAYS,
+        "document_embed_budget": DEFAULT_DOCUMENT_EMBED_BUDGET,
+        "current_ttl_days": DEFAULT_CURRENT_TTL_DAYS,
     }
     try:
         from ocbrain.config import load_config
@@ -1155,6 +1170,8 @@ def curator_runtime_settings() -> dict[str, Any]:
         settings["volatility_ttl"] = bool(section.volatility_ttl)
         settings["volatile_ttl_days"] = max(0, int(section.volatile_ttl_days))
         settings["measured_ttl_days"] = max(0, int(section.measured_ttl_days))
+        settings["document_embed_budget"] = max(0, int(section.document_embed_budget))
+        settings["current_ttl_days"] = max(0, int(section.current_ttl_days))
     except Exception:  # noqa: BLE001 - config problems must not break curation
         return settings
     return settings
@@ -1362,6 +1379,7 @@ def near_duplicate_neighbor(
     body: str,
     candidates: Iterable[str],
     cache: dict[str, list[float]] | None = None,
+    embed_budget: int = DEFAULT_DOCUMENT_EMBED_BUDGET,
 ) -> tuple[tuple[str, float] | None, str | None]:
     """The serving belief this claim restates, or why the gate could not look.
 
@@ -1371,6 +1389,13 @@ def near_duplicate_neighbor(
     unavailability -- a candidate that could not be compared is a belief this
     claim might be a copy of, and reporting "no duplicate" over an incomplete
     comparison is how a guard ends up unable to fail.
+
+    ``embed_budget`` is therefore an availability cliff, not a performance dial:
+    past it the extra candidates come back ``uncovered``, this returns
+    ``candidates_uncovered:N``, and on the shipped ``pend`` fallback every
+    remaining claim in the cycle is pended rather than compiled. It is
+    `curator.document_embed_budget` so an install with larger cycles can raise
+    it; `docs/THRESHOLDS.md` carries the number and where it came from.
     """
     candidate_ids = [str(value) for value in candidates]
     if not candidate_ids:
@@ -1381,6 +1406,7 @@ def near_duplicate_neighbor(
         candidate_ids=candidate_ids,
         limit=NEAR_DUPLICATE_NEIGHBORS,
         cache=cache,
+        embed_budget=embed_budget,
     )
     if unavailable is not None:
         return None, unavailable
@@ -1821,6 +1847,7 @@ def apply_claims(
                     body=claim["body"],
                     candidates=[str(row["belief_id"]) for row in equivalent],
                     cache=vector_cache,
+                    embed_budget=settings["document_embed_budget"],
                 )
                 if duplicate is not None:
                     duplicate_id, similarity = duplicate

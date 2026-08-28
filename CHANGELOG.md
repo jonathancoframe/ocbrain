@@ -7,9 +7,10 @@
   ever replace a belief filed under the **same** key — the transaction copies the
   predecessor's key onto its successor, and the curator's own rationale says it
   "recompiled key `<k>`" — so a fact reworded under a new slug was uncollapsible
-  by construction. The live corpus is the proof: **344 serving wiki facts carrying
-  344 distinct keys**, perfect uniqueness, with **35 same-scope near-duplicate
-  clusters at cosine 0.88 covering 98 of the 347 serving beliefs**, five of them
+  by construction. The live corpus is the proof, measured on the
+  **2026-08-28 morning snapshot (347 serving beliefs)**: **344 serving wiki facts
+  carrying 344 distinct keys**, perfect uniqueness, with **35 same-scope
+  near-duplicate clusters at cosine 0.88 covering 98 of those 347**, five of them
   Plane-1 recency beliefs compiled on one day under five keys, two differing by a
   single hyphen. A reader asking one question got one answer five times and read
   it as five corroborations: `0.0166` appears in **13** serving beliefs and `65.4`
@@ -32,15 +33,19 @@
   - **The folded key**, which needs no embedding at all.
     `plane1-recency-gate-result` and `plane-1-recency-gate-result` are one key.
     Folding is separators-only and was checked against the corpus before it
-    shipped: 344 exact wiki keys fold to 343, collapsing exactly that pair and
-    merging nothing else. Over the ledger's history it catches 2 of 1,213 keyed
-    proposals — small, and it is the arm that cannot break.
+    shipped: on the 2026-08-28 morning snapshot, 344 exact wiki keys fold to 343,
+    collapsing exactly that pair and merging nothing else. Over the ledger's
+    history it catches 2 of 1,213 keyed proposals — small, and it is the arm that
+    cannot break. Re-measured at 2026-08-28T19:36Z: 300 wiki facts, 300 exact
+    keys, 300 folded — this arm currently collapses nothing, because the pair it
+    was built for has since been retired by an operator compaction.
   - **Document-to-document cosine** at `NEAR_DUPLICATE_COSINE = 0.88`, verifying
     each candidate's vector by that candidate's own `content_hash` instead of by a
     corpus fingerprint the corpus keeps moving, and embedding on demand whatever
     is left. Measured on a copy of the live core after one belief is written:
     `semantic_neighbors` → `vector_sidecar_stale`, this reader → answered, **203
-    vectors reused, 1 embedded, 0 uncovered**. The floor is pinned equal to
+    vectors reused, 1 embedded, 0 uncovered** (a 204-belief working copy; the
+    adversarial reviewer reproduced the same shape at 301/300/1/0). The floor is pinned equal to
     `compact.DEFAULT_COSINE_FLOOR` by a test, because a claim this gate admits and
     the compactor then proposes retiring is a gate that moved the work rather than
     doing it. It is a different scale from the query-side
@@ -63,10 +68,12 @@
   document-scale floor calibrated on more than two data points, so it is left
   named rather than guessed at.
 
-- Make the curator's egress gate falsifiable. `egress_audits` holds 240 rows
-  spanning 2026-08-04 to 2026-08-28, and `SELECT DISTINCT rejected_json` returns
-  exactly one value on all 240: the literal string `'[]'`, across **25,106
-  transmitted items**. That was structural, not lucky, and it had two causes.
+- Make the curator's egress gate falsifiable. Read-only at **2026-08-28T19:34Z**,
+  `egress_audits` holds **347 rows** spanning 2026-08-04T22:11 to
+  2026-08-28T19:27, and `SELECT DISTINCT rejected_json` returns exactly one value
+  on all 347: the literal string `'[]'`, across **25,958 transmitted items**. (The
+  same structure at an earlier snapshot the same day read 240 rows / 25,106 items;
+  the gate has never refused anything at either.) That was structural, not lucky, and it had two causes.
   `select_evidence` filtered on the allow-list inside its own SQL, so the audit
   could only ever be handed rows that had already passed; and the declared
   allow-list named `approval_required`, `hosted_ok` and `local_only` — every
@@ -96,8 +103,9 @@
   under a `valid_until` running to November, with a second belief repeating it.
   A claim is now classified `volatile` / `measured` / `doctrine`, mechanically
   where a body dates itself, pins a version, names a host or an access path, or
-  asserts what is running right now — 33 of 347 serving beliefs, 11 of them
-  `durable`-marked. The model may declare a class, and the declaration can only
+  asserts what is running right now — 33 of the 347 serving beliefs in the
+  2026-08-28 morning snapshot, 11 of them `durable`-marked; re-run read-only at
+  2026-08-28T19:36Z on the 303 that remain, 29 (9.6%), 10 `durable`-marked. The model may declare a class, and the declaration can only
   shorten a claim's life, never extend it, or `durable` becomes a way to opt out
   of expiry. Existing beliefs are **not** swept: `ocbrain wiki-volatility` prints
   the plan and needs `--apply --yes` to write, because on a copy of the live core
@@ -106,8 +114,11 @@
   value. The pending queue's reasons — the confidence-margin rule, a pinned or
   doctrine target, a rate cap — were legible to the caller and invisible to the
   operator reading the queue a week later.
-- Plumb per-cadence model profiles and an optional independent critic, both inert
-  by default. `curator.nightly_provider`/`nightly_model` ship empty so both
+- Give the curator per-cadence model profiles and an optional independent critic,
+  both inert by default. `wiki-curator.py --cadence {hourly,nightly}` selects the
+  profile, and `--provider` no longer carries an argparse default, which had made
+  `curator.provider` unreachable: a flag beats the cadence profile beats the
+  configured pair. `curator.nightly_provider`/`nightly_model` ship empty so both
   cadences resolve to the one configured pair; a cadence that names its own
   provider does not inherit the other's model id, because that posts one
   provider's model to another provider's endpoint.
@@ -118,6 +129,47 @@
   and correlated error is the whole reason for a second one. Anything other than
   an explicit approval — a refusal, a missing credential, a provider error — routes
   the change to the pending ledger with the critic's reason attached.
+- Test the instrument the duplicate gate rests on, and give an operator control
+  that was left standing after its rule moved somewhere to go. Both defects came
+  out of an adversarial review of the four changes above; both are the classes
+  this work exists to remove.
+
+  `document_neighbors` — the ~140-line document-side reader the whole
+  availability fix depends on — had **no test**. Every test of the gate's
+  positive path monkeypatched it out, so reverting it to exactly the blindness
+  the entry above names as the defect left all 949 tests green. Three
+  independently killed mutations now cover it: requiring a fresh whole-corpus
+  fingerprint (the query-side arm's blindness), dropping the per-candidate
+  `content_hash` check, and a default embed budget of 0. The third is checked by
+  score, not by a count: a candidate rewritten to be a near-copy must come back
+  at cosine 1.0, which it cannot do from its dead stored vector.
+
+  `--current-ttl-days` had become silently inert, and its help text stated two
+  things that were false. Measured directly:
+  `claim_ttl_days({'lifecycle':'current'}, current_ttl_days=0, volatility_ttl=True)`
+  returned 45, and `current_ttl_days=30` also returned 45; the help said "0
+  disables expiry. Durable claims never expire" while a durable body naming a
+  rotating host got 14 days. `current_ttl_days <= 0` now means no expiry under
+  either scheme, `--no-volatility-ttl` makes the lifecycle rule (and the number)
+  reachable again, both flags default to the config field instead of to an
+  argparse literal, and the run's rollup line reports which rule it compiled
+  under. A test drives the whole chain from the flag to the stored `valid_until`.
+  `ocbrain wiki-volatility` reads the same setting, because a switch honoured on
+  the compile path and ignored by the sweep is the same defect one layer down.
+
+  Three smaller things from the same review. `DEFAULT_DOCUMENT_EMBED_BUDGET = 32`
+  is an availability cliff — past it the gate reports `candidates_uncovered:N`
+  and the fail-closed default pends every remaining claim in the cycle — so it is
+  now `curator.document_embed_budget`, documented as a cliff rather than a dial in
+  `docs/THRESHOLDS.md`, and held above `--max-beliefs`. The fail-closed literal
+  that applies when the config file is unreadable is now asserted whole, so the
+  next default drifting there cannot pass. And the retired-model check no longer
+  inspects only `PROVIDER_DEFAULTS`: it scans every text file in the repo, with
+  three **declared** exemptions carrying their reasons, and has its own test that
+  it can report dirty. It found what the first fix had left standing — a
+  `gpt-5-mini` config example in `docs/V2_AUTONOMY_SPEC.md` and both retired ids
+  as test parameters.
+
 - Correct two provider defaults that had gone stale. `moonshot-v1-32k` named a
   series that sunsets **2026-08-31**, i.e. a shipped default that stops answering
   three days from now, and `gpt-5-mini` is a legacy tier beside the current gpt-5.6
