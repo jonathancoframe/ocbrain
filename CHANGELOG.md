@@ -236,6 +236,92 @@
   case asserts the envelope contains no `confidence` field anywhere. Both new
   gates are mutation-proved, as are the locator short-circuit, its visibility
   gate, and the evidence-recency lookup.
+Every live-corpus figure below is read from one `.backup` snapshot frozen at
+**2026-08-28T19:28:58Z**, not from the running database. The corpus is live —
+the hourly curator mints and two operator compactions ran the same afternoon —
+and the retrieval count moved four times while these were being written, so a
+number here without that instant attached would not reproduce by evening.
+
+- Stop an empty retrieval being filed as a bad one. `retrieval_uses.outcome`
+  carries both "the corpus had nothing for this query" and "the corpus served
+  the wrong thing", and feedback is the only ranking signal the brain has. Of
+  the snapshot's **2,048 retrievals (2026-07-15 to 2026-08-28), 1,086 (53.0%)
+  served zero items** — genuinely nothing, not a logging gap, and stable across
+  months (537/983 July, 549/1,065 August). **183 of those zero-item reads carry
+  a relevance verdict anyway** (174 `irrelevant`, 5 `ignored`, 4 `used`), filed
+  against the server's own written instruction not to file one; the agents' own
+  notes say so verbatim ("No prior items were returned"). Restricted to the 962
+  retrievals that did serve something, the picture inverts: **360 of 481 judged
+  verdicts are positive (74.8%)**. An instruction 183 rows ignore is not a rule,
+  so the server enforces it: `brain.feedback` refuses every relevance outcome on
+  a zero-item receipt and says what to write instead, and the zero-item case is
+  recorded as a new `no_coverage` outcome. That value is **server-derived, not
+  caller-supplied** — the item count is observed in the same statement that
+  writes the receipt, and the population a voluntary flag would describe is
+  exactly the one that goes unreported when reporting is voluntary.
+- Say plainly what that fix does *not* do. A zero-item receipt has no
+  `retrieval_items` rows, so those 183 verdicts were never attributable to any
+  belief: reclassifying all of them against the snapshot moved **0 of 191
+  feedback boosts**, while blanking the 104 `irrelevant` verdicts that *did*
+  have items moved 124 — the same instrument, reporting dirty. What the 183
+  polluted is the corpus-level read of whether retrieved context helps, which is
+  what a retirement rule keyed on outcome counts would have used. The existing
+  rows are live history, so rewriting them is an operator's call and not a
+  migration: `ocbrain feedback-repair` reports by default and rewrites under
+  `--apply`, keeping the prior verdict in the row's note. Dry run on the
+  snapshot: **183 candidates, 174 `irrelevant` / 5 `ignored` / 4 `used`, 0
+  written**. The live database is unchanged.
+- Stop retrieval and feedback history dying at every recompile. Each curator
+  pass mints a new `belief_id`, and `retrieval_items` keeps pointing at the old
+  one, so retirement eligibility measured a belief's *age* rather than its
+  usefulness: **390 of 587 ever-retrieved ids are now retracted**, and **106 of
+  303 serving beliefs had never been retrieved at all** — almost entirely
+  recency, not rot, since the never-retrieved share by compile day runs 2/39 on
+  08-04, 13/57 on 08-25, 34/45 on 08-28. A belief now ranks on its whole
+  lineage's record. The lineage is *derived* from the `superseded_by` era pointer
+  the projector already stamps on each predecessor, never copied forward at
+  supersede time: a chain therefore accumulates by construction (generation
+  three walks back through two to one), a copy cannot go stale because there is
+  no copy, and because the walk yields a set of ids folded per
+  `(belief, retrieval_use)` pair, one retrieval that served two members of a
+  lineage is still one verdict. Reading `superseded_by` rather than the
+  successor's `supersedes` is what makes the curator's key-collision cascade
+  visible: **274 era closures against 64**. On the snapshot, **47 serving
+  beliefs inherit 307 verdicts**, **18 of the 106 never-retrieved beliefs gain a
+  judged record**, and beliefs carrying a feedback boost rise from **170 to
+  191**, 45 of them changing value.
+- Walk that lineage in Python off one read of the era pointers. Expressed as a
+  recursive CTE, each step re-scans `current_beliefs` evaluating `json_extract`
+  per row, because no index covers that expression: **85 ms per ranked
+  retrieval, against 1.5 ms** for the same answer, on a path that runs on every
+  `brain.context`. The walk is deliberately *unbounded* in depth, where the
+  forward walk over the same pointer stops at `MAX_RESOLUTION_HOPS = 10`: that
+  bound pays a belief read per hop and needs one answer, this one loads the
+  pointer map once and needs every generation, and the snapshot's deepest
+  serving lineage is **12 generations** (widest, 22 members; 112 of 303
+  serving beliefs have more than one), so a ten-hop cap here would drop two
+  generations of verdicts out of ranking today. Both walks now say so at their
+  own constant, and a test pins the divergence.
+- Do not let the instruction block promise what the open core does not do. The
+  refusal above lives in the v1 feedback path, but the `initialize` instructions
+  and the `brain.feedback` description were served to **every** connection — so
+  a legacy v0 core described itself refusing zero-item feedback and recording
+  `no_coverage`, and did neither: filing `irrelevant` on a zero-item legacy
+  receipt was accepted, and the row read `irrelevant` afterwards. The guard does
+  not port. A legacy `retrieval_uses.outcome` `CHECK` has no `no_coverage` value
+  (the `UPDATE` raises `IntegrityError`), and a legacy receipt cannot prove a
+  read served nothing: `brain.get` of a belief and `brain.digest` both write
+  `knowledge_id` NULL with `served_ids_json` `[]` *having served an item*, so a
+  served-count refusal there would refuse feedback on reads that did serve. Both
+  texts are therefore chosen from the core actually open, and the legacy wording
+  keeps the instruction it has always carried. Two siblings of the same defect
+  fell out of sweeping for it: the legacy wording also named
+  `coverage.feedback_needed`, a key the legacy `coverage` envelope has never
+  emitted (7 keys, confirmed through `brain.context` on a legacy core), and the
+  outcome vocabulary was spelled by hand in **three** places — the v1 validator,
+  the legacy validator, and the `inputSchema` `enum` clients actually act on. All
+  three now read `RELEVANCE_OUTCOMES`, and each is pinned by narrowing that tuple
+  underneath the running server rather than by comparing one copy to another.
 
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap
