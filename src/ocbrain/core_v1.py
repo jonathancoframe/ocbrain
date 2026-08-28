@@ -49,6 +49,33 @@ PROCEDURE_BELIEF_TYPE = "procedure"
 # See `ocbrain.briefing` and `_servable_knowledge_sql` below.
 GOAL_BELIEF_TYPE = "goal"
 CORE_V1_EVENT_SCHEMA = "ocbrain.event.v1"
+
+# Retrieval receipt outcomes, split by who is entitled to write them.
+#
+# RELEVANCE_OUTCOMES are judgements about *served items* and are the only values
+# a caller may file through ``brain.feedback``. SERVED_OUTCOME and
+# NO_COVERAGE_OUTCOME are written by the server when it records the receipt: it
+# counts the items it just served in the same statement that writes the row, so
+# the zero-item case is observed, not reported. A caller-supplied "nothing came
+# back" flag would be a second, unverifiable claim about a number the server
+# already holds -- and the population it would describe is exactly the one that
+# goes unreported when reporting is voluntary.
+RELEVANCE_OUTCOMES: tuple[str, ...] = ("helpful", "used", "irrelevant", "ignored", "harmful")
+SERVED_OUTCOME = "served"
+NO_COVERAGE_OUTCOME = "no_coverage"
+# Stamped on a receipt the maintenance command rewrote, so an operator can tell
+# a server-derived no_coverage from a reclassified one.
+NO_COVERAGE_RECLASSIFY_SOURCE = "maintenance:no_coverage_reclassify"
+# What each verdict is worth to ranking. Unchanged from the CASE expression this
+# replaced (see ``retrieval_history_by_lineage``); only the language moved.
+_FEEDBACK_SIGNAL: dict[str, float] = {
+    "helpful": 2.0,
+    "used": 1.0,
+    "irrelevant": -1.5,
+    "ignored": -0.5,
+    "harmful": -4.0,
+}
+
 HYBRID_RRF_K = 60
 # Qwen3's low positive tail is not evidence of topical relevance. Keep a
 # moderately permissive floor for candidates that lexical retrieval can
@@ -2223,6 +2250,12 @@ def record_core_v1_retrieval(
     ``provenance`` is deliberately absent from the ``stable_id`` inputs and from
     ``context_json``: two identical reads must stay the same read regardless of
     which connection served them.
+
+    A packet holding no items is recorded as ``no_coverage`` rather than
+    ``served``. The distinction is derived here, from the item list this call
+    was handed, because this is the only place that both knows the count and
+    writes the row; downstream, "the brain had nothing" and "the brain served
+    junk" are otherwise indistinguishable in the outcome column.
     """
     rows = list(items)
     served_at = now_iso()
@@ -2244,12 +2277,13 @@ def record_core_v1_retrieval(
           context_json, packet_schema, session_id, served_at,
           server_connection_id, client_session_hint, client_runtime_key,
           provenance_json, task_ref_norm
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
             runtime,
             task_ref,
+            SERVED_OUTCOME if rows else NO_COVERAGE_OUTCOME,
             query,
             canonical_json(
                 [item.get("belief_id") or item.get("object_id") or item.get("id") for item in rows]
@@ -2279,6 +2313,87 @@ def record_core_v1_retrieval(
             (retrieval_id, object_id, object_kind, rank, item.get("score")),
         )
     return retrieval_id
+
+
+def retrieval_served_item_count(conn: sqlite3.Connection, retrieval_use_id: str) -> int | None:
+    """How many items one recorded retrieval served, or ``None`` if it is unknown.
+
+    Reads both halves of the receipt and takes the larger: ``served_ids_json``
+    is written in the same statement as the row itself, ``retrieval_items`` is
+    the normalized copy. They agree on all 2,044 rows of the live core, and
+    reading both means neither a core whose item rows were never backfilled nor
+    one whose receipt column is empty can be mistaken for a zero-item read.
+    """
+    row = conn.execute(
+        "SELECT served_ids_json FROM retrieval_uses WHERE id=?", (retrieval_use_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    items = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM retrieval_items WHERE retrieval_use_id=?",
+            (retrieval_use_id,),
+        ).fetchone()[0]
+    )
+    return max(items, len(_json_list(row["served_ids_json"])))
+
+
+def reclassify_no_coverage_receipts(
+    conn: sqlite3.Connection, *, apply: bool = False
+) -> dict[str, Any]:
+    """Move relevance verdicts filed on zero-item retrievals to ``no_coverage``.
+
+    The server now refuses these at the door, but the rows already written under
+    the instruction-only rule stay in the corpus, where an ``irrelevant`` filed
+    on an empty packet reads as "the brain served junk" forever. Whether to
+    rewrite live history is an operator's call, not a server's, so this is an
+    explicit command that reports by default and writes only under ``apply``.
+
+    The prior verdict is appended to the row's note rather than dropped, so a
+    reclassification stays legible -- and reversible by hand -- afterwards.
+    """
+    rows = list(
+        conn.execute(
+            f"""
+            SELECT ru.id AS id, ru.outcome AS outcome, ru.note AS note
+            FROM retrieval_uses ru
+            WHERE ru.outcome IN ({",".join("?" for _ in RELEVANCE_OUTCOMES)})
+              AND NOT EXISTS (
+                SELECT 1 FROM retrieval_items ri WHERE ri.retrieval_use_id = ru.id
+              )
+              AND COALESCE(ru.served_ids_json, '[]') IN ('[]', '', 'null')
+            ORDER BY ru.served_at, ru.id
+            """,  # noqa: S608 - placeholder count derives only from the outcome vocabulary
+            tuple(RELEVANCE_OUTCOMES),
+        )
+    )
+    by_outcome: dict[str, int] = {}
+    for row in rows:
+        outcome = str(row["outcome"])
+        by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+    stamp = now_iso()
+    if apply:
+        for row in rows:
+            marker = f"[reclassified from {row['outcome']}: retrieval served zero items]"
+            note = str(row["note"] or "").strip()
+            conn.execute(
+                "UPDATE retrieval_uses SET outcome=?, note=?, feedback_source=?, "
+                "feedback_at=? WHERE id=?",
+                (
+                    NO_COVERAGE_OUTCOME,
+                    f"{note} {marker}".strip(),
+                    NO_COVERAGE_RECLASSIFY_SOURCE,
+                    stamp,
+                    str(row["id"]),
+                ),
+            )
+    return {
+        "candidates": len(rows),
+        "by_outcome": dict(sorted(by_outcome.items())),
+        "applied": len(rows) if apply else 0,
+        "dry_run": not apply,
+        "sample": [str(row["id"]) for row in rows[:12]],
+    }
 
 
 def _normalize_fts_query(query: str) -> str:
@@ -2432,6 +2547,134 @@ def _recency_score(value: str) -> float:
     return math.exp(-days / 365.0)
 
 
+def retrieval_history_by_lineage(
+    conn: sqlite3.Connection, belief_ids: set[str]
+) -> dict[str, dict[str, float]]:
+    """Judged retrieval history for each belief, counting its lineage's too.
+
+    Returns ``{belief_id: {"n", "signal", "inherited_n"}}`` over every judged
+    retrieval that served the belief, one of its aliases, or any belief it
+    replaced -- transitively, so a claim recompiled five times carries all five
+    generations' record instead of the fortnight since its latest id was minted.
+
+    The lineage is *derived* from the era pointers the ledger already projects
+    (``attributes.superseded_by`` on the predecessor), never copied forward at
+    supersede time. Two consequences matter. A chain accumulates by
+    construction: generation three walks back through generation two to
+    generation one without anything having been summed at each hop, so a copy
+    that was taken once and then went stale is not a state this can reach. And
+    nothing can be counted twice: the walk yields a *set* of ids, and verdicts
+    are folded per ``(belief, retrieval_use)`` pair, so a single retrieval that
+    served both a belief and one of its own ancestors still contributes one
+    verdict.
+
+    Alias-recorded history is attributed to the belief for the same reason:
+    retrieval rows written before an alias was collapsed are stored under the
+    old id, and without ``object_aliases`` that history is silently dropped.
+    """
+    if not belief_ids:
+        return {}
+    lineage = _belief_lineage_members(conn, belief_ids)
+    members = sorted({member for members in lineage.values() for member in members})
+    # Verdicts are fetched by a flat id list rather than by joining the lineage
+    # walk to `retrieval_items` inside one statement: the flat form uses
+    # `idx_retrieval_items_object`, and the joined form does not. On the live
+    # core that difference is 0.9 ms against 88 ms per ranked retrieval.
+    verdicts: dict[str, list[tuple[str, str]]] = {}
+    placeholders = ",".join("?" for _ in members)
+    outcomes = ",".join("?" for _ in RELEVANCE_OUTCOMES)
+    for row in conn.execute(
+        f"""
+        SELECT ri.object_id AS object_id, ru.id AS use_id, ru.outcome AS outcome
+        FROM retrieval_items ri
+        JOIN retrieval_uses ru ON ru.id = ri.retrieval_use_id
+        WHERE ri.object_id IN ({placeholders})
+          AND ru.outcome IN ({outcomes})
+        """,  # noqa: S608 - placeholders derive only from ids and the outcome vocabulary
+        (*members, *RELEVANCE_OUTCOMES),
+    ):
+        verdicts.setdefault(str(row["object_id"]), []).append(
+            (str(row["use_id"]), str(row["outcome"]))
+        )
+    history: dict[str, dict[str, float]] = {}
+    for belief_id, members_by_origin in lineage.items():
+        # Folded per retrieval, so a single retrieval that served two members of
+        # one lineage counts as one verdict. A verdict is inherited only when
+        # every member that carried it was an ancestor, which does not depend on
+        # the order the members are walked in.
+        folded: dict[str, tuple[str, bool]] = {}
+        for member, inherited in members_by_origin.items():
+            for use_id, outcome in verdicts.get(member, ()):
+                previous = folded.get(use_id)
+                folded[use_id] = (
+                    outcome,
+                    inherited and (previous is None or previous[1]),
+                )
+        if not folded:
+            continue
+        history[belief_id] = {
+            "n": len(folded),
+            "signal": sum(_FEEDBACK_SIGNAL[outcome] for outcome, _ in folded.values()),
+            "inherited_n": sum(1 for _, inherited in folded.values() if inherited),
+        }
+    return history
+
+
+def _belief_lineage_members(
+    conn: sqlite3.Connection, belief_ids: set[str]
+) -> dict[str, dict[str, bool]]:
+    """Every id each belief's history may live under: ``{belief: {id: inherited}}``.
+
+    ``inherited`` is False for the belief's own id and its aliases, True for a
+    belief it replaced. The walk reads ``attributes.superseded_by``, which the
+    projector stamps on the *predecessor* of every supersession -- including the
+    curator's key-collision cascade, whose successor is minted through ordinary
+    compilation and carries no ``supersedes`` of its own. Walking the other
+    pointer would see 60 of the live core's 216 era closures.
+
+    The era pointers are read once per call and the walk runs in Python.
+    Expressed as a recursive CTE instead, each step re-scans ``current_beliefs``
+    evaluating ``json_extract`` per row, because no index covers that
+    expression: 85 ms per ranked retrieval against 1.5 ms here, on a hot path
+    that runs on every ``brain.context``.
+    """
+    predecessors: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT belief_id, json_extract(attributes_json, '$.superseded_by') AS successor_id "
+        "FROM current_beliefs WHERE attributes_json LIKE '%superseded_by%'"
+    ):
+        successor = str(row["successor_id"] or "").strip()
+        if successor:
+            predecessors.setdefault(successor, []).append(str(row["belief_id"]))
+    lineage: dict[str, dict[str, bool]] = {}
+    for belief_id in belief_ids:
+        members = {belief_id: False}
+        frontier = [belief_id]
+        while frontier:
+            # A DAG, not a chain: several beliefs can be retired into one
+            # survivor. Membership is checked before descending, so a pointer
+            # cycle terminates and no id is added twice.
+            for ancestor in predecessors.get(frontier.pop(), ()):
+                if ancestor not in members:
+                    members[ancestor] = True
+                    frontier.append(ancestor)
+        lineage[belief_id] = members
+    collected = sorted({member for members in lineage.values() for member in members})
+    placeholders = ",".join("?" for _ in collected)
+    aliases: dict[str, list[str]] = {}
+    for row in conn.execute(
+        f"SELECT alias_id, canonical_id FROM object_aliases WHERE canonical_id IN ({placeholders})",  # noqa: S608 - placeholder count derives only from collected ids
+        tuple(collected),
+    ):
+        aliases.setdefault(str(row["canonical_id"]), []).append(str(row["alias_id"]))
+    if aliases:
+        for members in lineage.values():
+            for member, inherited in list(members.items()):
+                for alias in aliases.get(member, ()):
+                    members.setdefault(alias, inherited)
+    return lineage
+
+
 def _retrieval_feedback_scores(
     conn: sqlite3.Connection,
     belief_ids: set[str],
@@ -2446,39 +2689,17 @@ def _retrieval_feedback_scores(
     damped by ``n / (n + prior_observations)`` so a single verdict cannot swing a
     belief's position; a belief needs a consistent record before it moves far.
 
-    Alias-recorded feedback is attributed to the canonical belief: retrieval rows
-    written before an alias was collapsed are stored under the old id, and
-    without the ``object_aliases`` join that history is silently dropped.
+    History comes from :func:`retrieval_history_by_lineage`, so a recompiled
+    belief keeps the record its predecessors earned instead of restarting at
+    zero observations every curator pass.
     """
-    if not belief_ids:
-        return {}
-    placeholders = ",".join("?" for _ in belief_ids)
-    rows = conn.execute(
-        f"""
-        SELECT COALESCE(oa.canonical_id, ri.object_id) AS object_id,
-          SUM(CASE ru.outcome
-                WHEN 'helpful' THEN 2.0 WHEN 'used' THEN 1.0
-                WHEN 'irrelevant' THEN -1.5 WHEN 'ignored' THEN -0.5
-                WHEN 'harmful' THEN -4.0 ELSE 0.0 END) AS signal,
-          SUM(CASE WHEN ru.outcome IN
-                ('helpful','used','irrelevant','ignored','harmful') THEN 1 ELSE 0 END) AS n
-        FROM retrieval_items ri
-        JOIN retrieval_uses ru ON ru.id=ri.retrieval_use_id
-        LEFT JOIN object_aliases oa ON oa.alias_id=ri.object_id
-        WHERE COALESCE(oa.canonical_id, ri.object_id) IN ({placeholders})
-        GROUP BY COALESCE(oa.canonical_id, ri.object_id)
-        """,  # noqa: S608 - placeholder count derives only from selected belief ids
-        tuple(sorted(belief_ids)),
-    )
     result: dict[str, float] = {}
-    for row in rows:
-        count = int(row["n"] or 0)
-        if not count:
-            continue
-        average = float(row["signal"] or 0.0) / count
+    for belief_id, history in retrieval_history_by_lineage(conn, belief_ids).items():
+        count = int(history["n"])
+        average = history["signal"] / count
         confidence = count / (count + prior_observations)
         boost = average * weight * confidence
-        result[str(row["object_id"])] = min(max(boost, -clamp), clamp)
+        result[belief_id] = min(max(boost, -clamp), clamp)
     return result
 
 
@@ -2587,7 +2808,10 @@ __all__ = [
     "CORE_V1_USER_VERSION",
     "GOAL_BELIEF_TYPE",
     "LEGACY_IMPORT_KINDS",
+    "NO_COVERAGE_OUTCOME",
     "PROCEDURE_BELIEF_TYPE",
+    "RELEVANCE_OUTCOMES",
+    "SERVED_OUTCOME",
     "append_core_event",
     "assert_core_v1_inventory",
     "canonical_json",
@@ -2602,9 +2826,12 @@ __all__ = [
     "migrate_core_v1_columns",
     "project_core_v1",
     "rebuild_core_v1_search",
+    "reclassify_no_coverage_receipts",
     "record_core_v1_evidence",
     "record_core_v1_retrieval",
     "resolve_object_id",
+    "retrieval_history_by_lineage",
+    "retrieval_served_item_count",
     "search_core_v1",
     "set_core_v1_search_triggers",
     "sha256_text",

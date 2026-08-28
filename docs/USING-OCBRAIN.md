@@ -69,8 +69,9 @@ or erroring, note it and carry on.
 
 - `brain.feedback` when retrieved context *materially shaped* the work (`used` /
   `helpful`) or wasted your time (`irrelevant` / `harmful`). This moves ranking and
-  makes badly-judged facts eligible for retirement. Do **not** file feedback on a
-  zero-item retrieval.
+  makes badly-judged facts eligible for retirement. A zero-item retrieval is
+  **refused**: every outcome judges served items, and the server has already
+  recorded that read as `no_coverage`.
 - `brain.closeout` at the end of substantive work, linking the retrievals you used, the
   artifacts you produced, and the verifiers that prove it.
 

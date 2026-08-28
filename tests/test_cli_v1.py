@@ -87,6 +87,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_briefing.py, which drives determinism, the budget,
     # section order, and the ledger projection against seeded cores.
     harness_acceptance = {"briefing", "ledger"}
+    # Covered in tests/test_feedback_semantics.py, which drives the reporting
+    # default, the --apply rewrite, and the counts in both directions.
+    feedback_acceptance = {"feedback-repair"}
     assert commands == (
         exercised_here
         | subprocess_or_migration_acceptance
@@ -97,6 +100,7 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         | selftest_acceptance
         | compaction_acceptance
         | harness_acceptance
+        | feedback_acceptance
     )
 
 

@@ -103,9 +103,11 @@ INSTRUCTIONS = (
     "that a served belief is wrong, replace it with brain.supersede rather than retracting it "
     "or describing the correction in prose; a retraction alone leaves nothing serving in its "
     "place. When a retrieval returns "
-    "zero items (coverage.feedback_needed is false), do not file brain.feedback for it and do not "
-    "re-poll the same query; brain.context is not a task-state store. Surface assumptions or "
-    "ambiguity before acting, prefer the smallest change that satisfies the verified goal, do "
+    "zero items (coverage.feedback_needed is false), brain.feedback refuses it and the server has "
+    "already recorded that read as no_coverage; do not file the empty packet as irrelevant, and "
+    "do not re-poll the same query; brain.context is not a task-state store. "
+    "Surface assumptions or ambiguity before acting, prefer the smallest change that "
+    "satisfies the verified goal, do "
     "not refactor unrelated code, verify the result, and record the evidence. OCBrain is "
     "on-demand: "
     "never start hosted judgment, training, a loop, a timer, or a watchdog through the brain."
@@ -1932,7 +1934,12 @@ def tool_list(
         },
         {
             "name": "brain.feedback",
-            "description": "Append retrieval usefulness feedback for one issued retrieval id.",
+            "description": (
+                "Append retrieval usefulness feedback for one issued retrieval id. "
+                "Every outcome judges served items, so a retrieval that returned "
+                "nothing is refused: the server records that case itself as "
+                "no_coverage when it writes the receipt."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

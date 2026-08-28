@@ -42,6 +42,7 @@ from ocbrain.core_v1 import (
     init_core_v1,
     is_core_v1,
     migrate_core_v1_columns,
+    reclassify_no_coverage_receipts,
     record_core_v1_evidence,
 )
 from ocbrain.curation import apply_curated_manifest
@@ -186,6 +187,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge that hosted_ok fact bodies may be delivered to a hosted model",
     )
     curated_apply.set_defaults(func=cmd_curated_apply)
+
+    feedback_repair = commands.add_parser(
+        "feedback-repair",
+        help="Reclassify relevance verdicts filed on zero-item retrievals as no_coverage",
+    )
+    feedback_repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="rewrite the selected receipts (default: report only)",
+    )
+    feedback_repair.set_defaults(func=cmd_feedback_repair)
 
     hygiene_parser = commands.add_parser(
         "hygiene",
@@ -875,6 +887,24 @@ def cmd_curated_apply(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     output(args, {"action": "curated-apply", **result})
+    return 0
+
+
+def cmd_feedback_repair(args: argparse.Namespace) -> int:
+    """Report, or on ``--apply`` rewrite, relevance verdicts on empty retrievals.
+
+    Deliberately opt-in with a reporting default: the rows are live history, and
+    an automatic migration would rewrite an operator's corpus on the next open
+    of a version they did not choose to run.
+    """
+    conn = open_existing_core_v1(args.db)
+    try:
+        report = reclassify_no_coverage_receipts(conn, apply=bool(args.apply))
+        if args.apply:
+            conn.commit()
+    finally:
+        conn.close()
+    output(args, {"action": "feedback-repair", **report})
     return 0
 
 

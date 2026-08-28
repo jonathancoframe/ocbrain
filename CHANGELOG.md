@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+- Stop an empty retrieval being filed as a bad one. `retrieval_uses.outcome`
+  carries both "the corpus had nothing for this query" and "the corpus served
+  the wrong thing", and feedback is the only ranking signal the brain has. Of
+  the live core's **2,044 retrievals (2026-07-15 to 2026-08-28), 1,086 (53.1%)
+  served zero items** — genuinely nothing, not a logging gap, and stable across
+  months (54.6% July, 51.7% August). **183 of those zero-item reads carry a
+  relevance verdict anyway** (174 `irrelevant`, 5 `ignored`, 4 `used`), filed
+  against the server's own written instruction not to file one; the agents' own
+  notes say so verbatim ("No prior items were returned"). Restricted to the 958
+  retrievals that did serve something, the picture inverts: **360 of 481 judged
+  verdicts are positive (74.8%)**. An instruction 183 rows ignore is not a rule,
+  so the server enforces it: `brain.feedback` refuses every relevance outcome on
+  a zero-item receipt and says what to write instead, and the zero-item case is
+  recorded as a new `no_coverage` outcome. That value is **server-derived, not
+  caller-supplied** — the item count is observed in the same statement that
+  writes the receipt, and the population a voluntary flag would describe is
+  exactly the one that goes unreported when reporting is voluntary.
+- Say plainly what that fix does *not* do. A zero-item receipt has no
+  `retrieval_items` rows, so those 183 verdicts were never attributable to any
+  belief: reclassifying all of them against a copy of the live core moved **0 of
+  210 feedback boosts**, while blanking 104 verdicts that *did* have items moved
+  134 — the same instrument, reporting dirty. What the 183 polluted is the
+  corpus-level read of whether retrieved context helps, which is what a
+  retirement rule keyed on outcome counts would have used. The existing rows are
+  live history, so rewriting them is an operator's call and not a migration:
+  `ocbrain feedback-repair` reports by default and rewrites under `--apply`,
+  keeping the prior verdict in the row's note. Dry run on the live core:
+  **183 candidates, 174 `irrelevant` / 5 `ignored` / 4 `used`, 0 written**.
+- Stop retrieval and feedback history dying at every recompile. Each curator
+  pass mints a new `belief_id`, and `retrieval_items` keeps pointing at the old
+  one, so retirement eligibility measured a belief's *age* rather than its
+  usefulness: **373 of 575 ever-retrieved ids are now retracted**, and **145 of
+  347 serving beliefs had never been retrieved at all** — almost entirely
+  recency, not rot, since the never-retrieved share by compile day runs 5% on
+  08-04, 25% on 08-25, 91% on 08-28. A belief now ranks on its whole lineage's
+  record. The lineage is *derived* from the `superseded_by` era pointer the
+  projector already stamps on each predecessor, never copied forward at
+  supersede time: a chain therefore accumulates by construction (generation
+  three walks back through two to one), a copy cannot go stale because there is
+  no copy, and because the walk yields a set of ids folded per
+  `(belief, retrieval_use)` pair, one retrieval that served two members of a
+  lineage is still one verdict. Reading `superseded_by` rather than the
+  successor's `supersedes` is what makes the curator's key-collision cascade
+  visible: **216 era closures against 60**. On a copy of the live core, **49
+  serving beliefs inherit 296 verdicts**, **23 of the 145 never-retrieved
+  beliefs gain a judged record**, and beliefs carrying a feedback boost rise
+  from **185 to 210**.
+- Walk that lineage in Python off one read of the era pointers. Expressed as a
+  recursive CTE, each step re-scans `current_beliefs` evaluating `json_extract`
+  per row, because no index covers that expression: **85 ms per ranked
+  retrieval, against 1.5 ms** for the same answer, on a path that runs on every
+  `brain.context`.
+
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap
   (`supersede.direct_cap`, default 8/24h) is sized for a runtime agent, so past

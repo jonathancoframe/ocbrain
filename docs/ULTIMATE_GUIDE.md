@@ -355,9 +355,17 @@ defaults to `unknown`:
 - `harmful`
 
 `served` is written when context is served (search, get, digest, and resource
-reads). `brain.feedback` records the agent's verdict and accepts `helpful`,
-`used`, `irrelevant`, `ignored`, or `harmful`. The `improved`/`failed`/`neutral`
-values are reserved for loop-ingest-style outcome reporting.
+reads) **and the packet held at least one item**; a v1 core writes
+`no_coverage` when it held none, derived from the item count in the same
+statement that writes the receipt. `brain.feedback` records the agent's verdict
+and accepts `helpful`, `used`, `irrelevant`, `ignored`, or `harmful` — all of
+which judge served items, so it refuses any verdict on a `no_coverage` read and
+refuses `no_coverage` itself as a caller-supplied value. The
+`improved`/`failed`/`neutral` values are reserved for loop-ingest-style outcome
+reporting.
+
+Verdicts filed on zero-item retrievals before the server enforced this are
+reported, and on `--apply` rewritten, by `ocbrain feedback-repair`.
 
 This table closes the loop between "memory was available" and "memory was
 actually useful." Maintenance uses this signal to protect useful knowledge and
