@@ -42,11 +42,11 @@ from ocbrain.curator import (
     input_digest,
     load_env_value,
     now_iso,
+    partition_evidence,
     project_digests,
     record_curation_egress,
     request_claims,
     resolve_selection_policy,
-    select_evidence,
     validate_claims,
 )
 from ocbrain.db import connect
@@ -245,16 +245,19 @@ def main() -> int:
             "beliefs_coexist_marked": 0,
             "beliefs_deferred": 0,
             "beliefs_pending_deduped": 0,
+            "beliefs_pended_unverified": 0,
+            "beliefs_duplicate_routed": 0,
         }
         by_status: dict[str, list[str]] = {}
         for project in projects:
-            evidence = select_evidence(
+            partition = partition_evidence(
                 conn,
                 limit=max(1, args.max_evidence),
                 project=project,
                 egress_policies=resolved_egress,
                 visibilities=resolved_visibility,
             )
+            evidence = partition["included"]
             existing = current_wiki_beliefs(
                 conn,
                 project=project,
@@ -278,6 +281,9 @@ def main() -> int:
                 "hosted_egress_acknowledged": bool(args.allow_hosted_egress),
                 "egress_policies": list(resolved_egress),
                 "visibilities": list(resolved_visibility),
+                "refused_evidence": partition["rejected_count"],
+                "present_egress_policies": partition["present_egress_policies"],
+                "present_visibilities": partition["present_visibilities"],
             }
             totals["eligible_evidence"] += len(evidence)
 
@@ -320,6 +326,11 @@ def main() -> int:
                     model=model,
                     project=project,
                     egress_policies=resolved_egress,
+                    rejected=partition["rejected"],
+                    rejected_count=partition["rejected_count"],
+                    visibilities=resolved_visibility,
+                    present_egress_policies=partition["present_egress_policies"],
+                    present_visibilities=partition["present_visibilities"],
                 )
                 response = request_claims(
                     provider=args.provider,
@@ -369,6 +380,8 @@ def main() -> int:
             totals["beliefs_coexist_marked"] += len(applied["coexist_marked"])
             totals["beliefs_deferred"] += len(applied["deferred"])
             totals["beliefs_pending_deduped"] += len(applied["pending_deduped"])
+            totals["beliefs_pended_unverified"] += len(applied["pended_unverified"])
+            totals["beliefs_duplicate_routed"] += len(applied["duplicate_routed"])
             next_digests[project] = digest
             close_project(
                 by_status,
@@ -385,6 +398,10 @@ def main() -> int:
                     "coexist_marked": len(applied["coexist_marked"]),
                     "deferred": len(applied["deferred"]),
                     "pending_deduped": len(applied["pending_deduped"]),
+                    "pended_unverified": len(applied["pended_unverified"]),
+                    "duplicate_routed": len(applied["duplicate_routed"]),
+                    "duplicate_sample": applied["duplicate_routed"][:4],
+                    "pended_sample": applied["pended_unverified"][:4],
                     "rejection_sample": rejected[:8],
                 },
             )
@@ -430,6 +447,8 @@ def main() -> int:
                 "coexist_marked_count": totals["beliefs_coexist_marked"],
                 "deferred_count": totals["beliefs_deferred"],
                 "pending_deduped_count": totals["beliefs_pending_deduped"],
+                "pended_unverified_count": totals["beliefs_pended_unverified"],
+                "duplicate_routed_count": totals["beliefs_duplicate_routed"],
             },
         )
         emit(
