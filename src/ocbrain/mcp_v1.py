@@ -1830,6 +1830,14 @@ def supersede_transaction(
                 "attributes": attributes,
                 "supersede_reason": rationale,
                 "supersede_requested_by": actor,
+                # Why this one is waiting, in the ledger rather than only in the
+                # return value the caller may not keep. An operator reading the
+                # pending queue a week later needs the reason beside the
+                # proposal. Deliberately a body field and not an attribute:
+                # attributes are written onto the belief when the proposal is
+                # approved, and "why it once pended" is not a property of the
+                # fact.
+                "pending_reason": pending_reason,
             },
             writer=actor,
             session_id=provenance.client_session_hint or session_id,
@@ -1956,6 +1964,29 @@ def undecided_supersede_proposal(
         "AND json_extract(proposal.body_json, '$.belief_id') = ? "
         "ORDER BY proposal.rowid LIMIT 1",
         (superseded_id, successor_id),
+    ).fetchone()
+
+
+def undecided_compilation_proposal(
+    conn: sqlite3.Connection, *, belief_id: str, body: str
+) -> sqlite3.Row | None:
+    """The oldest undecided proposal already carrying this exact claim.
+
+    The pend path has the same shape as the supersede path and the same failure
+    mode: a proposal does not change the input that produced it, so a curator
+    that pends a claim on Monday re-derives and re-pends it every hour after
+    that. Matched on ``(belief_id, body)`` for the same reason
+    :func:`undecided_supersede_proposal` matches on the pair -- a different
+    statement about the same fact is a second thing to decide, not a duplicate.
+    """
+    return conn.execute(
+        "SELECT proposal.id AS id, proposal.ts AS ts FROM brain_events AS proposal "
+        "WHERE proposal.kind='compilation_proposed' "
+        "AND json_extract(proposal.body_json, '$.belief_id') = ? "
+        "AND json_extract(proposal.body_json, '$.body') = ? "
+        f"AND NOT {_PROPOSAL_DECIDED_SQL} "
+        "ORDER BY proposal.rowid LIMIT 1",
+        (belief_id, body),
     ).fetchone()
 
 
@@ -2564,5 +2595,6 @@ __all__ = [
     "search_v1",
     "supersede_transaction",
     "supersede_v1",
+    "undecided_compilation_proposal",
     "undecided_supersede_proposal",
 ]
