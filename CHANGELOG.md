@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+- Pin the boundary between the two rankers this repo still carries. `core_v1.py`
+  serves the live path — FTS5 bm25 with tuned column weights, a 1024-dim dense
+  sidecar, weighted RRF at k=60, and a multiplicative
+  scope/confidence/quality/recency/feedback prior. `retrieve.py` independently
+  implements a retired blend: a flat `relevance * scope_weight * confidence *
+  pinned * catalog_stub` product with a repo-FTS fallback. `mcp.py`, `cli.py`
+  and `shared_context.py` all still import it, each behind an `is_core_v1` early
+  return, and **nothing enforced that**. A single `retrieve(...)` added outside
+  one of those guards would rank live beliefs by the legacy product, and all 907
+  tests would still pass — the two formulas would just quietly average.
+  Tracing `sys.settrace` over `retrieve.py` while dispatching the complete
+  advertised admin surface against a copy of the live core (208 MB, 1,247
+  current beliefs, 6,492 evidence objects): **0 of its 22 top-level functions
+  run**. The read-side CLI, traced separately against the same copy, reaches
+  none of them either. That zero is now asserted.
+  The gate carries its own mutation proof. The identical driver on a legacy core
+  must reach `retrieve` and **did run 9 distinct functions**; blinding the
+  tracer makes the v1 assertion pass on an empty set and fails that one instead,
+  so the zero cannot be an empty check masquerading as a passing one. A separate
+  static count freezes the call sites at `{mcp.py: 2, cli.py: 1,
+  shared_context.py: 1}`, because the dynamic gate can only see call sites the
+  driver reaches. Planting one v1-reachable `retrieve(...)` call in `call_tool`
+  above the `is_core_v1` return: **both gates fail, 2 of 4 tests red**; removed,
+  green.
+- Nothing in the legacy dual path was deleted, and the reason is a measurement.
+  Every one of the **21 core databases in `~/.ocbrain/backups/` is v1-shaped** —
+  20 logical tables, `schema_meta.core_schema = ocbrain.core.v1`, zero of
+  `db.py`'s `evidence`/`knowledge` tables — including the ones whose names imply
+  otherwise (`pre-v2-20260825`, `pre-v22-20260825`, `pre-brainfix-20260804`,
+  `ocbrain-sparse-wiki-20260722-1115`, and the oldest, `ocbrain-2026-07-15`).
+  No legacy-shaped core exists on this install. But `v1_migration.py` is still
+  reached by the shipped `ocbrain core-migrate-v1` command and is the only
+  reader for a *downstream* legacy archive, and `db.py` exports `connect`,
+  `now_iso`, `DEFAULT_DB_PATH`, `DB_BUSY_TIMEOUT_MS` and `PUBLIC_SCOPES` to
+  eleven other modules — its legacy `init_db` already refuses a v1 core by
+  design, which is why the live core has none of its tables.
+  And `retrieve.py` is imported at module scope by `cli.py`, `mcp.py` and
+  `shared_context.py`, so removing the file does not fail 25 tests — it takes
+  the suite down at collection: **39 collection errors, 0 tests run**. A change
+  that can only go green by deleting the tests that would have judged it is not
+  verified. Whether to drop legacy-core support is a policy call, not a
+  dead-code call; the containment gate above is what makes taking it later
+  cheap.
+
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap
   (`supersede.direct_cap`, default 8/24h) is sized for a runtime agent, so past
