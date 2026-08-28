@@ -357,6 +357,30 @@ real byte delta needs two snapshots, which is what `--baseline` is for.
 PR #33 cut projected growth from ~106 MB/month to ~14 MB/month by storing
 transcript evidence as verified file pointers rather than inline copies.
 
+### `egress_refusable_policies` — ok ≥ 1, watch ≥ 1 (higher is better)
+
+How many egress policies present on this brain's curation-eligible evidence the
+operator's declared allow-list would refuse. Not "how many did it refuse" — that
+number is in the audits, and it is a different question.
+
+**Measured**, 2026-08-28 on the live core: **0**. `egress_audits` holds 240 rows
+covering 2026-08-04 to 2026-08-28, and `SELECT DISTINCT rejected_json` returns
+exactly one value: the literal string `'[]'`. Across those audits 25,106 evidence
+items were transmitted and none was ever refused. The reason is structural rather
+than lucky — the declared allow-list named `approval_required`, `hosted_ok`, and
+`local_only`, which is every policy an operator may declare, so no input could
+fail the check.
+
+Binary by construction, which is why `ok` and `watch` are the same number: either
+a refusal is reachable or the gate is a transmission log. `prohibited` is
+subtracted before counting, because it is refused in code whatever an operator
+declares, and crediting the declaration for the floor would let an
+everything-admitting allow-list look like one with teeth.
+
+Set `curator.egress_allowlist_ack` to a sentence saying why an all-admitting
+allow-list is intended on this install. The acknowledgement downgrades `alarm` to
+`watch` and is recorded in the metric's detail — declared, not enumerated away.
+
 ### `vector_sidecar_lag_events` — ok ≤ 500, watch ≤ 5000 (lower is better)
 
 Events appended to the core since the sidecar recorded its `core_event_seq`.
@@ -379,6 +403,81 @@ exhaustive per-row index cross-check, which is what makes the full check take
 tens of seconds on a 180 MB core. Everything this command exists to catch — a
 torn page, a corrupt b-tree, a broken foreign key — it still catches, and a
 check too slow to run hourly does not get run.
+
+---
+
+## Constants outside the scorecard
+
+Not every number that decides something is a selftest threshold. These sit in
+`src/ocbrain/curator.py`, on the compile path, and get the same treatment.
+
+### `NEAR_DUPLICATE_COSINE = 0.88`
+
+Document-to-document cosine at or above which a new-key claim is treated as a
+restatement of a belief already serving in its scope, and routed to supersession
+rather than minted under its own key.
+
+**Measured**, and deliberately not an independent number: it is pinned equal to
+`compact.DEFAULT_COSINE_FLOOR`, which v2.2 Phase 7 calibrated by finding 38
+same-scope clusters on the live corpus and proposing 18 merges retiring 25
+beliefs. `tests/test_curator_duplicate_gate.py::test_the_gate_and_the_compactor_share_one_floor`
+holds them equal. A claim the gate admits and the compactor then proposes
+retiring would be a gate that moved the work rather than doing it.
+
+Re-measured on a copy of the live core, 2026-08-28, with this repo's own
+`compact.find_clusters`: 35 same-scope clusters at 0.88 covering 98 of 347
+serving beliefs, 63 of which are excess copies. At 0.85 the same corpus gives 51
+clusters over 145 beliefs, and at 0.90, 28 over 77.
+
+What the number is *not* doing is worth stating, because it would be easy to
+claim credit for it. Replaying each cluster's second member as a fresh claim
+through `apply_claims` — real key, real body, real local embedder — the existing
+0.60 query-side cascade already collapses **34 of 34** replayed clusters when the
+sidecar is freshly built. This floor earns its place only in the state a curation
+cycle actually leaves the sidecar in, where the query-side arm is blind: **23 of
+34 grow a second serving belief before this gate, 2 after**. Choosing 0.85 or
+0.90 instead would move that "2" a little; keeping the compactor's number keeps
+the two stages agreeing about what one fact is, which matters more.
+
+The scale matters: this is a **document-side** score, comparable with the
+sidecar's stored vectors, and it is not the same scale as
+`CONTRADICTION_COSINE_FLOOR = 0.60`, which scores a *query*-side embedding
+against those documents. Two floors, two scales, one reason each.
+
+### `DEFAULT_VOLATILE_TTL_DAYS = 14`, `DEFAULT_MEASURED_TTL_DAYS = 45`
+
+TTL by how fast a claim's subject moves, replacing a flat 90 days for `current`
+and no expiry at all for `durable`.
+
+**Judgement, anchored on one measured incident.** On 2026-08-28 a serving belief
+still named which ClickHouse host was live "as of 2026-07-24" — 35 days after the
+state it describes — under a `valid_until` running to 2026-11-02, with a second
+belief repeating it. 14 days is
+chosen to be shorter than that observed staleness by a factor of about 2.5, so a
+fact of that kind expires while it is still true rather than long after; 45 days
+is half the previous flat figure, on the reasoning that a measurement is re-run on
+roughly a monthly cadence.
+
+An honest note on what could not be measured: the obvious provenance would be the
+observed interval between a volatile belief being compiled and being corrected.
+On this corpus that is **1.87 days median across 364 corrected volatile beliefs**
+— and 0.94 days for doctrine and 0.99 for measurements, which is the hourly
+curator rewriting its own output rather than the world changing. The measurement
+does not discriminate between the classes, so it is not used as the source.
+
+The mechanical detectors (`VOLATILITY_PATTERNS`) are tuned for precision, not
+recall: a false positive puts a two-week clock on a durable truth and stops it
+serving, a false negative leaves today's behaviour. Measured on the 347 serving
+beliefs, 2026-08-28: they fire on **33 (9.5%)**, of which 11 are `durable`-marked
+beliefs carrying a dated, versioned, host-named, credential-named or live-state
+statement.
+
+Re-dating the existing corpus is a separate decision and a separate command.
+`ocbrain wiki-volatility` prints the plan; it needs both `--apply` and `--yes` to
+write. On a copy of the live core: 174 doctrine / 140 measured / 33 volatile, 15
+beliefs gain a TTL they never had, 158 move to a shorter one, and **7 are already
+expired** under the new scheme — which is the number to read before running it,
+because those seven stop serving at the next hygiene sweep.
 
 ---
 
