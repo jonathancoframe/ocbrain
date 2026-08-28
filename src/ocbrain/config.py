@@ -148,6 +148,46 @@ class CuratorConfig:
     # to curate every project with any eligible evidence at all.
     min_evidence_per_project: int = 3
 
+    # What a new-key claim gets when the duplicate gate cannot see the corpus --
+    # no sidecar, no local embedder, a model digest that moved. `pend` records
+    # the claim as an undecided proposal instead of minting it; `admit` mints it,
+    # which is the behaviour that let one fact reach the corpus five times under
+    # five keys. Fail-closed by default: a gate that disappears when its
+    # instrument is down is the gate this repo keeps finding, and pending loses
+    # nothing -- the claim is in the ledger, and an identical re-derivation on
+    # the next cycle writes nothing at all.
+    duplicate_gate_fallback: str = "pend"
+
+    # Whether a claim's TTL comes from its volatility class (a host name expires
+    # in days, a measurement in weeks, doctrine not at all) or from the single
+    # `current_ttl_days` number that lifecycle used to buy. Applies to newly
+    # compiled claims only; existing beliefs are re-dated by the explicit
+    # `wiki-volatility --apply` maintenance command, never by a background sweep.
+    volatility_ttl: bool = True
+    volatile_ttl_days: int = 14
+    measured_ttl_days: int = 45
+
+    # An operator's declared reason for an egress allow-list that admits every
+    # policy the corpus contains. Empty means undeclared, and the selftest
+    # reports the allow-list as vacuous -- a gate no input can fail is a
+    # transmission log, not a control. Set it to say why that is intended here;
+    # the text is recorded with the metric, not just the fact that it was set.
+    egress_allowlist_ack: str = ""
+
+    # Per-cadence model profile. Empty means "same as `provider`/`model`", so an
+    # install that sets neither runs exactly one model, as it does today.
+    nightly_provider: str = ""
+    nightly_model: str = ""
+
+    # An independent critic of a DIFFERENT provider family, consulted only for
+    # high-impact changes: a supersession of a pinned belief or of anything in a
+    # `global:*` scope. Correlated error is the failure this addresses -- one
+    # model grading its own family's output agrees with itself -- so a critic
+    # configured to the curator's own provider is refused rather than run.
+    # Empty `critic_provider` disables it, which is the default.
+    critic_provider: str = ""
+    critic_model: str = ""
+
 
 @dataclass(frozen=True)
 class DeslopConfig:
