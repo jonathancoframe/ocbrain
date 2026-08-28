@@ -24,7 +24,7 @@ export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$ROOT/src"
 
 clear_bytecode() {
-  find "$ROOT/src" "$ROOT/tests" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+  find "$ROOT/src" "$ROOT/tests" "$ROOT/scripts" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 }
 
 run_test() {
@@ -59,6 +59,15 @@ EOF
   out="$(run_test "$test")"
   local mutated_rc=$?
   cp "$backup" "$file"; rm -f "$backup"
+  # pytest exits 4 when a named test id does not resolve and 5 when it
+  # collected nothing at all. Either way a renamed test would otherwise read as
+  # `mutated=FAILS`, which is this harness scoring a missing instrument as a
+  # passing proof -- the exact failure it exists to catch elsewhere. Verified by
+  # pointing one entry at a name that does not exist and seeing this line.
+  if [ $mutated_rc -eq 4 ] || [ $mutated_rc -eq 5 ]; then
+    printf '%-58s TEST NOT FOUND (%s)\n' "$label" "$test"
+    return 1
+  fi
   local restored_out
   restored_out="$(run_test "$test")"
   local restored_rc=$?
@@ -117,7 +126,7 @@ echo "== defect 3: unresolved gate =="
 mutate "$C" \
   '    return status not in CLEAN_SUCCESS_STATUSES or verification_status == "failed"' \
   '    return status not in CLEAN_SUCCESS_STATUSES' \
-  "$T::test_the_unresolved_gate_catches_281_of_the_1236_live_closeouts" \
+  "$T::test_the_unresolved_gate_catches_282_of_the_1239_live_closeouts" \
   "verifier trigger dropped (status only)"
 
 mutate "$C" \
@@ -161,3 +170,146 @@ mutate src/ocbrain/db.py \
   '    pass' \
   "$T::test_the_legacy_initializer_also_migrates_an_existing_database" \
   "legacy db.py migration skipped"
+
+echo
+echo "== remediation: the reader that makes the unresolved gate honest =="
+B=src/ocbrain/briefing.py
+
+mutate "$B" \
+  '                "unresolved": receipt.get("unresolved"),' \
+  '                "unresolved": None,' \
+  "$T::test_the_ledger_serves_the_unresolved_sentence_the_gate_charges_for" \
+  "ledger row projection drops unresolved"
+
+mutate "$B" \
+  '                "unresolved": row["unresolved"],' \
+  '                "unresolved": None,' \
+  "$T::test_the_ledger_serves_the_unresolved_sentence_the_gate_charges_for" \
+  "failed_attempts drops unresolved"
+
+mutate "$B" \
+  '        "latest_unresolved": latest["unresolved"],' \
+  '        "latest_unresolved": None,' \
+  "$T::test_the_ledger_serves_the_unresolved_sentence_the_gate_charges_for" \
+  "ledger entry drops latest_unresolved"
+
+mutate "$B" \
+  '        because = entry["latest_unresolved"] or entry["latest_summary"]' \
+  '        because = entry["latest_summary"]' \
+  "$T::test_the_briefings_failed_line_carries_what_did_not_work_not_just_the_summary" \
+  "briefing FAILED line reverts to the summary"
+
+mutate "$B" \
+  '        because = entry["latest_unresolved"] or entry["latest_summary"]' \
+  '        because = entry["latest_unresolved"]' \
+  "$T::test_a_failed_attempt_with_no_unresolved_still_reports_its_summary" \
+  "briefing FAILED line loses the pre-gate fallback"
+
+echo
+echo "== remediation: the harness-attested hint is the highest-trust door =="
+mutate "$C" \
+  '    return classify_session_id(value) in RUNTIME_SESSION_SHAPES' \
+  '    return classify_session_id(value) != "absent"' \
+  "$T::test_a_junk_harness_hint_never_wins_the_identity_column" \
+  "hint shape check accepts anything non-empty (reviewer G1)"
+
+mutate "$C" \
+  '    return classify_session_id(value) in RUNTIME_SESSION_SHAPES' \
+  '    return classify_session_id(value) != "absent"' \
+  "$T::test_is_runtime_session_id_admits_exactly_the_two_machine_shapes" \
+  "the predicate itself, asserted directly"
+
+mutate "$C" \
+  '    return classify_session_id(value) in RUNTIME_SESSION_SHAPES' \
+  '    return classify_session_id(value) != "absent"' \
+  "$T::test_a_junk_hint_does_not_rescue_a_caller_who_omitted_everything" \
+  "junk hint fills an otherwise-empty column"
+
+echo
+echo "== remediation: three normalisers, reconciled =="
+E=scripts/procmine/episodes.py
+
+mutate "$C" \
+  '        exact = RUNTIME_FAMILY_EXACT.get(folded)
+        if exact is not None:
+            return exact' \
+  '        pass' \
+  "$T::test_this_repos_own_runtime_is_not_unknown_to_its_own_normaliser" \
+  "this repo's own runtime is unknown again"
+
+mutate "$C" \
+  '    "ocbrain-runtime-call": "mcp",' \
+  '    "ocbrain": "mcp",' \
+  "$T::test_this_repos_own_runtime_is_not_unknown_to_its_own_normaliser" \
+  "exact spelling widened to a token (66 rows misplaced)"
+
+mutate "$C" \
+  '        fold_runtime_label(k): str(v).strip() for k, v in (aliases or {}).items()' \
+  '        str(k).strip().lower(): str(v).strip() for k, v in (aliases or {}).items()' \
+  "$T::test_an_alias_key_with_a_space_is_reachable" \
+  "alias keys lowercased but not folded"
+
+mutate "$E" \
+  '    shared = runtime_family(text)
+    if shared != "unknown":
+        return _SHARED_FAMILY[shared]' \
+  '    pass' \
+  "$T::test_the_write_time_enum_and_the_mining_taxonomy_never_contradict_each_other" \
+  "mining taxonomy stops asking the shared folder"
+
+mutate "$E" \
+  '    (re.compile(r"telegram|kanban|gateway|hermeswork", re.I), "hermes"),' \
+  '    (re.compile(r"hermes|codex|cursor|claude", re.I), "hermes"),' \
+  "$T::test_the_mining_taxonomy_no_longer_matches_family_tokens_as_substrings" \
+  "family tokens substring-matched in the miner again"
+
+echo
+echo "== remediation: the miner reads the authoritative column =="
+mutate "$E" \
+  '            if stored_session_source in _SERVER_OBSERVED_SOURCES
+            or (stored_session_source is None and session_hint)' \
+  '            if session_hint' \
+  "$T::test_the_miner_reads_the_authoritative_source_column_not_its_own_guess" \
+  "session_source back to the hint heuristic"
+
+mutate "$E" \
+  '_SERVER_OBSERVED_SOURCES = frozenset({"harness_attested", "server_connection"})' \
+  '_SERVER_OBSERVED_SOURCES = frozenset({"harness_attested"})' \
+  "$T::test_the_miner_reads_the_authoritative_source_column_not_its_own_guess" \
+  "server-minted conn: id called model_reported"
+
+echo
+echo "== remediation: the sibling column on retrieval_uses =="
+V=src/ocbrain/core_v1.py
+D=src/ocbrain/db.py
+
+mutate "$V" \
+  '    identity = resolve_session_identity(session_id, prov, policy="quarantine")' \
+  '    identity = resolve_session_identity(session_id, prov, policy="off")' \
+  "$T::test_the_retrieval_receipt_gets_the_same_identity_discipline" \
+  "v1 retrieval stores the slug again"
+
+mutate "$V" \
+  '    identity = resolve_session_identity(session_id, prov, policy="quarantine")' \
+  '    identity = resolve_session_identity(session_id, prov, policy="enforce")' \
+  "$T::test_a_retrieval_is_never_refused_for_its_session_label" \
+  "a read refused for its session label"
+
+mutate "$D" \
+  '    identity = resolve_session_identity(session_id, observed, policy="quarantine")' \
+  '    identity = resolve_session_identity(session_id, observed, policy="off")' \
+  "$T::test_the_legacy_retrieval_writer_is_gated_too" \
+  "legacy retrieval writer left ungated (the sibling)"
+
+mutate "$V" \
+  '    ("retrieval_uses", "session_id_source", "TEXT"),' \
+  '' \
+  "$T::test_an_existing_core_gains_the_retrieval_column_before_the_first_read" \
+  "retrieval column not migrated on an existing core"
+
+mutate "$D" \
+  '    for column, decl in _V7_RETRIEVAL_USE_COLUMNS:
+        _ensure_column(conn, "retrieval_uses", column, decl)' \
+  '    pass' \
+  "$T::test_the_legacy_initializer_also_adds_the_retrieval_column" \
+  "legacy db.py retrieval migration skipped"

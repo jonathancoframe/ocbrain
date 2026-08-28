@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ocbrain.closeout import normalize_task_ref
+from ocbrain.closeout import normalize_task_ref, resolve_session_identity
 from ocbrain.history_window import is_body_ref
 from ocbrain.hybrid import semantic_neighbors
 from ocbrain.ids import stable_id
@@ -278,7 +278,12 @@ CREATE TABLE IF NOT EXISTS retrieval_uses (
   provenance_json TEXT,
   -- The folded form of `task_ref` above, so a retrieval and the closeout that
   -- links it agree on which task they belong to. NULL on historical rows.
-  task_ref_norm TEXT
+  task_ref_norm TEXT,
+  -- On whose word `session_id` above was filled, exactly as on task_closeouts.
+  -- The identical defect lived here at four times the scale: 967 of 1,115
+  -- session ids on the live core were hand-written and none joined a
+  -- transcript. NULL on every historical row.
+  session_id_source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_retrieval_uses_outcome_served
   ON retrieval_uses(outcome, served_at);
@@ -501,6 +506,7 @@ _ADDITIVE_CORE_V1_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("task_closeouts", "client_runtime_key", "TEXT"),
     ("task_closeouts", "parent_closeout_id", "TEXT"),
     ("task_closeouts", "task_ref_norm", "TEXT"),
+    ("retrieval_uses", "session_id_source", "TEXT"),
     ("task_closeouts", "session_id_source", "TEXT"),
     ("task_closeouts", "runtime_family", "TEXT"),
     ("task_closeouts", "unresolved", "TEXT"),
@@ -2231,6 +2237,13 @@ def record_core_v1_retrieval(
     ``scripts/procmine`` where it belongs, because ``provenance`` carries what
     the server actually observed and there is nothing left to guess about.
 
+    ``session_id`` goes through the same resolver a closeout's does, under the
+    ``quarantine`` policy rather than ``enforce``: this receipt is a side effect
+    of a *read*, and refusing a retrieval because its session label is a slug
+    would break retrieval in order to fix a join. The caller's own word is not
+    destroyed -- it is in ``context_json`` on this same row, where all 1,115
+    live rows that have one already keep it.
+
     ``provenance`` is deliberately absent from the ``stable_id`` inputs and from
     ``context_json``: two identical reads must stay the same read regardless of
     which connection served them.
@@ -2238,7 +2251,12 @@ def record_core_v1_retrieval(
     rows = list(items)
     served_at = now_iso()
     prov = provenance or EMPTY_PROVENANCE
-    prov_payload = prov.to_dict()
+    identity = resolve_session_identity(session_id, prov, policy="quarantine")
+    # The caller's own word, kept beside what was stored. `context_json` usually
+    # carries it too, but usually is not a guarantee, and a resolver that can
+    # replace a value owes the row the value it replaced. Not a `stable_id`
+    # input: two identical reads stay one read.
+    prov_identity = {**prov.to_dict(), "session_identity": identity}
     retrieval_id = stable_id(
         "ret",
         served_at,
@@ -2254,8 +2272,8 @@ def record_core_v1_retrieval(
           id, served_to_runtime, task_ref, outcome, query_text, served_ids_json,
           context_json, packet_schema, session_id, served_at,
           server_connection_id, client_session_hint, client_runtime_key,
-          provenance_json, task_ref_norm
-        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provenance_json, task_ref_norm, session_id_source
+        ) VALUES (?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             retrieval_id,
@@ -2267,16 +2285,17 @@ def record_core_v1_retrieval(
             ),
             canonical_json(context),
             packet_schema,
-            session_id,
+            identity["session_id"],
             served_at,
             prov.server_connection_id,
             prov.client_session_hint,
             prov.client_runtime_key,
-            canonical_json(prov_payload) if prov_payload else None,
+            canonical_json(prov_identity),
             # Same fold the closeout writes, so a read and the receipt that
             # links it agree on which task they belong to without matching on
             # free text.
             normalize_task_ref(task_ref) if task_ref else None,
+            identity["session_id_source"],
         ),
     )
     for rank, item in enumerate(rows):

@@ -174,7 +174,7 @@ class CloseoutConfig:
     id -- so no client is ever unable to file a closeout.
 
     ``require_unresolved`` requires a closeout that is not a clean success to
-    name what did not work. One `failed` closeout in 1,236 over six weeks is not
+    name what did not work. One `failed` closeout in 1,239 over six weeks is not
     a credible failure rate, and ``brain.ledger``'s whole purpose is surfacing
     the attempts that did not work.
 

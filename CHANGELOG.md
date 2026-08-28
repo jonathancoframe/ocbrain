@@ -4,15 +4,18 @@
 
 - Enforce the closeout's session identity at write time instead of asking for it
   in a docstring. `context.session` is the join that makes a closeout's tool-call
-  trace minable, and on the live core **only 208 of 1,236 receipts (16.8%) carry
+  trace minable, and on the live core **only 211 of 1,239 receipts (17.0%) carry
   a runtime-shaped id**: 431 are absent and 597 are a human typing something
   descriptive — `fleet_cleanup_audit`, `2026-07-22`, `2026-07-21 personalization
   headers`, and one filesystem path in an id field. Guidance had six weeks and
-  moved the rate from 15.1% in July to 19.1% in August, so it now lives in the
-  server. What makes this a shape question rather than a taste question: **all 91
+  moved the rate from 15.1% in July to 19.6% in August, so it now lives in the
+  server. What makes this a shape question rather than a taste question: **all 94
   closeouts that join a Claude Code transcript are UUIDs, and zero of the 597
   hand-written ids join one** — admitting exactly the machine-minted shapes keeps
-  91 of 91 and costs none. Three parts:
+  94 of 94 and costs none. (Every corpus figure in this entry comes from one
+  read-only backup taken 2026-08-28 12:30:51 PDT; the live core gained rows while
+  it was being written, and a set of numbers assembled from several reads of a
+  moving table is not a measurement.) Three parts:
   - **The column is filled by the most trustworthy witness available**, in
     descending order: the harness-attested `client_session_hint` the server read
     from its own environment, then the caller's claim if it is runtime-shaped,
@@ -27,16 +30,16 @@
   - **The claim is never destroyed.** It stays verbatim in `context.session` in
     the receipt and is echoed as `session_id_claim` whenever the column stores
     something else.
-- Give `context.runtime` an enum. It was free text and arrived as **159 distinct
-  spellings across 1,236 closeouts** — five spellings of "local mac", four of
+- Give `context.runtime` an enum. It was free text and arrived as **160 distinct
+  spellings across 1,239 closeouts** — five spellings of "local mac", four of
   "codex desktop", and `local macOS + readonlyprod ClickHouse` (13 rows) with an
   environment description welded onto the client name. Nothing could be grouped
   by that column. A `runtime_family` of `claude-code`/`codex`/`cursor`/`hermes`/
   `mcp`/`cli`/`unknown` is derived at write time from the server-observed
   `client_runtime_key` first and the model's claim second; the raw spelling stays
   verbatim beside it, and `runtime_detail` is where the environment goes.
-  Applied to the 159 historical spellings: **codex 426, unknown 438, hermes 123,
-  mcp 93, claude-code 83, cursor 57, cli 16.** The mapping is a pure function
+  Applied to the 160 historical spellings: **codex 426, unknown 438, hermes 123,
+  mcp 95, claude-code 84, cursor 57, cli 16** — 1,239 rows, every one placed. The mapping is a pure function
   precisely because `task_closeouts` is append-only under a trigger and history
   can never be rewritten in place. `unknown` is a real answer, not a failure:
   "local", "desktop" and "macOS" name the machine, and inventing a client for
@@ -47,18 +50,24 @@
     "ClickHouse" contains "cli". A normaliser that guesses is worse than a column
     nobody can group.
 - Make a closeout that is not a clean success say what did not work. The live
-  status distribution is completed 1,049, partial 148, blocked 38, **failed 1** —
+  status distribution is completed 1,052, partial 148, blocked 38, **failed 1** —
   one failure in six weeks of unattended agent work, which is a reporting gap, not
   a failure rate, and `brain.ledger` exists to surface exactly what is missing.
   Sampling the 148 `partial` receipts says where it went: they are overwhelmingly
   progress heartbeats ("Main acquisition is healthy at 129/284 receipts"), not
   partial failures. The evidence that is already in the corpus is elsewhere:
-  **94 receipts claim `completed` while carrying a verifier that reports
+  **95 receipts claim `completed` while carrying a verifier that reports
   `failed`**, and not one of them has a field saying which check failed. A new
   required `unresolved` closes it, triggered by the status **or** by the verifier
-  evidence independently — status alone would miss all 94. Over the live core
-  that is **281 of 1,236 receipts (22.7%) that carry evidence something did not
+  evidence independently — status alone would miss all 95. Over the live core
+  that is **282 of 1,239 receipts (22.8%) that carry evidence something did not
   work and no field naming it; after, none of them can be written without one.**
+  - `brain.ledger` reads it, which is what makes the charge honest. `unresolved`
+    rides every `failed_attempts` row and the entry's `latest_unresolved`, and
+    the briefing's FAILED line prints it in place of the summary — "what is still
+    broken" rather than "what the session did" — falling back to the summary for
+    every pre-gate row, which is all 1,239 of them. A required field no reader
+    serves is a toll, not a gate.
   - Deliberately not a status override. Of the twelve closeouts whose verifiers
     all failed, **seven are read-only audits where the FAIL verdict is the
     deliverable** — "Read-only re-review found remaining blockers; verdict FAIL".
@@ -69,9 +78,43 @@
   the other; one retry now clears both.
 - Both gates are configurable under a new `closeout` config section, and
   `session_id_policy: "quarantine"` keeps every receipt while still keeping junk
-  out of the identity column. Replaying all 1,236 live closeouts through the
-  shipped defaults refuses **746 (60.4%)**, every one satisfiable on retry —
-  the number an operator should see before deciding which policy they want.
+  out of the identity column. Replaying all 1,239 live closeouts through the
+  shipped defaults refuses **747 (60.3%)** — 597 for the session shape and 150
+  more for a missing `unresolved` — every one satisfiable on retry, and the number
+  an operator should see before deciding which policy they want.
+- Apply the same identity resolution to `retrieval_uses.session_id`, which
+  carried the identical defect at four times the scale: of 2,048 read receipts,
+  1,115 have a session id, **967 of them hand-written and joining nothing**, 148
+  machine-shaped and 18 joining. Both writers — `core_v1.record_core_v1_retrieval`
+  and the legacy `db.log_retrieval_use` — now resolve it under the `quarantine`
+  policy, never `enforce`: a closeout is a write the agent chose and can retry,
+  while this receipt is a side effect of a *read*, and refusing retrieval to fix
+  a join is not a trade worth making. The claim is kept in `provenance_json` as
+  `session_identity.session_id_claim`, so a resolver that replaces a value never
+  destroys the one it replaced. A matching nullable `session_id_source` column is
+  added to both cores.
+- Reconcile the repo's three runtime folders instead of adding a fourth.
+  `scripts/procmine/episodes.normalize_runtime` now asks
+  `closeout.runtime_family` first and falls through to its own install-specific
+  rules only when that abstains, so the two can differ by abstention but never by
+  contradiction — asserted over the frozen live census rather than described in a
+  comment. Two consequences: `ocbrain-runtime-call`, this repository's own
+  runtime, is no longer `unknown` to its own normaliser (matched as an exact
+  spelling, because the token `ocbrain` also appears in `local-agent-mode-ocbrain`
+  on 66 rows); and the miner stops matching family tokens as substrings, the
+  defect the write-time rules were written to avoid and then left standing next
+  door. Measured across the 3,287 closeout and retrieval rows both have ever
+  seen, the reconciliation moves 8 rows — the spelling `cli`, from `unknown` to
+  `host-batch` — and regresses none.
+- `procmine` labels a server-minted `conn:` session id `server_observed` rather
+  than `model_reported`. It was inferring the answer from whether a
+  `client_session_hint` was present; the write path records who filled the column,
+  so the miner reads that and keeps the old heuristic only for the rows written
+  before the column existed.
+- Operator `runtime_aliases` keys are folded the way candidates are, so an entry
+  written `"claude code desktop"` can actually match. The shipped table is empty,
+  so nothing was broken — but a config key that can never fire is a trap with a
+  config file in front of it.
 
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap

@@ -100,8 +100,10 @@ INSTRUCTIONS = (
     "handles with brain.source, record actual influence with brain.feedback, and finish "
     "substantive work with brain.closeout linked to retrievals and verifier evidence. Pass your "
     "runtime's own session id in context.session -- a UUID, or omit the field and let the server "
-    "fill it; a hand-written slug is refused because it joins no transcript. A closeout that is "
-    "not a clean success must say what did not work in unresolved. Emit "
+    "fill it; a hand-written slug joins no transcript, so brain.closeout refuses it and every "
+    "other tool quietly keeps it out of the identity column. A closeout that is "
+    "not a clean success must say what did not work in unresolved, and brain.ledger serves it "
+    "back on every failed attempt. Emit "
     "narrowly scoped evidence; never write promoted knowledge directly. When you have verified "
     "that a served belief is wrong, replace it with brain.supersede rather than retracting it "
     "or describing the correction in prose; a retraction alone leaves nothing serving in its "
@@ -1771,7 +1773,9 @@ def tool_list(
                 "Negative results are first-class: 'this was tried and failed' is exactly as "
                 "retrievable as 'this is done'. Call it before building something that might "
                 "already exist -- a search that misses is how an agent re-implements its own "
-                "work. Pass task_ref for one task's full chain, or omit it for the scope."
+                "work. Pass task_ref for one task's full chain, or omit it for the scope. "
+                "Each failed attempt carries `unresolved`, the filer's own sentence about what "
+                "is still not working; it is null on receipts written before 2026-08-28."
             ),
             "inputSchema": {
                 "type": "object",

@@ -217,7 +217,12 @@ def test_columns_appear_on_open_and_an_old_binary_is_unaffected(tmp_path):
             ",\n  provenance_json TEXT,\n"
             "  -- The folded form of `task_ref` above, so a retrieval and the closeout that\n"
             "  -- links it agree on which task they belong to. NULL on historical rows.\n"
-            "  task_ref_norm TEXT\n",
+            "  task_ref_norm TEXT,\n"
+            "  -- On whose word `session_id` above was filled, exactly as on task_closeouts.\n"
+            "  -- The identical defect lived here at four times the scale: 967 of 1,115\n"
+            "  -- session ids on the live core were hand-written and none joined a\n"
+            "  -- transcript. NULL on every historical row.\n"
+            "  session_id_source TEXT\n",
             ",\n  provenance_json TEXT\n",
         ),
         (

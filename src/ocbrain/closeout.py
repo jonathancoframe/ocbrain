@@ -114,12 +114,12 @@ def classify_session_id(value: Any) -> str:
     ``filesystem_path``, ``contains_space``, ``date_like``, ``slug`` -- so the
     refusal can say what the caller actually sent.
 
-    Measured over the 1,236 closeouts in the live core on 2026-08-28: 208
-    ``runtime_uuid``, 431 ``absent``, 296 ``date_like``, 239 ``slug``, 35
-    ``contains_space``, 27 ``filesystem_path``. Every one of the 91 closeouts
-    that joins a Claude Code transcript is ``runtime_uuid``; the other 1,028
-    join nothing, which is what makes this a shape question rather than a taste
-    question.
+    Measured over the 1,239 closeouts in a read-only backup of the live core
+    taken 2026-08-28 12:30 PDT: 211 ``runtime_uuid``, 431 ``absent``, 296
+    ``date_like``, 239 ``slug``, 35 ``contains_space``, 27 ``filesystem_path``.
+    Every one of the 94 closeouts that joins a Claude Code transcript is
+    ``runtime_uuid``; the other 1,145 join nothing, which is what makes this a
+    shape question rather than a taste question.
     """
     if not isinstance(value, str) or not value.strip():
         return "absent"
@@ -177,7 +177,7 @@ def resolve_session_identity(
     legal and lands on rule 3 or 4, so no client is ever unable to file a
     closeout. What it is not is *silently* satisfiable -- the error is the only
     channel that has ever reached the agent, and six weeks of prose guidance
-    moved the UUID rate from 15.1% (July) to 19.1% (August).
+    moved the UUID rate from 15.1% (July) to 19.6% (August).
 
     The caller's claim is never destroyed. It stays verbatim in
     ``context.session`` inside the receipt, and is echoed as ``session_id_claim``
@@ -233,8 +233,8 @@ def resolve_session_identity(
 # Runtime family
 # --------------------------------------------------------------------------- #
 
-# ``context.runtime`` was free text and arrived as 159 distinct spellings across
-# 1,236 live closeouts -- five of "local mac", four of "codex desktop", and
+# ``context.runtime`` was free text and arrived as 160 distinct spellings across
+# 1,239 live closeouts -- five of "local mac", four of "codex desktop", and
 # values like "local macOS + readonlyprod ClickHouse" that describe an
 # environment rather than a client. Nothing can be grouped by that column.
 #
@@ -259,6 +259,19 @@ RUNTIME_FAMILY_RULES: tuple[tuple[str, frozenset[str]], ...] = (
     ("cli", frozenset({"launchd", "cron", "cli", "dagster"})),
     ("mcp", frozenset({"mcp"})),
 )
+# Whole folded spellings whose family is known but whose tokens cannot safely be
+# added to the rules above. `ocbrain-runtime-call` is set by
+# ``ocbrain.runtime_call`` -- this repo's own one-shot MCP path, 2 live rows --
+# and the sibling mapper in scripts/procmine has placed it since it was written.
+# It is matched exactly rather than by a token because `ocbrain` also appears in
+# `local-agent-mode-ocbrain`, the Claude Code client key on 66 live rows, and
+# folding those into `mcp` would be the invent-a-family failure the segment rule
+# exists to prevent. Anything install-specific goes in ``runtime_aliases``, not
+# here; the bar for this table is a spelling this repository itself emits.
+RUNTIME_FAMILY_EXACT: dict[str, str] = {
+    "ocbrain-runtime-call": "mcp",
+}
+
 # Everything a real spelling uses to join two words: whitespace, punctuation,
 # and the path/profile separators in values like `hermes@f15a38ee` and
 # `~/.local/share/hermes-runtimes/f15a38ee`.
@@ -284,14 +297,25 @@ def runtime_family(
     ``aliases`` is the operator's table for install-specific labels, mapping a
     folded spelling to a family. It ships empty and lives in config for the same
     reason ``scopes.aliases`` does: a real fleet's profile names are operator
-    data, and this repo is public.
+    data, and this repo is public. Its keys are folded exactly the way a
+    candidate is, so an entry written `{"claude code desktop": ...}` reaches the
+    candidate `claude-code-desktop`; a key that could never match would be a
+    trap with a config file in front of it.
+
+    This is the one runtime folder in the repo that write paths use.
+    ``procmine.episodes.normalize_runtime`` asks it first and only falls through
+    to its own install-specific rules when this abstains, so the two can differ
+    by abstention but never by contradiction --
+    ``tests/test_closeout_discipline.py`` asserts that over the live census.
 
     Pure and history-independent, so the same function classifies a row written
     today and a row written in July. ``task_closeouts`` is append-only and
     historical spellings can never be rewritten in place; this is what keeps
     them analysable.
     """
-    table = {str(k).strip().lower(): str(v).strip() for k, v in (aliases or {}).items()}
+    table = {
+        fold_runtime_label(k): str(v).strip() for k, v in (aliases or {}).items()
+    }
     for candidate in candidates:
         folded = fold_runtime_label(candidate)
         if not folded:
@@ -299,6 +323,9 @@ def runtime_family(
         mapped = table.get(folded)
         if mapped in RUNTIME_FAMILIES:
             return mapped
+        exact = RUNTIME_FAMILY_EXACT.get(folded)
+        if exact is not None:
+            return exact
         segments = set(folded.split("-"))
         for family, tokens in RUNTIME_FAMILY_RULES:
             if segments & tokens:
@@ -715,8 +742,8 @@ def _requires_unresolved(status: str, verification_status: str) -> bool:
     * a verifier the agent filed says ``failed``.
 
     The second is what makes this more than a restatement of ``status``. On the
-    live core, 94 closeouts claim ``completed`` while carrying a failed
-    verifier -- 87 of them alongside passing ones -- and none of them has a field
+    live core, 95 closeouts claim ``completed`` while carrying a failed
+    verifier -- 88 of them alongside passing ones -- and none of them has a field
     saying which check failed or why it did not stop the claim.
 
     Deliberately NOT a status override. Seven of the twelve closeouts whose

@@ -133,7 +133,13 @@ Two write-time gates, both enforced in the server rather than asked for here:
   still not working. A `completed` carrying a failed verifier is allowed (a
   read-only audit whose verdict is FAIL is a successful audit), but it owes the
   sentence, because `brain.ledger` reads this to stop the next session repeating
-  the attempt.
+  the attempt. It comes back on every `failed_attempts` row and as the entry's
+  `latest_unresolved`, and it is what the briefing's FAILED line prints.
+
+`brain.context` and `brain.feedback` resolve `context.session` the same way, but
+never refuse: a read receipt with a hand-written session label is written with
+the server's own connection id in the column and the claim kept beside it. Only
+`brain.closeout` refuses, because it is a write you chose to make and can retry.
 
 Link:
 
