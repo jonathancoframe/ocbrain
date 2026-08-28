@@ -65,6 +65,40 @@ MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO = 0.50
 # A lexical hit is held to MIN_DENSE_COSINE too, but only when the dense arm is
 # healthy enough to judge it. See ``_retrieval_tuning``.
 REQUIRE_DENSE_SUPPORT = True
+# Whether `ranking_prior` still multiplies by `0.85 + 0.15 * confidence`.
+# Ships True, which is the behaviour every live packet was built with. Turning
+# it off is a policy change, not a bug fix: see docs/THRESHOLDS.md.
+CONFIDENCE_PRIOR_ENABLED = True
+
+# The shapes a caller uses to name one exact record: a stable object id, a
+# SHA-256, or a terminal artifact URI. These live here rather than in
+# ``ocbrain.mcp_v1`` because ``search_core_v1`` has to recognise them too --
+# ``brain.search`` short-circuited on a locator while ``brain.context`` did not,
+# and that asymmetry is what let a nonexistent locator reach dense ranking.
+SHA256_TEXT_RE = re.compile(r"^[0-9a-f]{64}$")
+STABLE_OBJECT_ID_RE = re.compile(r"^(?:evt|evd|belief|close|ret)_[0-9a-f]{16}$")
+TERMINAL_ARTIFACT_URI_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://\S+|ocbrain-bundle:sha256:[0-9a-f]{64}|"
+    r"closeout:close_[0-9a-f]{16})$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_exact_locator(query: str) -> bool:
+    """True when the query names one exact record rather than a topic.
+
+    Shape only: this says nothing about whether the record exists. That is the
+    point -- a well-formed locator that resolves to nothing must return nothing,
+    and a caller cannot be told "no such record" by a ranker that always has a
+    nearest neighbour to offer.
+    """
+    text = str(query).strip()
+    lowered = text.lower()
+    return bool(
+        STABLE_OBJECT_ID_RE.fullmatch(lowered)
+        or SHA256_TEXT_RE.fullmatch(lowered)
+        or TERMINAL_ARTIFACT_URI_RE.fullmatch(text)
+    )
 
 
 _RETRIEVAL_FALLBACK = SimpleNamespace(
@@ -74,6 +108,7 @@ _RETRIEVAL_FALLBACK = SimpleNamespace(
     min_lexical_query_term_matches=MIN_LEXICAL_QUERY_TERM_MATCHES,
     min_redundant_lexical_strength_ratio=MIN_REDUNDANT_LEXICAL_STRENGTH_RATIO,
     require_dense_support=REQUIRE_DENSE_SUPPORT,
+    confidence_prior_enabled=CONFIDENCE_PRIOR_ENABLED,
     feedback_weight=0.125,
     feedback_clamp=0.25,
     feedback_prior_observations=3.0,
@@ -1789,6 +1824,115 @@ def get_core_v1_evidence(conn: sqlite3.Connection, evidence_id: str) -> dict[str
     return result
 
 
+def _evidence_support(
+    conn: sqlite3.Connection, evidence_ids: Iterable[str]
+) -> tuple[int, str | None]:
+    """How many evidence objects back a belief, and when the newest was recorded.
+
+    Both are facts about the record that a reader can go and check, which is the
+    property the served ``confidence`` number never had.
+    """
+    ids = [str(value) for value in evidence_ids if str(value)]
+    if not ids:
+        return 0, None
+    placeholders = ",".join("?" for _ in ids)
+    row = conn.execute(
+        "SELECT COUNT(*), MAX(recorded_at) FROM evidence_objects "
+        f"WHERE evidence_id IN ({placeholders})",  # noqa: S608 - placeholders only
+        ids,
+    ).fetchone()
+    if row is None:
+        return 0, None
+    return int(row[0] or 0), (str(row[1]) if row[1] else None)
+
+
+def _exact_locator_result(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    eligible: dict[str, sqlite3.Row],
+    context: ScopeContext,
+    delivery_target: str,
+    cross_scope: bool,
+    visibility_counts: dict[str, int],
+) -> dict[str, Any]:
+    """Resolve a locator-shaped query by equality only. A miss returns nothing.
+
+    The visibility gate is the same one the ranker applies: holding an id is not
+    authorisation to read confidential material whose scope the caller did not
+    name. A locator naming an evidence object, a closeout, or a retracted belief
+    resolves to no *belief* and is therefore empty here -- ``brain.get`` and
+    ``brain.search`` are the surfaces that answer those.
+    """
+    locator = str(query).strip()
+    canonical = resolve_object_id(conn, locator)
+    row = eligible.get(canonical) or eligible.get(locator)
+    items: list[dict[str, Any]] = []
+    scope_mix: dict[str, int] = {}
+    if row is not None:
+        scope = ScopeTag(
+            str(row["scope_type"]),
+            str(row["scope_id"]),
+            visibility=str(row["visibility"]),
+            egress_policy=str(row["egress_policy"]),
+            provenance=str(row["scope_provenance"]),
+        )
+        if delivery_target == LOCAL_MODEL_TARGET:
+            scope_weight = scope_affinity(scope, context)
+        else:
+            scope_weight = scope_match(scope, context, cross_scope=cross_scope)
+        if scope_weight:
+            belief_id = str(row["belief_id"])
+            evidence_ids = _json_list(row["evidence_ids"])
+            evidence_count, evidence_latest_at = _evidence_support(conn, evidence_ids)
+            items.append(
+                {
+                    "belief_id": belief_id,
+                    "body": row["body"],
+                    "scope": scope.to_dict(),
+                    "score": 1.0,
+                    "relevance": 1.0,
+                    "scope_weight": scope_weight,
+                    "evidence_count": evidence_count,
+                    "evidence_latest_at": evidence_latest_at,
+                    "evidence_ids": evidence_ids,
+                    "source": "core_v1_exact_locator",
+                    "ranking": {
+                        "lexical_rank": None,
+                        "dense_rank": None,
+                        "dense_similarity": None,
+                        "lexical_component": 0.0,
+                        "dense_component": 0.0,
+                        "source_quality": 0.0,
+                        "recency": 0.0,
+                        "ranking_prior": 0.0,
+                        "feedback_boost": 0.0,
+                        "exact_boost": 1.0,
+                    },
+                }
+            )
+            scope_mix[str(scope.scope_id)] = 1
+    return {
+        "items": items,
+        "excluded": [],
+        "scope_mix": scope_mix,
+        "delivery_excluded_count": visibility_counts["excluded_delivery_count"],
+        "exclusion_count_basis": "current_serving_inventory",
+        "ranking": {
+            "mode": "exact_locator",
+            "dense_fallback": None,
+            "eligible_count": visibility_counts["eligible_count"],
+            "lexical_candidates": 0,
+            "dense_candidates": 0,
+            # The two facts a caller needs to tell "no such record" from "the
+            # ranker had nothing to say": the query was read as a locator, and
+            # this is how many records it named.
+            "exact_locator": True,
+            "exact_locator_matches": len(items),
+        },
+    }
+
+
 def search_core_v1(
     conn: sqlite3.Connection,
     query: str,
@@ -1844,6 +1988,22 @@ def search_core_v1(
         )
     )
     eligible = {str(row["belief_id"]): row for row in eligible_rows}
+    if looks_like_exact_locator(query):
+        # An id-shaped query is a lookup, not a topic. Ranking cannot answer it:
+        # a locator shares no terms with any body, so the lexical arm returns
+        # nothing and the dense arm returns whatever happens to be nearest --
+        # which is how the nonexistent, exactly well-formed
+        # `belief_ffffffffffffffff` came back as two confident unrelated beliefs
+        # at cosine 0.56 and 0.61. Resolve by equality, and let a miss be empty.
+        return _exact_locator_result(
+            conn,
+            query,
+            eligible=eligible,
+            context=context,
+            delivery_target=delivery_target,
+            cross_scope=cross_scope,
+            visibility_counts=visibility_counts,
+        )
     tuning = _retrieval_tuning()
     rrf_k = int(tuning.hybrid_rrf_k)
     min_dense_cosine = float(tuning.min_dense_cosine)
@@ -1851,6 +2011,9 @@ def search_core_v1(
     min_lexical_matches = int(tuning.min_lexical_query_term_matches)
     min_redundant_ratio = float(tuning.min_redundant_lexical_strength_ratio)
     require_dense_support = bool(tuning.require_dense_support)
+    confidence_prior_enabled = bool(
+        getattr(tuning, "confidence_prior_enabled", CONFIDENCE_PRIOR_ENABLED)
+    )
     candidate_limit = max(limit * 10, 120)
     lexical_rows: list[sqlite3.Row] = []
     lexical_uncorroborated = False
@@ -1990,6 +2153,7 @@ def search_core_v1(
                 "min_lexical_query_term_matches": min_lexical_matches,
                 "min_redundant_lexical_strength_ratio": min_redundant_ratio,
                 "require_dense_support": require_dense_support and dense_arm_healthy,
+                "confidence_prior_enabled": confidence_prior_enabled,
                 "degraded_excluded_procedures": degraded_excluded_procedures,
             },
         }
@@ -2058,9 +2222,10 @@ def search_core_v1(
             dense_component = dense_similarity[belief_id] / (rrf_k + dense_rank[belief_id])
         rrf = lexical_component + dense_component
         feedback_boost = feedback.get(belief_id, 0.0)
+        confidence_term = (0.85 + 0.15 * confidence) if confidence_prior_enabled else 1.0
         ranking_prior = (
             scope_weight
-            * (0.85 + 0.15 * confidence)
+            * confidence_term
             * (0.85 + 0.15 * quality)
             * (0.99 + 0.01 * recency)
         )
@@ -2076,8 +2241,11 @@ def search_core_v1(
                     "score": round(score, 8),
                     "relevance": round(rrf, 8),
                     "scope_weight": scope_weight,
-                    "confidence": confidence,
-                    "confidence_band": row["confidence_band"],
+                    # Evidence support is filled in below, for the served rows
+                    # only. It replaces the `confidence` / `confidence_band`
+                    # pair this item used to carry; see `_evidence_support`.
+                    "evidence_count": 0,
+                    "evidence_latest_at": None,
                     "evidence_ids": _json_list(row["evidence_ids"]),
                     "source": "core_v1_hybrid",
                     "ranking": {
@@ -2111,6 +2279,13 @@ def search_core_v1(
         items.append(item)
         if len(items) >= limit:
             break
+    # One evidence query for the rows that are actually served, not for every
+    # ranked candidate: at limit=12 that is 12 ids, against a candidate list of
+    # up to 120.
+    for item in items:
+        item["evidence_count"], item["evidence_latest_at"] = _evidence_support(
+            conn, item["evidence_ids"]
+        )
     # What was actually served, by scope. This replaces the old
     # ``excluded_scope_count``, which counted rows the scope filter dropped and
     # so reported 0 forever once the filter was gone. The mix is the signal that
@@ -2139,6 +2314,7 @@ def search_core_v1(
             "min_lexical_query_term_matches": min_lexical_matches,
             "min_redundant_lexical_strength_ratio": min_redundant_ratio,
             "require_dense_support": require_dense_support and dense_arm_healthy,
+            "confidence_prior_enabled": confidence_prior_enabled,
             # Procedures dropped because the dense arm was unavailable. Zero in
             # healthy mode; a non-zero value says the packet is deliberately
             # thinner than the corpus could support.
@@ -2599,6 +2775,7 @@ __all__ = [
     "get_core_v1_evidence",
     "init_core_v1",
     "is_core_v1",
+    "looks_like_exact_locator",
     "migrate_core_v1_columns",
     "project_core_v1",
     "rebuild_core_v1_search",

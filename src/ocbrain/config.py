@@ -80,6 +80,17 @@ class RetrievalConfig:
     min_lexical_query_term_matches: int = 2
     min_redundant_lexical_strength_ratio: float = 0.50
     require_dense_support: bool = True
+    # Whether `ranking_prior` keeps its `0.85 + 0.15 * confidence` term.
+    #
+    # `confidence` is authored, not measured: 345 of the 347 serving beliefs on
+    # the reference corpus carry one, all in [0.65, 1.0], and 116 of them are
+    # the same round 0.85. Joined to recorded feedback it points the wrong way
+    # -- packets judged irrelevant or harmful held items averaging 0.8707,
+    # packets judged used or helpful averaged 0.7263 -- so the term rewards the
+    # rows readers liked least. Whether that means the term should go or the
+    # number should be re-derived is an operator decision, so this ships True:
+    # the default reproduces every packet built to date.
+    confidence_prior_enabled: bool = True
     # Retrieval feedback shifts a belief's score by ``1 + boost``. The boost is
     # ``avg_signal * weight``, damped by observation count and clamped to
     # +/-``feedback_clamp``. Set ``feedback_weight`` to 0 to ignore feedback.
