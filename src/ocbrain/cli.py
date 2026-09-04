@@ -1758,6 +1758,29 @@ def _evidence_has_current_belief(conn, evidence_id: str) -> bool:
     )
 
 
+def _requested_project_from_proposal(conn, evidence_id: str) -> tuple[str, str] | None:
+    """(project, proposal_event_id) the evidence's own widening request asked for, if any.
+
+    Approving the queue answers that request; landing at the row's task scope would
+    keep the egress and drop the reach it named. Visibility never comes from here, and
+    the gauntlet has already run, so a client-scoped row still needs ``--project``.
+    """
+    row = conn.execute(
+        "SELECT id, body_json FROM brain_events WHERE kind='hosted_egress_proposal' "
+        "AND json_extract(body_json,'$.evidence_id')=? ORDER BY rowid DESC LIMIT 1",
+        (evidence_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    requested = (json.loads(row["body_json"]) or {}).get("requested_scope") or {}
+    if requested.get("scope_type") != "project":
+        return None
+    scope_id = str(requested.get("scope_id") or "")
+    if not scope_id.startswith("project:") or len(scope_id) <= len("project:"):
+        return None
+    return scope_id[len("project:") :], str(row["id"])
+
+
 def _hosted_target_scope(project: str | None, row: dict[str, Any]) -> ScopeTag:
     """The project scope the approved belief lands in, hosted-safe by decree.
 
@@ -1833,6 +1856,13 @@ def _hosted_approve_one(
             "secret_leak_body",
             f"body trips the public-safety scanner: {', '.join(leaks)}",
         )
+    scope_source = "cli_project" if project else "evidence_row"
+    answers_proposal: str | None = None
+    if not project:
+        requested = _requested_project_from_proposal(conn, canonical)
+        if requested is not None:
+            project, answers_proposal = requested
+            scope_source = "requested_by_proposal"
     target = _hosted_target_scope(project, dict(row))
     belief_id = stable_id("belief", body_text, target.scope_id)
     if dry_run:
@@ -1841,10 +1871,13 @@ def _hosted_approve_one(
             "status": "planned",
             "belief_id": belief_id,
             "scope": target.to_dict(),
+            "scope_source": scope_source,
         }
     attributes: dict[str, Any] = {"approved_by": approved_by}
     if reason:
         attributes["approval_reason"] = reason
+    if answers_proposal:
+        attributes["answers_proposal"] = answers_proposal
     proposal_event_id = append_core_event(
         conn,
         "compilation_proposed",
@@ -1875,6 +1908,7 @@ def _hosted_approve_one(
         "proposal_event_id": proposal_event_id,
         "decision_event_id": decision["event_id"],
         "scope": target.to_dict(),
+        "scope_source": scope_source,
     }
 
 

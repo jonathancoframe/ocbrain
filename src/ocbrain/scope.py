@@ -474,6 +474,18 @@ def scope_narrows_or_equals(requested: ScopeTag, inferred: ScopeTag) -> bool:
     return True
 
 
+def widened_dimensions(requested: ScopeTag, inferred: ScopeTag) -> list[str]:
+    """Which ladders the request exceeds, in ladder order; empty when it narrows or equals."""
+    widened: list[str] = []
+    if SCOPE_FAMILY_WIDTH[requested.scope_type] > SCOPE_FAMILY_WIDTH[inferred.scope_type]:
+        widened.append("scope_type")
+    if VISIBILITY_WIDTH[requested.visibility] > VISIBILITY_WIDTH[inferred.visibility]:
+        widened.append("visibility")
+    if EGRESS_WIDTH[requested.egress_policy] > EGRESS_WIDTH[inferred.egress_policy]:
+        widened.append("egress_policy")
+    return widened
+
+
 # Ranking affinities for local delivery. In-scope material outranks everything
 # else by a wide margin; neighbouring scopes sit in the tail rather than being
 # discarded. Measured over 250 replayed queries, cross-scope rows take 3.2% of

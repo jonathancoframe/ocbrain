@@ -136,9 +136,40 @@ def test_ingest_v1_records_widening_request_as_proposal(tmp_path):
     assert body["requested_scope"]["egress_policy"] == "hosted_ok"
     assert body["inferred_scope"]["scope_id"] == "task:scope-honor"
     assert "host-deliver" in body["body_head"]
+    # The receipt names the widening itself: which ladders the request exceeded.
+    assert result["requested_scope"]["scope_id"] == "project:coframe"
+    assert result["inferred_scope"]["scope_id"] == "task:scope-honor"
+    assert result["widened"] == ["scope_type", "egress_policy"]
     # No belief may exist yet: the widening was proposed, not applied.
     beliefs = conn.execute("SELECT COUNT(*) FROM current_beliefs").fetchone()[0]
     assert beliefs == 0
+
+
+def test_ingest_v1_narrowing_result_has_no_widened_field(tmp_path):
+    """A narrowing (or equal) request is applied outright: no `widened` key may
+    appear on the receipt, because nothing was exceeded."""
+    conn = _conn(tmp_path)
+    requested = ScopeTag(
+        "task",
+        "task:scope-honor",
+        visibility="secret",
+        egress_policy="prohibited",
+        provenance="inferred",
+    )
+    result = ingest_v1(
+        conn,
+        body="Narrowed by the client itself, nothing exceeded.",
+        kind="observation",
+        context=_task_context(),
+        writer="test",
+        session_id=None,
+        artifact_ref=None,
+        requested_scope=requested,
+    )
+    assert result["scope_decision"] == "explicit"
+    assert "widened" not in result
+    assert "requested_scope" not in result
+    assert "inferred_scope" not in result
 
 
 def test_ingest_v1_widening_request_is_listed_by_proposals_v1(tmp_path):

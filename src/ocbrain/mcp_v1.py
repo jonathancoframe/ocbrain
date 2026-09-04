@@ -49,6 +49,7 @@ from ocbrain.scope import (
     normalize_delivery_target,
     resolve_write_scope,
     scope_narrows_or_equals,
+    widened_dimensions,
 )
 from ocbrain.shared_context import issue_source_handles
 from ocbrain.text import compact_whitespace
@@ -1393,6 +1394,11 @@ def ingest_v1(
     }
     if proposal_event_id is not None:
         result["hosted_egress_proposal_event_id"] = proposal_event_id
+        # Name the widening so the caller can see which ladders it exceeded and
+        # what was asked for; the applied scope in `result["scope"]` is unchanged.
+        result["requested_scope"] = requested_scope.to_dict() if requested_scope else None
+        result["inferred_scope"] = inferred_scope.to_dict()
+        result["widened"] = widened_dimensions(requested_scope, inferred_scope)
     return result
 
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `hosted-approve` lands the belief where its widening request asked. Without
+  `--project` it fell back to the evidence row's own scope, so a task-context
+  `brain.ingest` that requested `project:`/`hosted_ok` was approved into a
+  `hosted_ok` belief at a task id nobody queries by. Resolution is now
+  `--project` > the row's pending proposal's requested project > the row's own
+  scope; each result carries `scope_source`, and the compiled belief's proposal
+  event names the request it answered (`answers_proposal`). Visibility never
+  comes from a request. `brain.ingest`'s proposal receipt also gains
+  `requested_scope`, `inferred_scope`, and `widened` (the exceeded ladders).
+
 - Add `ocbrain egress-promote`: a human-attributable way to lift a current
   belief's egress to `hosted_ok` (or `approval_required`). Every automated
   writer hardcodes `local_only` — correctly — but nothing could then lift a

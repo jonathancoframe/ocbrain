@@ -85,6 +85,16 @@ link, decision event written by the `human:NAME` actor. The belief is scoped
 derivable the belief keeps the evidence's own scope: reach never widens past
 what the row already had.
 
+The target scope resolves in that order: `--project` wins outright; with no
+`--project`, the evidence's own pending widening proposal names the project its
+request asked for (approving the queue is answering that request, so a
+task-scoped ingest's `project:hosted_ok` request lands where it asked instead
+of at a task id nobody queries); only when neither applies does the belief keep
+the evidence row's scope. Visibility is never taken from a request — it is
+always `internal`. The per-row result's `scope_source` says which rule applied:
+`cli_project`, `requested_by_proposal`, or `evidence_row` (with
+`answers_proposal` naming the proposal event when one was answered).
+
 `--dry-run` runs the whole gauntlet and reports what would happen without
 writing a single event. Exit codes: `0` when at least one row was approved
 (or the queue was empty), `2` when nothing was approved and there were

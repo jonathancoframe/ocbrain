@@ -77,6 +77,57 @@ def _event_count(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM brain_events").fetchone()[0]
 
 
+def _seed_task_evidence_with_project_proposal(conn, *, project: str = "coframe"):
+    """Seed the live defect shape: approval_required task evidence whose own
+    widening request asks for the project's hosted_ok scope."""
+    evidence_id = _seed_evidence(
+        conn,
+        body="Hosted-queue fixture ingested from a task context.",
+        scope=ScopeTag(
+            "task",
+            "task:brain-daily-planner-20260904",
+            visibility="internal",
+            egress_policy="approval_required",
+            provenance="inferred",
+        ),
+    )
+    proposal_event_id = append_core_event(
+        conn,
+        "hosted_egress_proposal",
+        {
+            "schema_version": "ocbrain.hosted-egress-proposal.v1",
+            "subject": {"kind": "evidence", "id": evidence_id},
+            "evidence_id": evidence_id,
+            "requested_scope": {
+                "scope_type": "project",
+                "scope_id": f"project:{project}",
+                "visibility": "internal",
+                "egress_policy": "hosted_ok",
+                "provenance": "explicit",
+            },
+            "inferred_scope": {
+                "scope_type": "task",
+                "scope_id": "task:brain-daily-planner-20260904",
+                "visibility": "internal",
+                "egress_policy": "approval_required",
+                "provenance": "inferred",
+            },
+            "applied_scope": {
+                "scope_type": "task",
+                "scope_id": "task:brain-daily-planner-20260904",
+                "visibility": "internal",
+                "egress_policy": "approval_required",
+                "provenance": "inferred",
+            },
+            "writer": "test-agent",
+            "body_head": "Hosted-queue fixture ingested from a task context.",
+        },
+        writer="test-agent",
+    )
+    conn.commit()
+    return evidence_id, proposal_event_id
+
+
 def test_hosted_queue_lists_eligible_rows_and_omits_confidential(tmp_path, capsys):
     conn = _seed_core(tmp_path)
     eligible = _seed_evidence(conn, body="Eligible approval_required observation.")
@@ -179,6 +230,8 @@ def test_hosted_approve_creates_hosted_ok_belief_retrievable_by_hosted_delivery(
     entry = payload["approved"][0]
     assert entry["scope"]["egress_policy"] == "hosted_ok"
     assert entry["scope"]["scope_id"] == "project:coframe"
+    # No proposal seeded: the target falls back to the evidence row's own scope.
+    assert entry["scope_source"] == "evidence_row"
 
     belief = conn.execute(
         "SELECT * FROM current_beliefs WHERE belief_id=?", (entry["belief_id"],)
@@ -211,6 +264,90 @@ def test_hosted_approve_creates_hosted_ok_belief_retrievable_by_hosted_delivery(
     )
     served_ids = {item["id"] for item in packet["items"]}
     assert entry["belief_id"] in served_ids
+    conn.close()
+
+
+def test_hosted_approve_lands_the_proposals_requested_project(tmp_path, capsys):
+    """Approving the queue answers the row's own widening request: without
+    --project the belief used to land at the evidence's task scope, silently
+    dropping the reach the request named."""
+    conn = _seed_core(tmp_path)
+    evidence_id, proposal_event_id = _seed_task_evidence_with_project_proposal(conn)
+    db = str(tmp_path / "hosted-queue.sqlite")
+    rc, payload = _run(
+        capsys,
+        db,
+        ["hosted-approve", evidence_id, "--approved-by", APPROVER],
+    )
+    assert rc == 0, payload
+    entry = payload["approved"][0]
+    assert entry["scope"]["scope_type"] == "project"
+    assert entry["scope"]["scope_id"] == "project:coframe"
+    assert entry["scope"]["egress_policy"] == "hosted_ok"
+    assert entry["scope_source"] == "requested_by_proposal"
+
+    belief = conn.execute(
+        "SELECT * FROM current_beliefs WHERE belief_id=?", (entry["belief_id"],)
+    ).fetchone()
+    assert belief is not None
+    assert belief["scope_type"] == "project"
+    assert belief["scope_id"] == "project:coframe"
+    assert belief["egress_policy"] == "hosted_ok"
+    assert belief["scope_provenance"] == "human_approved_hosted"
+    proposal = conn.execute(
+        "SELECT body_json FROM brain_events WHERE id=?", (entry["proposal_event_id"],)
+    ).fetchone()
+    attributes = json.loads(proposal["body_json"])["attributes"]
+    assert attributes["answers_proposal"] == proposal_event_id
+    conn.close()
+
+
+def test_hosted_approve_cli_project_overrides_the_proposal(tmp_path, capsys):
+    """--project still wins: an explicit project on the CLI must not be
+    second-guessed by what the evidence's own proposal asked for."""
+    conn = _seed_core(tmp_path)
+    evidence_id, _proposal_event_id = _seed_task_evidence_with_project_proposal(conn)
+    db = str(tmp_path / "hosted-queue.sqlite")
+    rc, payload = _run(
+        capsys,
+        db,
+        [
+            "hosted-approve",
+            evidence_id,
+            "--project",
+            "other",
+            "--approved-by",
+            APPROVER,
+        ],
+    )
+    assert rc == 0, payload
+    entry = payload["approved"][0]
+    assert entry["scope"]["scope_id"] == "project:other"
+    assert entry["scope_source"] == "cli_project"
+    conn.close()
+
+
+def test_hosted_approve_dry_run_plans_the_proposals_requested_project(tmp_path, capsys):
+    """--dry-run plans the requested project and writes nothing: the plan must
+    name where the approval would land, not the evidence row's own scope."""
+    conn = _seed_core(tmp_path)
+    evidence_id, _proposal_event_id = _seed_task_evidence_with_project_proposal(conn)
+    db = str(tmp_path / "hosted-queue.sqlite")
+    before = _event_count(conn)
+    beliefs_before = conn.execute("SELECT COUNT(*) FROM current_beliefs").fetchone()[0]
+    rc, payload = _run(
+        capsys,
+        db,
+        ["hosted-approve", evidence_id, "--approved-by", APPROVER, "--dry-run"],
+    )
+    assert rc == 0
+    assert payload["status"] == "planned"
+    entry = payload["approved"][0]
+    assert entry["status"] == "planned"
+    assert entry["scope"]["scope_id"] == "project:coframe"
+    assert entry["scope_source"] == "requested_by_proposal"
+    assert _event_count(conn) == before
+    assert conn.execute("SELECT COUNT(*) FROM current_beliefs").fetchone()[0] == beliefs_before
     conn.close()
 
 
