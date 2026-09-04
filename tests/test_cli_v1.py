@@ -75,6 +75,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_scope_promote_cli.py, including the projection
     # rebuild and the egress boundary.
     scope_acceptance = {"scope-promote"}
+    # Covered in tests/test_hosted_queue.py, including the read-only queue, the
+    # human-gated approval gauntlet, and the CLI-only catalog boundary.
+    hosted_approval_acceptance = {"hosted-queue", "hosted-approve"}
     # Covered in tests/test_publicsafety.py, which drives the scanner against
     # throwaway git repos rather than this one.
     repo_guard_acceptance = {"public-safety-check", "install-hooks"}
@@ -93,6 +96,7 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         | curated_and_vector_acceptance
         | hygiene_acceptance
         | scope_acceptance
+        | hosted_approval_acceptance
         | repo_guard_acceptance
         | selftest_acceptance
         | compaction_acceptance

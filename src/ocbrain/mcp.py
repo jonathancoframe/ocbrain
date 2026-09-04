@@ -1325,6 +1325,7 @@ def call_tool_v1(
             writer=optional_string(arguments, "writer") or "mcp",
             session_id=optional_string(arguments, "session") or context.session,
             artifact_ref=optional_string(arguments, "artifact_ref"),
+            requested_scope=scope_from_arguments(arguments),
         )
         conn.commit()
         return text_result(payload)
@@ -1954,7 +1955,12 @@ def tool_list(
         [
             {
                 "name": "brain.ingest",
-                "description": "Append scoped evidence to the event ledger.",
+                "description": (
+                    "Append scoped evidence to the event ledger. An explicit scope is "
+                    "honored only when it narrows the inferred write scope (same or "
+                    "narrower scope family, visibility, and egress policy); a widening "
+                    "request is recorded as a hosted_egress_proposal instead of applied."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1965,6 +1971,12 @@ def tool_list(
                         "artifact_ref": {"type": "string"},
                         "scope": {
                             "type": "object",
+                            "description": (
+                                "Narrowing-only: applied when it is at most the inferred "
+                                "scope on every dimension; otherwise the evidence is "
+                                "stored under the inferred scope and a "
+                                "hosted_egress_proposal event records the request."
+                            ),
                             "properties": {
                                 "scope_type": {
                                     "type": "string",
