@@ -289,6 +289,20 @@ class ScopeTag:
         )
 
 
+def hosted_egress_refusal_reason(visibility: str, egress_policy: str) -> str | None:
+    """The one rule for what may carry ``hosted_ok`` egress.
+
+    ``curated-apply`` refuses to combine ``hosted_ok`` with confidential or
+    secret visibility, and ``egress-promote`` must refuse exactly the same
+    combinations — so the predicate lives here once and both callers import it,
+    rather than each writing a copy that can drift. Returns ``None`` when the
+    combination is allowed, or the human-readable reason it is not.
+    """
+    if egress_policy == "hosted_ok" and visibility in {"confidential", "secret"}:
+        return f"cannot combine hosted_ok with {visibility} visibility"
+    return None
+
+
 @dataclass(frozen=True)
 class ScopeContext:
     project: str | None = None
