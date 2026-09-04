@@ -117,6 +117,7 @@ from ocbrain.scope import (
     ScopeTag,
     fold_scope_component,
     global_scope,
+    hosted_egress_refusal_reason,
     resolve_write_scope,
 )
 from ocbrain.text import (
@@ -453,6 +454,37 @@ def build_parser() -> argparse.ArgumentParser:
     scope_promote.add_argument("--reason")
     scope_promote.add_argument("--dry-run", action="store_true")
     scope_promote.set_defaults(func=cmd_scope_promote)
+
+    egress_promote = commands.add_parser(
+        "egress-promote",
+        help=(
+            "Lift current beliefs' egress to hosted delivery (never confidential/secret); "
+            "a human-attributable decision recorded as egress_promoted events"
+        ),
+    )
+    egress_promote.add_argument("belief_id", nargs="*", default=[])
+    egress_promote.add_argument(
+        "--to",
+        choices=("hosted_ok", "approval_required"),
+        default="hosted_ok",
+        help="target egress policy (default hosted_ok)",
+    )
+    egress_promote.add_argument(
+        "--scope-id",
+        help="promote every current belief in this scope_id (e.g. project:coframe-personalization)",
+    )
+    egress_promote.add_argument(
+        "--provenance",
+        help="with --scope-id, restrict the selection to this scope_provenance",
+    )
+    egress_promote.add_argument(
+        "--approved-by",
+        required=True,
+        help="the human accountable for lifting egress; recorded in the event",
+    )
+    egress_promote.add_argument("--reason", required=True)
+    egress_promote.add_argument("--dry-run", action="store_true")
+    egress_promote.set_defaults(func=cmd_egress_promote)
 
     forget = commands.add_parser("event-forget", help="Append a tombstone")
     forget.add_argument("--target", required=True)
@@ -1985,6 +2017,117 @@ def cmd_hosted_approve(args: argparse.Namespace) -> int:
         return exit_code
     finally:
         conn.close()
+
+
+def cmd_egress_promote(args: argparse.Namespace) -> int:
+    """Emit ``egress_promoted`` events: a human-attributable lift to hosted egress.
+
+    ``scope-promote`` widens *reach* and never egress; this is the separate,
+    human-only decision it deliberately refuses to make. The event changes
+    egress ONLY — scope, visibility, body, confidence, and evidence ride
+    through verbatim — and it refuses beliefs whose visibility is
+    ``confidential`` or ``secret``, which can never be ``hosted_ok`` (the same
+    rule ``curated-apply`` enforces; see
+    :func:`ocbrain.scope.hosted_egress_refusal_reason`). Refusals are reported,
+    never silently skipped.
+    """
+    conn = open_db(args)
+    if not is_core_v1(conn):
+        return compatibility_refusal(
+            args, "egress-promote", "egress promotion requires an event-authoritative v1 core"
+        )
+    belief_ids = list(dict.fromkeys(args.belief_id))
+    if args.scope_id:
+        clauses = ["scope_id=?", "status='current'"]
+        params: list[Any] = [args.scope_id]
+        if args.provenance:
+            clauses.append("scope_provenance=?")
+            params.append(args.provenance)
+        selected = conn.execute(
+            "SELECT belief_id FROM current_beliefs "
+            f"WHERE {' AND '.join(clauses)} ORDER BY belief_id",
+            params,
+        ).fetchall()
+        belief_ids.extend(str(row["belief_id"]) for row in selected)
+        belief_ids = list(dict.fromkeys(belief_ids))
+    if not belief_ids:
+        output(
+            args,
+            {
+                "action": "egress-promote",
+                "status": "no_beliefs_selected",
+                "promoted": [],
+                "unchanged": [],
+                "refused": [],
+            },
+        )
+        return 0
+
+    promoted: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    refused: list[dict[str, str]] = []
+    missing: list[str] = []
+    for belief_id in belief_ids:
+        belief = get_core_v1_belief(conn, belief_id)
+        if belief is None or belief.get("status") != "current":
+            missing.append(belief_id)
+            continue
+        scope = belief["scope"]
+        from_egress = str(scope["egress_policy"])
+        refusal = hosted_egress_refusal_reason(str(scope["visibility"]), args.to)
+        if refusal is not None:
+            refused.append({"belief_id": belief["canonical_id"], "reason": refusal})
+            continue
+        if from_egress == args.to:
+            unchanged.append(belief["canonical_id"])
+            continue
+        entry = {
+            "belief_id": belief["canonical_id"],
+            "from_egress": from_egress,
+            "to_egress": args.to,
+        }
+        if not args.dry_run:
+            entry["event_id"] = append_core_event(
+                conn,
+                "egress_promoted",
+                {
+                    "schema_version": "ocbrain.egress-promotion.v1",
+                    "subject": {"kind": "belief", "id": belief["canonical_id"]},
+                    "belief_id": belief["canonical_id"],
+                    # Audit history, not authority: the projector applies the
+                    # target policy to the belief's current scope and refuses
+                    # to touch anything else.
+                    "scope": {
+                        **scope,
+                        "egress_policy": args.to,
+                        "provenance": "egress_promoted",
+                    },
+                    "from_egress_policy": from_egress,
+                    "to_egress_policy": args.to,
+                    "approved_by": args.approved_by,
+                    "reason": args.reason,
+                },
+                writer="ocbrain-cli",
+                project=True,
+            )
+        promoted.append(entry)
+    if not args.dry_run:
+        conn.commit()
+    output(
+        args,
+        {
+            "action": "egress-promote",
+            "status": "planned" if args.dry_run else "applied",
+            "dry_run": bool(args.dry_run),
+            "approved_by": args.approved_by,
+            "promoted": promoted,
+            "unchanged": unchanged,
+            "refused": refused,
+            "missing": missing,
+            "counts": v1_counts(conn),
+        },
+    )
+    return 0
 
 
 def cmd_event_proposals(args: argparse.Namespace) -> int:

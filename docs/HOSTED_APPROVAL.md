@@ -14,6 +14,23 @@ write can never reach hosted-model delivery.** It can only narrow, or ask.
 
 Before this change, "ask" was informal. Now it is an event.
 
+## Two verbs
+
+Two human-gated verbs now move material toward hosted delivery, for two
+different shapes of pending work:
+
+- **`egress-promote`** lifts a belief that is **already compiled**: it selects
+  current beliefs (by id, or in bulk with `--scope-id … [--provenance P]`) and
+  writes one `egress_promoted` event per belief — egress only, scope and body
+  untouched, refusing confidential/secret exactly like `curated-apply`
+  (added 2026-09-04).
+- **`hosted-approve`** compiles **evidence that has no belief yet** through the
+  approved-compile path documented below.
+
+The daily loop for new evidence is `hosted-queue` → `hosted-approve`.
+`egress-promote --scope-id …` is for bulk lifts of curated beliefs that are
+already compiled and known-safe.
+
 ## The verbs (CLI-only)
 
     ocbrain hosted-queue [--project PROJECT] [--writer WRITER] [--since ISO] [--limit N] [--pretty]

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Add `ocbrain egress-promote`: a human-attributable way to lift a current
+  belief's egress to `hosted_ok` (or `approval_required`). Every automated
+  writer hardcodes `local_only` — correctly — but nothing could then lift a
+  belief for hosted delivery except re-authoring it through a curated manifest,
+  so a real brain held 355 local_only beliefs a hosted model could not see and
+  4 it could. The new `egress_promoted` event (the replay/rebuild twin of
+  `scope_promoted`, enforced in the projection, not just the CLI) changes
+  egress only — scope, visibility, body, confidence, evidence, and `serve` ride
+  through verbatim, with `scope_provenance='egress_promoted'` recording the
+  lift — and it refuses beliefs whose visibility is `confidential` or `secret`
+  through the same predicate `curated-apply` uses, reported rather than
+  silently skipped. Select beliefs by id, or by `--scope-id` (optionally
+  filtered by `--provenance`); `--dry-run` writes nothing.
+
 - Stop the pending supersede ledger growing without bound. The first unattended
   night gave it producers and no consumer: the per-caller rate cap
   (`supersede.direct_cap`, default 8/24h) is sized for a runtime agent, so past
