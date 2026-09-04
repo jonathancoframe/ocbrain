@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -43,6 +44,7 @@ from ocbrain.core_v1 import (
     is_core_v1,
     migrate_core_v1_columns,
     record_core_v1_evidence,
+    resolve_object_id,
 )
 from ocbrain.curation import apply_curated_manifest
 from ocbrain.curator import PROVIDER_DEFAULTS, resolve_selection_policy
@@ -113,6 +115,7 @@ from ocbrain.scope import (
     SCOPE_TYPES,
     ScopeContext,
     ScopeTag,
+    fold_scope_component,
     global_scope,
     hosted_egress_refusal_reason,
     resolve_write_scope,
@@ -505,6 +508,43 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--edited-body")
     decide.add_argument("--reason")
     decide.set_defaults(func=cmd_event_decide)
+    hosted_queue = commands.add_parser(
+        "hosted-queue",
+        help="List approval_required evidence eligible for hosted approval (read-only)",
+    )
+    hosted_queue.add_argument("--project", help="limit to evidence scoped project:PROJECT")
+    hosted_queue.add_argument("--writer", help="limit to evidence recorded by this writer")
+    hosted_queue.add_argument("--since", help="limit to rows recorded at or after this ISO ts")
+    hosted_queue.add_argument("--limit", type=int, default=200)
+    hosted_queue.set_defaults(func=cmd_hosted_queue)
+    hosted_approve = commands.add_parser(
+        "hosted-approve",
+        help="Promote approval_required evidence to hosted_ok beliefs (human-gated, CLI-only)",
+    )
+    hosted_approve.add_argument(
+        "evidence_id",
+        nargs="*",
+        help="evidence id(s) to approve; or use --all-from-queue",
+    )
+    hosted_approve.add_argument(
+        "--approved-by",
+        required=True,
+        help="the human deciding this, spelled human:NAME (recorded as the decision actor)",
+    )
+    hosted_approve.add_argument("--reason", help="why this promotion is approved")
+    hosted_approve.add_argument(
+        "--all-from-queue",
+        action="store_true",
+        help="select every evidence row the hosted-queue would list under the given filters",
+    )
+    hosted_approve.add_argument("--project", help="target project scope for the compiled beliefs")
+    hosted_approve.add_argument("--writer", help="queue filter: writer")
+    hosted_approve.add_argument("--since", help="queue filter: recorded at or after this ISO ts")
+    hosted_approve.add_argument("--limit", type=int, default=200)
+    hosted_approve.add_argument(
+        "--dry-run", action="store_true", help="report what would be approved; write nothing"
+    )
+    hosted_approve.set_defaults(func=cmd_hosted_approve)
     event_digest = commands.add_parser("event-digest", help="Show scoped current event state")
     add_context_args(event_digest)
     event_digest.add_argument("--since-ts")
@@ -1568,6 +1608,415 @@ def cmd_scope_promote(args: argparse.Namespace) -> int:
         },
     )
     return 0
+
+
+# Hosted approval is the human-gated bridge between "this evidence may not
+# reach a hosted model without a decision" and "this belief may". The verbs are
+# CLI-only on purpose: nothing in the MCP runtime or admin catalogue can stamp
+# an egress policy, so an unattended write can never reach hosted-model
+# delivery — it can only ask (a hosted_egress_proposal) or stay narrowed.
+HOSTED_QUEUE_SCHEMA_VERSION = "ocbrain.hosted-queue.v1"
+HOSTED_APPROVAL_PROPOSAL_SCHEMA = "ocbrain.compilation.v1"
+HOSTED_APPROVAL_CONFIDENCE = 0.8
+HOSTED_QUEUE_HEAD_CHARS = 120
+# The approval is worth nothing if an agent can type it. `human:NAME` is the
+# same spelling scope-promote's `--approved-by` and event-forget use.
+_HOSTED_APPROVED_BY_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+_HOSTED_QUEUE_EVIDENCE_SQL = """
+SELECT e.evidence_id, e.kind, e.body, e.body_head, e.scope_type, e.scope_id,
+       e.visibility, e.egress_policy, e.recorded_at, e.source_runtime AS writer
+FROM evidence_objects AS e
+WHERE e.egress_policy = 'approval_required'
+  AND e.visibility NOT IN ('confidential', 'secret')
+  AND NOT EXISTS (
+    SELECT 1 FROM belief_evidence AS be
+    JOIN current_beliefs AS cb ON cb.belief_id = be.belief_id
+    WHERE be.evidence_id = e.evidence_id AND cb.status = 'current'
+  )
+{filters}
+ORDER BY e.recorded_at DESC
+LIMIT ?
+"""
+
+# A widening request is pending for exactly as long as the evidence it names is
+# still uncompiled: once a human-approved path compiles it, the request has
+# been answered and drops out of the queue on its own.
+_HOSTED_QUEUE_PROPOSAL_SQL = """
+SELECT p.id, p.ts, p.writer, p.body_json
+FROM brain_events AS p
+WHERE p.kind = 'hosted_egress_proposal'
+  AND NOT EXISTS (
+    SELECT 1 FROM belief_evidence AS be
+    JOIN current_beliefs AS cb ON cb.belief_id = be.belief_id
+    WHERE be.evidence_id = json_extract(p.body_json, '$.evidence_id')
+      AND cb.status = 'current'
+  )
+{filters}
+ORDER BY p.rowid DESC
+LIMIT ?
+"""
+
+
+def _hosted_queue_filters(args: argparse.Namespace) -> dict[str, str | None]:
+    return {
+        "project": getattr(args, "project", None),
+        "writer": getattr(args, "writer", None),
+        "since": getattr(args, "since", None),
+    }
+
+
+def _hosted_queue_rows(
+    conn,
+    *,
+    project: str | None = None,
+    writer: str | None = None,
+    since: str | None = None,
+    limit: int = 200,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Eligible evidence rows plus pending widening proposals. Reads only."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project:
+        folded = fold_scope_component(project) or str(project)
+        clauses.append("AND e.scope_type='project' AND e.scope_id=?")
+        params.append(f"project:{folded}")
+    if writer:
+        clauses.append("AND e.source_runtime=?")
+        params.append(str(writer))
+    if since:
+        clauses.append("AND e.recorded_at>=?")
+        params.append(str(since))
+    evidence_rows = [
+        dict(row)
+        for row in conn.execute(
+            _HOSTED_QUEUE_EVIDENCE_SQL.format(filters=" ".join(clauses)),
+            (*params, max(1, limit)),
+        )
+    ]
+    proposal_clauses: list[str] = []
+    proposal_params: list[Any] = []
+    if project:
+        folded = fold_scope_component(project) or str(project)
+        proposal_clauses.append(
+            "AND json_extract(p.body_json, '$.requested_scope.scope_id')=?"
+        )
+        proposal_params.append(f"project:{folded}")
+    if writer:
+        proposal_clauses.append("AND p.writer=?")
+        proposal_params.append(str(writer))
+    if since:
+        proposal_clauses.append("AND p.ts>=?")
+        proposal_params.append(str(since))
+    proposal_rows = []
+    for row in conn.execute(
+        _HOSTED_QUEUE_PROPOSAL_SQL.format(filters=" ".join(proposal_clauses)),
+        (*proposal_params, max(1, limit)),
+    ):
+        body = json.loads(row["body_json"])
+        proposal_rows.append(
+            {
+                "proposal_event_id": str(row["id"]),
+                "ts": str(row["ts"]),
+                "evidence_id": str(body.get("evidence_id")),
+                "writer": str(row["writer"]),
+                "requested_scope": body.get("requested_scope"),
+                "inferred_scope": body.get("inferred_scope"),
+                "body_head": body.get("body_head"),
+            }
+        )
+    return evidence_rows, proposal_rows
+
+
+def _hosted_head(text: str | None, limit: int = HOSTED_QUEUE_HEAD_CHARS) -> str:
+    value = compact_whitespace(str(text or ""))
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _hosted_entry(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "evidence_id": str(row["evidence_id"]),
+        "kind": str(row["kind"]),
+        "writer": str(row["writer"] or ""),
+        "scope_id": str(row["scope_id"]),
+        "recorded_at": str(row["recorded_at"]),
+        "body_head": _hosted_head(row["body_head"] or row["body"]),
+    }
+
+
+def _evidence_has_current_belief(conn, evidence_id: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM belief_evidence AS be "
+            "JOIN current_beliefs AS cb ON cb.belief_id = be.belief_id "
+            "WHERE be.evidence_id=? AND cb.status='current' LIMIT 1",
+            (evidence_id,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _hosted_target_scope(project: str | None, row: dict[str, Any]) -> ScopeTag:
+    """The project scope the approved belief lands in, hosted-safe by decree.
+
+    Only a human CLI decision reaches this point, so this is the single place
+    an `approval_required` row is allowed to become `hosted_ok`. When no
+    project is derivable the belief keeps the evidence's own scope: reach
+    never widens past what the row already had.
+    """
+    if project:
+        folded = fold_scope_component(project) or str(project)
+        return ScopeTag(
+            "project",
+            f"project:{folded}",
+            visibility="internal",
+            egress_policy="hosted_ok",
+            provenance="human_approved_hosted",
+        )
+    scope_type = str(row["scope_type"])
+    return ScopeTag(
+        scope_type,
+        str(row["scope_id"]),
+        visibility="internal",
+        egress_policy="hosted_ok",
+        provenance="human_approved_hosted",
+    )
+
+
+def _hosted_approve_one(
+    conn,
+    *,
+    evidence_id: str,
+    approved_by: str,
+    reason: str | None,
+    project: str | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    canonical = resolve_object_id(conn, evidence_id)
+
+    def refused(rsn: str, detail: str | None = None) -> dict[str, Any]:
+        entry: dict[str, Any] = {"evidence_id": evidence_id, "status": "refused", "reason": rsn}
+        if detail:
+            entry["detail"] = detail
+        return entry
+
+    row = conn.execute(
+        "SELECT evidence_id, kind, body, body_head, scope_type, scope_id, visibility, "
+        "egress_policy, recorded_at FROM evidence_objects WHERE evidence_id=?",
+        (canonical,),
+    ).fetchone()
+    if row is None:
+        return refused("not_found", f"no evidence row: {canonical}")
+    if str(row["visibility"]) in {"confidential", "secret"}:
+        return refused(
+            f"visibility_{row['visibility']}",
+            "hosted approval refuses confidential and secret evidence",
+        )
+    if str(row["egress_policy"]) != "approval_required":
+        return refused(
+            "egress_not_approval_required",
+            f"current egress policy is {row['egress_policy']}",
+        )
+    if _evidence_has_current_belief(conn, canonical):
+        return refused("already_compiled", "a current belief already covers this evidence")
+    if str(row["scope_type"]) == "client" and not project:
+        return refused(
+            "client_scope_requires_project",
+            "pass --project to name the project this client evidence may serve",
+        )
+    body_text = compact_whitespace(str(row["body"] or row["body_head"] or ""))
+    leaks = find_probable_secret_leaks(body_text)
+    if leaks:
+        return refused(
+            "secret_leak_body",
+            f"body trips the public-safety scanner: {', '.join(leaks)}",
+        )
+    target = _hosted_target_scope(project, dict(row))
+    belief_id = stable_id("belief", body_text, target.scope_id)
+    if dry_run:
+        return {
+            "evidence_id": canonical,
+            "status": "planned",
+            "belief_id": belief_id,
+            "scope": target.to_dict(),
+        }
+    attributes: dict[str, Any] = {"approved_by": approved_by}
+    if reason:
+        attributes["approval_reason"] = reason
+    proposal_event_id = append_core_event(
+        conn,
+        "compilation_proposed",
+        {
+            "schema_version": HOSTED_APPROVAL_PROPOSAL_SCHEMA,
+            "subject": {"kind": "belief", "id": belief_id},
+            "belief_id": belief_id,
+            "body": body_text,
+            "evidence_ids": [canonical],
+            "scope": target.to_dict(),
+            "confidence": HOSTED_APPROVAL_CONFIDENCE,
+            "attributes": attributes,
+        },
+        writer="ocbrain-cli",
+    )
+    decision = decide_proposal_v1(
+        conn,
+        proposal_event_id=proposal_event_id,
+        decision="approve",
+        actor=approved_by,
+        edited_body=None,
+        reason=reason or "hosted approval queue",
+    )
+    return {
+        "evidence_id": canonical,
+        "status": "approved",
+        "belief_id": belief_id,
+        "proposal_event_id": proposal_event_id,
+        "decision_event_id": decision["event_id"],
+        "scope": target.to_dict(),
+    }
+
+
+def cmd_hosted_queue(args: argparse.Namespace) -> int:
+    """List approval_required evidence and pending widening requests (read-only).
+
+    Opens the core without migrating or committing anything: this verb must be
+    safe to point at the live operator database between other people's writes.
+    """
+    conn = connect(args.db)
+    try:
+        if not is_core_v1(conn):
+            return compatibility_refusal(
+                args, "hosted-queue", "hosted approval requires an event-authoritative v1 core"
+            )
+        evidence_rows, proposal_rows = _hosted_queue_rows(
+            conn,
+            project=args.project,
+            writer=args.writer,
+            since=args.since,
+            limit=args.limit,
+        )
+        output(
+            args,
+            {
+                "action": "hosted-queue",
+                "schema_version": HOSTED_QUEUE_SCHEMA_VERSION,
+                "count": len(evidence_rows),
+                "proposal_count": len(proposal_rows),
+                "queue": [_hosted_entry(row) for row in evidence_rows],
+                "proposals": [
+                    {**row, "body_head": _hosted_head(row.get("body_head"))}
+                    for row in proposal_rows
+                ],
+                "filters": _hosted_queue_filters(args),
+            },
+        )
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_hosted_approve(args: argparse.Namespace) -> int:
+    """Promote queued evidence to hosted_ok beliefs through the approved-compile path.
+
+    Every compiled belief is minted by the same proposal + decide events
+    `event-compile --approve` writes, with the decision's actor recorded as the
+    `--approved-by human:NAME` value. Confidential and secret rows are refused
+    outright; `--dry-run` runs the full eligibility gauntlet and writes nothing.
+    """
+    conn = connect(args.db)
+    try:
+        if not is_core_v1(conn):
+            return compatibility_refusal(
+                args, "hosted-approve", "hosted approval requires an event-authoritative v1 core"
+            )
+        approved_by = str(args.approved_by or "").strip()
+        if not _HOSTED_APPROVED_BY_RE.match(approved_by):
+            output(
+                args,
+                {
+                    "action": "hosted-approve",
+                    "status": "blocked",
+                    "reason": "invalid_approved_by",
+                    "detail": "--approved-by must spell the deciding human as human:NAME",
+                },
+            )
+            return 2
+        selected = [str(item) for item in args.evidence_id]
+        if args.all_from_queue:
+            evidence_rows, _proposals = _hosted_queue_rows(
+                conn,
+                project=args.project,
+                writer=args.writer,
+                since=args.since,
+                limit=args.limit,
+            )
+            selected.extend(str(row["evidence_id"]) for row in evidence_rows)
+        selected = list(dict.fromkeys(selected))
+        if not selected:
+            if args.all_from_queue:
+                output(
+                    args,
+                    {
+                        "action": "hosted-approve",
+                        "status": "nothing_queued",
+                        "dry_run": bool(args.dry_run),
+                        "approved_by": approved_by,
+                        "approved": [],
+                        "refused": [],
+                        "counts": v1_counts(conn),
+                    },
+                )
+                return 0
+            output(
+                args,
+                {
+                    "action": "hosted-approve",
+                    "status": "blocked",
+                    "reason": "no_evidence_selected",
+                    "detail": "pass evidence id(s) or --all-from-queue",
+                },
+            )
+            return 2
+        approved: list[dict[str, Any]] = []
+        refused: list[dict[str, Any]] = []
+        for evidence_id in selected:
+            outcome = _hosted_approve_one(
+                conn,
+                evidence_id=evidence_id,
+                approved_by=approved_by,
+                reason=args.reason,
+                project=args.project,
+                dry_run=bool(args.dry_run),
+            )
+            if outcome["status"] == "refused":
+                refused.append(outcome)
+            else:
+                approved.append(outcome)
+        if not args.dry_run:
+            conn.commit()
+        if approved:
+            status = "planned" if args.dry_run else "applied"
+            exit_code = 0
+        else:
+            status = "blocked"
+            exit_code = 2
+        output(
+            args,
+            {
+                "action": "hosted-approve",
+                "status": status,
+                "dry_run": bool(args.dry_run),
+                "approved_by": approved_by,
+                "approved": approved,
+                "refused": refused,
+                "counts": v1_counts(conn),
+            },
+        )
+        return exit_code
+    finally:
+        conn.close()
 
 
 def cmd_egress_promote(args: argparse.Namespace) -> int:

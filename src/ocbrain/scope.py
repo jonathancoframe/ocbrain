@@ -436,6 +436,44 @@ def resolve_write_scope(
     return legacy_unscoped_scope()
 
 
+# How far a scope family travels by default, narrowest first. The ordering mirrors
+# the narrowest-known precedence in :func:`resolve_write_scope` — a task write is
+# narrower than a session write, a session narrower than a repo, then client,
+# then project, and global doctrine travels everywhere — with
+# ``legacy_unscoped`` pinned to zero reach because it is quarantined, not shared.
+# This ladder is a write-time comparison only: it decides whether a client's
+# explicitly requested scope is a narrowing (honor it) or a widening (propose it),
+# and never feeds retrieval or delivery, which have their own gates.
+SCOPE_FAMILY_WIDTH = {
+    "legacy_unscoped": 0,
+    "task": 1,
+    "session": 2,
+    "repo": 3,
+    "client": 4,
+    "project": 5,
+    "global": 6,
+}
+VISIBILITY_WIDTH = {"secret": 0, "confidential": 1, "internal": 2}
+EGRESS_WIDTH = {"prohibited": 0, "local_only": 1, "approval_required": 2, "hosted_ok": 3}
+
+
+def scope_narrows_or_equals(requested: ScopeTag, inferred: ScopeTag) -> bool:
+    """Whether an explicitly requested write scope narrows the inferred one.
+
+    Three ladders must all be at-most: the scope family no wider, the visibility
+    no more visible, and the egress policy no more permissive. Equal scope counts
+    as narrowing. Anything the caller asks beyond that is a widening request, and
+    widenings are proposed, never applied unattended.
+    """
+    if SCOPE_FAMILY_WIDTH[requested.scope_type] > SCOPE_FAMILY_WIDTH[inferred.scope_type]:
+        return False
+    if VISIBILITY_WIDTH[requested.visibility] > VISIBILITY_WIDTH[inferred.visibility]:
+        return False
+    if EGRESS_WIDTH[requested.egress_policy] > EGRESS_WIDTH[inferred.egress_policy]:
+        return False
+    return True
+
+
 # Ranking affinities for local delivery. In-scope material outranks everything
 # else by a wide margin; neighbouring scopes sit in the tail rather than being
 # discarded. Measured over 250 replayed queries, cross-scope rows take 3.2% of

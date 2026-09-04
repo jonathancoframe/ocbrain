@@ -23,6 +23,13 @@ EVENT_KINDS = {
     "correction_recorded",
     "tombstone_recorded",
     "scope_promoted",
+    # A client asked brain.ingest for MORE egress or reach than the inferred
+    # write scope allows. The evidence is stored under the inferred scope; this
+    # event records the request so a human can act on it through the
+    # hosted-approval queue. Nothing folds it into a projection.
+    "hosted_egress_proposal",
+    # egress-promote lifted an existing current belief's egress to
+    # hosted_ok (or back), with human attribution.
     "egress_promoted",
 }
 DECISIONS = ("approve", "reject", "edit", "shadow")

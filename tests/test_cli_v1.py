@@ -75,6 +75,9 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
     # Covered in tests/test_scope_promote_cli.py, including the projection
     # rebuild and the egress boundary.
     scope_acceptance = {"scope-promote"}
+    # Covered in tests/test_hosted_queue.py, including the read-only queue, the
+    # human-gated approval gauntlet, and the CLI-only catalog boundary.
+    hosted_approval_acceptance = {"hosted-queue", "hosted-approve"}
     # Covered in tests/test_egress_promote_cli.py, including the dry run, the
     # confidential refusal, the rebuild, and the hosted-serving flip.
     egress_acceptance = {"egress-promote"}
@@ -96,6 +99,7 @@ def test_every_advertised_core_command_has_a_v1_acceptance_route() -> None:
         | curated_and_vector_acceptance
         | hygiene_acceptance
         | scope_acceptance
+        | hosted_approval_acceptance
         | egress_acceptance
         | repo_guard_acceptance
         | selftest_acceptance
