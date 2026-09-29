@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ocbrain.closeout import record_closeout
 from ocbrain.core_v1 import (
@@ -1182,7 +1182,7 @@ def test_v1_stdio_delivery_target_is_selectable(tmp_path, monkeypatch):
 
 def test_v1_context_accepts_as_of_and_rejects_non_iso(tmp_path):
     conn = _seed_v1(tmp_path)
-    as_of = datetime.now(timezone.utc) + timedelta(days=1)
+    as_of = datetime.now(UTC) + timedelta(days=1)
     arguments = {
         "query": "Shared Context bridge runtimes",
         "context": {"project": "ocbrain", "runtime": "codex", "task": "v1-acceptance"},
